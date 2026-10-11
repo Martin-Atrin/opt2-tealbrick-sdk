@@ -1,0 +1,97 @@
+// Test manifest fixture (trimmed from the spec example; not a product).
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+
+export function fixtureManifest(port: number): Manifest {
+  return {
+    schema: "tealbrick.miniapp/2",
+    id: "jotter",
+    name: "Jotter",
+    summary: "Test fixture: notebooks agents can write to.",
+    version: "1.0.0",
+    sdkMajor: 1,
+    publisher: { name: "Example Org" },
+    source: { repo: "https://github.com/example-org/jotter", license: "MIT" },
+    icon: { svgPath: "M5 3h11l3 3v15H5z" },
+    discovery: { category: "productivity", intents: ["take notes"] },
+    runtime: {
+      build: { context: ".", dockerfile: "Dockerfile" },
+      port,
+      resources: { cpu: 0.5, memoryMb: 512 },
+      volumes: [
+        { id: "data", mountPath: "/data", sizeGb: 1, purpose: "data" },
+        { id: "backup", mountPath: "/backup", sizeGb: 1, purpose: "backup" },
+      ],
+    },
+    operations: [
+      {
+        id: "note_create",
+        title: "Create note",
+        description: "Create a note in a notebook.",
+        input: { type: "object", additionalProperties: false, required: ["notebook", "title"], properties: { notebook: { type: "string" }, title: { type: "string" } } },
+        output: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+        crud: ["create"],
+        effect: "write",
+        scopeType: "notebook",
+        idempotency: "required",
+        receipt: true,
+        audience: "agent",
+      },
+      {
+        id: "note_get",
+        title: "Get note",
+        description: "Read one note.",
+        input: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+        output: { type: "object" },
+        crud: ["read"],
+        effect: "read",
+        idempotency: "none",
+        receipt: false,
+        audience: "agent",
+      },
+      {
+        id: "note_delete",
+        title: "Delete note",
+        description: "Delete a note permanently.",
+        input: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+        output: { type: "object" },
+        crud: ["delete"],
+        effect: "destructive",
+        holdFamily: "destructive",
+        idempotency: "supported",
+        receipt: true,
+        audience: "agent",
+      },
+      {
+        id: "notebook_rename",
+        title: "Rename notebook",
+        description: "Rename a notebook (owner only).",
+        input: { type: "object", required: ["notebook", "label"], properties: { notebook: { type: "string" }, label: { type: "string" } } },
+        output: { type: "object" },
+        crud: ["update"],
+        effect: "write",
+        idempotency: "supported",
+        receipt: false,
+        audience: "person",
+      },
+    ],
+    scopes: [
+      {
+        type: "notebook",
+        label: "Notebook",
+        labelPlural: "Notebooks",
+        access: [
+          { id: "read", label: "Read", crud: ["read"] },
+          { id: "read_write", label: "Read and write", crud: ["read", "create", "update", "delete"] },
+        ],
+        defaultGrants: [{ kind: "own", access: "read_write" }],
+        summaryTemplate: "{count} {labelPlural} ({access.read_write} write)",
+      },
+    ],
+    settings: {
+      steps: [],
+      keys: [{ name: "DEMO_API_KEY", label: "Demo API key", provider: "Demo", required: false, source: "app_own", usedBy: ["app"] }],
+    },
+    backups: { schedule: "17 3 * * *", retain: 3 },
+    ui: { launchPath: "/", configurePath: "/configure" },
+  };
+}

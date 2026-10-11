@@ -12,6 +12,22 @@ importers:
         specifier: 2.5.15
         version: 2.5.15
 
+  packages/conformance:
+    dependencies:
+      '@opt2-tealbrick/manifest':
+        specifier: workspace:*
+        version: link:../manifest
+      '@opt2-tealbrick/spec':
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   packages/manifest:
     dependencies:
       '@opt2-tealbrick/spec':
