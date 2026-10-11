@@ -88,8 +88,12 @@ export async function tbFetch(path: string, init: RequestInit = {}): Promise<Res
 }
 
 /** Person op via POST /a/<product>/tb/v1/ops/:op (body `{ input }`); returns the op output. */
-export async function callOp<O = Json>(op: string, input: Json): Promise<O> {
-  const res = await tbFetch(`tb/v1/ops/${encodeURIComponent(op)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input }) });
+/** C41: `opts.idempotencyKey` (1–128 chars `[A-Za-z0-9._:-]`, SDK-API §4.4) is sent as body field `idempotencyKey`. */
+export async function callOp<O = Json>(op: string, input: Json, opts?: { idempotencyKey?: string }): Promise<O> {
+  const key = opts?.idempotencyKey;
+  if (key !== undefined && !/^[A-Za-z0-9._:-]{1,128}$/.test(key)) throw new TbError("idempotency_key_invalid", "idempotencyKey must be 1-128 chars [A-Za-z0-9._:-]", 400);
+  const body = key === undefined ? { input } : { input, idempotencyKey: key };
+  const res = await tbFetch(`tb/v1/ops/${encodeURIComponent(op)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const r = (await res.json()) as OpResult<O>;
   if (r?.status === "ok") return r.output as O;
   throw new TbError("op_not_completed", `operation ${op} did not complete (status ${String((r as { status?: unknown })?.status)})`, 502);

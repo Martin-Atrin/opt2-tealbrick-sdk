@@ -113,6 +113,16 @@ describe("callOp", () => {
     assert.deepEqual(JSON.parse(post?.body ?? ""), { input: { notebook: "n1", label: "Work" } });
   });
 
+  test("C41: idempotencyKey option is sent as body field; invalid key refused before any request", async () => {
+    setProduct("jotter");
+    handler = (c) => (c.url.endsWith("/session") ? json(200, { principal, csrf: "t" }) : json(200, { status: "ok", output: { ok: true } }));
+    await callOp("item_create", { title: "a" }, { idempotencyKey: "k-1:abc" });
+    assert.deepEqual(JSON.parse(calls.at(-1)?.body ?? ""), { input: { title: "a" }, idempotencyKey: "k-1:abc" });
+    const before = calls.length;
+    await assert.rejects(callOp("item_create", {}, { idempotencyKey: "bad key!" }), (e: unknown) => e instanceof TbError && e.code === "idempotency_key_invalid");
+    assert.equal(calls.length, before);
+  });
+
   test("a refusal envelope throws its code; a non-ok result throws op_not_completed", async () => {
     setProduct("jotter");
     handler = (c) => (c.url.endsWith("/session") ? json(200, { principal, csrf: "t" }) : json(403, { error: { code: "csrf_invalid", message: "bad", requestId: "r" } }));
