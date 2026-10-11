@@ -1,0 +1,15 @@
+{
+  "name": "opt2-tealbrick-sdk",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "biome check .",
+    "test": "pnpm -r run test",
+    "conformance": "pnpm -r --if-present run conformance",
+    "build": "pnpm -r run build"
+  },
+  "devDependencies": { "@biomejs/biome": "2.5.15" }
+}
