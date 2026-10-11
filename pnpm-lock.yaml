@@ -28,6 +28,19 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  packages/create-tealbrick-miniapp:
+    dependencies:
+      '@opt2-tealbrick/manifest':
+        specifier: workspace:*
+        version: link:../manifest
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   packages/manifest:
     dependencies:
       '@opt2-tealbrick/spec':

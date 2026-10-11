@@ -1,0 +1,63 @@
+// Report shape (CONFORMANCE §6) and the pending targets.
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { BRIDGE_CHECKS, buildReport, CORE_CHECKS, exitCode, renderMarkdown, runPendingTarget, Suite, specDigest } from "../src/index.ts";
+
+describe("report", () => {
+  it("passes only when every check passes or is not_applicable", async () => {
+    const s = new Suite();
+    await s.run("X1", "a", "e", () => ({ pass: true, asserted: "ok" }));
+    s.record("X2", "b", "e", { status: "not_applicable", asserted: "nothing to test" });
+    const r = buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: s.results });
+    assert.equal(r.ok, true);
+    assert.equal(exitCode(r), 0);
+    assert.deepEqual(r.counts, { pass: 1, fail: 0, not_applicable: 1, not_run: 0, not_implemented: 0 });
+  });
+
+  for (const status of ["fail", "not_run", "not_implemented"] as const) {
+    it(`a ${status} check fails the run`, () => {
+      const s = new Suite();
+      s.record("X1", "a", "e", { pass: true, asserted: "ok" });
+      s.record("X2", "b", "e", { status, asserted: "why" });
+      const r = buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: s.results });
+      assert.equal(r.ok, false);
+      assert.equal(exitCode(r), 1);
+    });
+  }
+
+  it("a payload finding or an empty check list fails the run", () => {
+    const s = new Suite();
+    s.record("X1", "a", "e", { pass: true, asserted: "ok" });
+    assert.equal(buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: s.results, payloadScan: { payloads: 1, patterns: [], findings: ["x: ticket"] } }).ok, false);
+    assert.equal(buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: [] }).ok, false);
+  });
+
+  it("a throwing check is recorded as fail with the error", async () => {
+    const s = new Suite();
+    await s.run("X1", "a", "e", () => {
+      throw new Error("boom");
+    });
+    assert.equal(s.results[0].status, "fail");
+    assert.match(s.results[0].asserted, /boom/);
+  });
+
+  it("markdown lists every id, the verdict and the not-release-evidence line; spec digest is stable", () => {
+    const s = new Suite();
+    s.record("A1", "claim", "claimed", { pass: false, asserted: "no | claim" });
+    const md = renderMarkdown(buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: s.results, notes: ["n1"] }));
+    assert.match(md, /\*\*FAIL\*\*/);
+    assert.match(md, /\| A1 claim \| fail \| no \\\| claim \|/);
+    assert.match(md, /NOT release evidence/);
+    assert.equal(specDigest(), specDigest());
+  });
+
+  it("bridge and core targets report every catalogued id as not_implemented and fail", () => {
+    const b = runPendingTarget("bridge", "http://x");
+    assert.equal(b.checks.length, BRIDGE_CHECKS.length);
+    assert.ok(b.checks.every((c) => c.status === "not_implemented"));
+    assert.equal(b.ok, false);
+    const c = runPendingTarget("core", "http://x");
+    assert.equal(c.checks.length, CORE_CHECKS.length);
+    assert.equal(exitCode(c), 1);
+  });
+});

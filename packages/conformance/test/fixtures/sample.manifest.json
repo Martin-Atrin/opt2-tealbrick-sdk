@@ -1,0 +1,123 @@
+{
+  "schema": "tealbrick.miniapp/2",
+  "id": "conf-sample",
+  "name": "Conformance Sample",
+  "summary": "Test fixture for the conformance suite: spaces with items agents can read and write.",
+  "version": "1.0.0",
+  "sdkMajor": 1,
+  "publisher": { "name": "Example Org" },
+  "source": { "repo": "https://github.com/example-org/conf-sample", "license": "MIT" },
+  "icon": { "svgPath": "M5 3h11l3 3v15H5z" },
+  "discovery": { "category": "developer", "intents": ["store items for agents"] },
+  "runtime": {
+    "build": { "context": ".", "dockerfile": "Dockerfile" },
+    "port": 8080,
+    "resources": { "cpu": 0.5, "memoryMb": 256 },
+    "volumes": [
+      { "id": "data", "mountPath": "/data", "sizeGb": 1, "purpose": "data" },
+      { "id": "backup", "mountPath": "/backup", "sizeGb": 1, "purpose": "backup" }
+    ],
+    "env": [{ "name": "SAMPLE_MODE", "setting": "mode" }]
+  },
+  "operations": [
+    {
+      "id": "item_create",
+      "title": "Create item",
+      "description": "Create an item in a space.",
+      "input": { "type": "object", "additionalProperties": false, "required": ["space", "title"], "properties": { "space": { "type": "string" }, "title": { "type": "string", "maxLength": 200 }, "note": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["create"],
+      "effect": "write",
+      "scopeType": "space",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
+      "id": "item_get",
+      "title": "Get item",
+      "description": "Read one item.",
+      "input": { "type": "object", "required": ["space", "id"], "properties": { "space": { "type": "string" }, "id": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["read"],
+      "effect": "read",
+      "scopeType": "space",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "item_delete",
+      "title": "Delete item",
+      "description": "Delete an item permanently.",
+      "input": { "type": "object", "required": ["space", "id"], "properties": { "space": { "type": "string" }, "id": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["delete"],
+      "effect": "destructive",
+      "holdFamily": "destructive",
+      "scopeType": "space",
+      "idempotency": "supported",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
+      "id": "item_buy",
+      "title": "Buy item",
+      "description": "Spend money on an item.",
+      "input": { "type": "object", "required": ["space", "sku"], "properties": { "space": { "type": "string" }, "sku": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["create"],
+      "effect": "money",
+      "holdFamily": "money",
+      "scopeType": "space",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
+      "id": "space_rename",
+      "title": "Rename space",
+      "description": "Rename a space (owner only).",
+      "input": { "type": "object", "required": ["space", "label"], "properties": { "space": { "type": "string" }, "label": { "type": "string" } } },
+      "output": { "type": "object" },
+      "crud": ["update"],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": false,
+      "audience": "person"
+    }
+  ],
+  "scopes": [
+    {
+      "type": "space",
+      "label": "Space",
+      "labelPlural": "Spaces",
+      "access": [
+        { "id": "read", "label": "Read", "crud": ["read"] },
+        { "id": "read_write", "label": "Read and write", "crud": ["read", "create", "update", "delete"] }
+      ],
+      "defaultGrants": [{ "kind": "own", "access": "read_write" }],
+      "summaryTemplate": "{count} {labelPlural}"
+    }
+  ],
+  "settings": {
+    "steps": [
+      {
+        "id": "basics",
+        "title": "Setup",
+        "fields": [
+          { "key": "mode", "type": "enum", "label": "Mode", "default": "simple", "choices": [{ "value": "simple", "label": "Simple" }, { "value": "full", "label": "Full" }] }
+        ]
+      }
+    ],
+    "keys": [
+      { "name": "SAMPLE_API_KEY", "label": "Sample API key", "provider": "Example", "required": false, "source": "account_default", "usedBy": ["app"] }
+    ]
+  },
+  "hooks": [
+    { "id": "guard", "title": "Guard item creation", "phase": "before", "order": 100, "match": { "products": ["conf-sample"], "operations": ["item_create"] }, "timeoutMs": 500 }
+  ],
+  "companions": [{ "product": "conf-peer", "operations": ["peer_get"], "crud": ["read"], "purpose": "Read peer records" }],
+  "backups": { "schedule": "0 3 * * *", "retain": 7 },
+  "ui": { "launchPath": "/", "configurePath": "/configure" }
+}

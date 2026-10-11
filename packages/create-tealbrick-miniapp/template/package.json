@@ -1,0 +1,35 @@
+{
+  "name": "opt2-tealbrick-__APP_ID__",
+  "version": "0.1.0",
+  "private": true,
+  "description": "__APP_NAME__: a Teal Brick opt2 miniapp.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "test": "node --test 'test/**/*.test.ts'",
+    "conformance": "tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-ui.ts"
+  },
+  "dependencies": {
+    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.1/opt2-tealbrick-manifest-0.1.1.tgz",
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.2/opt2-tealbrick-miniapp-sdk-0.1.2.tgz"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.0/opt2-tealbrick-conformance-0.1.0.tgz",
+    "@opt2-tealbrick/ui": "https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.0/opt2-tealbrick-ui-0.1.0.tgz",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "7.0.2"
+  }
+}

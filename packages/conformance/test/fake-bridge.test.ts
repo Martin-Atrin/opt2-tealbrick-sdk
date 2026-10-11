@@ -1,0 +1,236 @@
+// Fake bridge: internal surface (claim, status long-poll, keys, companion call), default deny, control API, mint.
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { after, before, describe, it } from "node:test";
+import {
+  digest,
+  type Ed25519KeyPair,
+  generateKeyPair,
+  keySetFrom,
+  keySetFromPortalKeys,
+  manifestDigest,
+  signInstanceAssertion,
+  verifyBridgeOpProof,
+  verifyCallProof,
+  verifyGrant,
+  verifyHookProof,
+  verifySlice,
+  verifyTicket,
+} from "@opt2-tealbrick/manifest";
+import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { TrustContext } from "@opt2-tealbrick/spec/sdk";
+import { createFakeBridge, type FakeBridge, peek } from "../src/index.ts";
+
+const manifest = JSON.parse(readFileSync(new URL("./fixtures/sample.manifest.json", import.meta.url), "utf8")) as Manifest;
+const now = () => Math.floor(Date.now() / 1000);
+
+async function signed(b: FakeBridge, key: Ed25519KeyPair, method: "GET" | "POST", path: string, body?: unknown, headers: Record<string, string> = {}) {
+  const bytes = body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(body));
+  const assertion = await signInstanceAssertion({ key, ins: b.ids.ins, bridge: b.ids.bridge, method, pathAndQuery: path, body: bytes, now: now() });
+  const res = await fetch(b.url + path, { method, headers: { "content-type": "application/json", "TB-Assert": assertion, ...headers }, body: bytes });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+const claimBody = (b: FakeBridge, key: Ed25519KeyPair, over: Record<string, unknown> = {}) => ({
+  code: b.enrolCode,
+  instancePublicKey: key.publicJwk,
+  manifestDigest: manifestDigest(manifest),
+  version: manifest.version,
+  sdkVersion: "1.2.3",
+  ...over,
+});
+const post = async (url: string, body: unknown) => {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+};
+
+function trustFor(b: FakeBridge, slice: InstanceSlice): TrustContext {
+  return {
+    now: now(),
+    self: `tb:ins:${b.ids.ins}`,
+    ws: b.ids.ws,
+    bridge: b.ids.bridge,
+    issuers: keySetFromPortalKeys(slice.portalKeys),
+    bridgeKeys: keySetFrom({ keys: slice.bridge.keys }, `tb:brg:${b.ids.bridge}`),
+    revokedJtis: new Set(slice.revoked.jtis.map((j) => j.jti)),
+  };
+}
+
+describe("fake bridge: claim", () => {
+  let b: FakeBridge;
+  let key: Ed25519KeyPair;
+  before(async () => {
+    b = await createFakeBridge({ manifest, maxWaitS: 1 });
+    key = await generateKeyPair();
+  });
+  after(() => b.close());
+
+  it("refuses a wrong manifest digest, an unsupported SDK major and a bad key before using the code", async () => {
+    const mm = await post(`${b.url}/tb/v1/claim`, claimBody(b, key, { manifestDigest: `sha256:${"0".repeat(64)}` }));
+    assert.equal(mm.status, 409);
+    assert.equal((mm.body.error as { code: string }).code, "manifest_mismatch");
+    const major = await post(`${b.url}/tb/v1/claim`, claimBody(b, key, { sdkVersion: "7.0.0" }));
+    assert.equal((major.body.error as { code: string }).code, "sdk_major_unsupported");
+    const badKey = await post(`${b.url}/tb/v1/claim`, claimBody(b, key, { instancePublicKey: { kty: "RSA" } }));
+    assert.equal((badKey.body.error as { code: string }).code, "input_invalid");
+  });
+
+  it("accepts the enrolment code once and returns the bridge key and a verifiable slice", async () => {
+    const r = await post(`${b.url}/tb/v1/claim`, claimBody(b, key));
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ins, b.ids.ins);
+    const sl = verifySlice(String(r.body.slice), { now: now(), self: `tb:ins:${b.ids.ins}`, ws: b.ids.ws, bridge: b.ids.bridge, issuers: keySetFrom(b.portalJwks(), "tb:portal") });
+    assert.ok(sl.ok);
+    assert.equal(sl.ok && sl.slice.agents.length, 3);
+    assert.equal(sl.ok && sl.slice.grants.length, 1, "one companion grant per manifest companion");
+    const again = await post(`${b.url}/tb/v1/claim`, claimBody(b, key));
+    assert.equal(again.status, 403);
+    assert.equal((again.body.error as { code: string }).code, "code_invalid");
+    assert.equal((await post(`${b.url}/tb/v1/claim`, claimBody(b, key, { code: "tbe_unknown" }))).status, 403);
+  });
+
+  it("status: assertion required; answers at once on a slice change, 204 after the wait", async () => {
+    const st = { readiness: "ready", version: "1.0.0", sdkVersion: "1.0.0", scopesRev: 0, sliceRevision: 0, keysRev: 0, pendingHolds: 0 };
+    const unsigned = await post(`${b.url}/tb/v1/status?wait=0`, st);
+    assert.equal(unsigned.status, 401);
+    const first = await signed(b, key, "POST", "/tb/v1/status?wait=1", st);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.sliceRevision, b.control.sliceRevision);
+    const t0 = Date.now();
+    const idle = await signed(b, key, "POST", "/tb/v1/status?wait=1", { ...st, sliceRevision: b.control.sliceRevision });
+    assert.equal(idle.status, 204);
+    assert.ok(Date.now() - t0 >= 900, "held for the wait");
+    const pending = signed(b, key, "POST", "/tb/v1/status?wait=1", { ...st, sliceRevision: b.control.sliceRevision });
+    const rev = await b.control.pauseWorkspace(true);
+    const woken = await pending;
+    assert.equal(woken.status, 200);
+    assert.equal(woken.body.sliceRevision, rev);
+    assert.equal((peek(woken.body.slice) as unknown as InstanceSlice).pause.workspace, true);
+    await b.control.pauseWorkspace(false);
+    const bad = await signed(b, key, "POST", "/tb/v1/status?wait=0", { readiness: "nope" });
+    assert.equal(bad.status, 400);
+    assert.equal(b.statuses.length, 3, "only verified, well-formed pushes are recorded");
+  });
+
+  it("keys: declared only, not set → 404, set → value + no-store, paused → 403", async () => {
+    assert.equal((await signed(b, key, "GET", "/tb/v1/keys/UNDECLARED_KEY")).body.error.code, "key_not_declared");
+    assert.equal((await signed(b, key, "GET", "/tb/v1/keys/SAMPLE_API_KEY")).body.error.code, "key_not_set");
+    const before = b.control.keysRev;
+    b.control.setKey("SAMPLE_API_KEY", "value-1234567890");
+    assert.equal(b.control.keysRev, before + 1);
+    const ok = await signed(b, key, "GET", "/tb/v1/keys/SAMPLE_API_KEY");
+    assert.deepEqual(ok.body, { name: "SAMPLE_API_KEY", value: "value-1234567890", keysRev: before + 1 });
+    await b.control.pauseInstance(true);
+    assert.equal((await signed(b, key, "GET", "/tb/v1/keys/SAMPLE_API_KEY")).body.error.code, "paused");
+    await b.control.pauseInstance(false);
+    b.control.deleteKey("SAMPLE_API_KEY");
+    assert.equal((await signed(b, key, "GET", "/tb/v1/keys/SAMPLE_API_KEY")).status, 404);
+  });
+
+  it("companion call: gate() with the companion grant; hooks fail closed; config expiry; pause", async () => {
+    const sl = peek(b.slice as string) as unknown as InstanceSlice;
+    const grant = sl.grants[0];
+    const env = { target: "conf-peer", op: "peer_get", input: { id: "x" } };
+    const ok = await signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant });
+    assert.deepEqual([ok.status, ok.body.status], [200, "ok"]);
+    const notWf = await signed(b, key, "POST", "/tb/v1/call", { ...env, op: "other_op" }, { "TB-Grant": grant });
+    assert.equal(notWf.body.error.code, "not_in_workflow");
+    const noGrant = await signed(b, key, "POST", "/tb/v1/call", env);
+    assert.equal(noGrant.body.error.code, "grant_invalid");
+    b.control.injectHook("before", "deny");
+    assert.equal((await signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant })).body.error.code, "hook_denied");
+    b.control.clearHooks();
+    b.control.injectHook("context", "error");
+    assert.equal((await signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant })).body.error.code, "hook_failed");
+    b.control.clearHooks();
+    b.control.setConfigExpired(true);
+    assert.equal((await signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant })).body.error.code, "config_expired");
+    b.control.setConfigExpired(false);
+    await b.control.pauseWorkspace(true);
+    assert.equal((await signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant })).body.error.code, "paused");
+    await b.control.pauseWorkspace(false);
+    b.control.setCompanionResponder(() => ({ status: "held", holdId: "hld_X", expiresAt: new Date(0).toISOString() }));
+    assert.equal((await signed(b, key, "POST", "/tb/v1/call", env, { "TB-Grant": grant })).status, 202);
+    assert.equal(b.companionCalls.length, 2);
+  });
+
+  it("replayed instance assertion and unknown routes are refused (default deny)", async () => {
+    const assertion = await signInstanceAssertion({ key, ins: b.ids.ins, bridge: b.ids.bridge, method: "GET", pathAndQuery: "/tb/v1/keys/SAMPLE_API_KEY", now: now() });
+    const h = { "TB-Assert": assertion };
+    await fetch(`${b.url}/tb/v1/keys/SAMPLE_API_KEY`, { headers: h });
+    assert.equal((await fetch(`${b.url}/tb/v1/keys/SAMPLE_API_KEY`, { headers: h })).status, 401);
+    for (const p of ["/mcp", "/tb/v1/unknown", "/keys", "/admin/v1/pause"]) assert.equal((await fetch(b.url + p, { method: "POST" })).status, 404, p);
+  });
+});
+
+describe("fake bridge: control + mint", () => {
+  let b: FakeBridge;
+  before(async () => {
+    b = await createFakeBridge({ manifest });
+  });
+  after(() => b.close());
+
+  it("Portal key rotation walks pending → active → retired → removed in the slice", async () => {
+    const statuses = () => (peek(b.slice as string) as unknown as InstanceSlice).portalKeys.map((k) => k.status).join(",");
+    await b.control.rotatePortalKey("announce");
+    assert.equal(statuses(), "active,pending");
+    await b.control.rotatePortalKey("activate");
+    assert.equal(statuses(), "retired,active");
+    await b.control.rotatePortalKey("retire");
+    assert.equal(statuses(), "active");
+    await assert.rejects(b.control.rotatePortalKey("activate"), /no pending/);
+  });
+
+  it("revokeJti, personNbf and bridge key rotation land in the next slice", async () => {
+    await b.control.revokeJti("01JA2B3C4D5E6F7G8H9JKMNPQR", now() + 600);
+    await b.control.setPersonNbf(1234);
+    await b.control.rotateBridgeKey({ keepOld: true });
+    const sl = peek(b.slice as string) as unknown as InstanceSlice;
+    assert.equal(sl.revoked.jtis[0].jti, "01JA2B3C4D5E6F7G8H9JKMNPQR");
+    assert.equal(sl.personNbf, 1234);
+    assert.equal(sl.bridge.keys.length, 2);
+  });
+
+  it("minted grants, proofs and tickets verify with the manifest verifiers", async () => {
+    const sl = peek(b.slice as string) as unknown as InstanceSlice;
+    const t = trustFor(b, sl);
+    const agent = b.ids.agents[0].id;
+    const grant = await b.mint.grant({ sub: `tb:agt:${agent}`, aud: `tb:ins:${b.ids.ins}`, crud: ["read"], mode: "free" });
+    const g = verifyGrant(grant, t);
+    assert.ok(g.ok);
+    const input = { a: 1 };
+    const proof = await b.mint.callProof({ sub: `tb:agt:${agent}`, aud: `tb:ins:${b.ids.ins}`, gjti: g.ok ? g.claims.jti : "", op: "item_get", input, context: {} });
+    assert.ok(verifyCallProof(proof, t, { op: "item_get", inputDigest: digest(input), contextDigest: digest({}), grantJti: g.ok ? g.claims.jti : "" }).ok);
+    const hp = await b.mint.hookProof({ sub: `tb:agt:${agent}`, aud: `tb:ins:${b.ids.ins}`, hook: "guard", phase: "before", context: {} });
+    assert.ok(verifyHookProof(hp, t, { hook: "guard", phase: "before", contextDigest: digest({}) }).ok);
+    const bp = await b.mint.bridgeOpProof({ aud: `tb:ins:${b.ids.ins}`, bop: "mark", body: { call: "x" } });
+    assert.ok(verifyBridgeOpProof(bp, t, { bop: "mark", inputDigest: digest({ call: "x" }) }).ok);
+    const tk = await b.mint.launchTicket({ person: b.ids.person, aud: `tb:ins:${b.ids.ins}` });
+    assert.ok(verifyTicket(tk, t).ok);
+    const stranger = await b.mint.grant({ sub: `tb:agt:${agent}`, aud: `tb:ins:${b.ids.ins}`, crud: ["read"], mode: "free", key: b.stranger });
+    assert.equal(verifyGrant(stranger, t).ok, false);
+  });
+
+  it("waitForStatus / waitForClaim time out when the app never reports", async () => {
+    await assert.rejects(b.control.waitForStatus(() => true, 100), /timeout/);
+    await assert.rejects(b.control.waitForClaim(100), /no claim/);
+  });
+
+  it("deferred binding: claim accepted without slice until bind()", async () => {
+    const d = await createFakeBridge({ manifest, deferBinding: true });
+    try {
+      const key = await generateKeyPair();
+      const r = await post(`${d.url}/tb/v1/claim`, claimBody(d, key));
+      assert.equal(r.status, 200);
+      assert.equal(r.body.slice, undefined);
+      const st = { readiness: "ready", version: "1.0.0", sdkVersion: "1.0.0", scopesRev: 0, sliceRevision: 0, keysRev: 0, pendingHolds: 0 };
+      assert.equal((await signed(d, key, "POST", "/tb/v1/status?wait=0", st)).status, 401, "key not bound yet");
+      await d.control.bind();
+      assert.equal((await signed(d, key, "POST", "/tb/v1/status?wait=0", st)).status, 200);
+    } finally {
+      await d.close();
+    }
+  });
+});

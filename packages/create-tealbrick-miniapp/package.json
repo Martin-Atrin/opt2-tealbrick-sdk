@@ -1,0 +1,27 @@
+{
+  "name": "create-tealbrick-miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scaffold a Teal Brick opt2 miniapp (manifest, SDK wiring, Dockerfile, CI, conformance).",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "create-tealbrick-miniapp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "template"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test 'test/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@opt2-tealbrick/manifest": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2"
+  }
+}

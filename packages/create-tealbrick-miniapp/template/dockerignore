@@ -1,0 +1,10 @@
+.git
+.woodpecker
+.tb-ci
+.data
+node_modules
+dist
+test
+*.tgz
+.env
+.env.*

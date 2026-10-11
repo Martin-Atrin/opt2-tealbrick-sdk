@@ -1,0 +1,808 @@
+// App target checks (CONFORMANCE §4.5 A1–A11, plus the app-side cells of §4.2 C2–C8, §4.3 P1, B8 and B13). Every op
+// the checks call is picked from the manifest by shape (audience, crud, effect, idempotency, scopeType) — never by
+// product id. Inputs are generated from the op's JSON Schema with every string set to a scope instance id the caller
+// can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { digest, manifestDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { TYP } from "@opt2-tealbrick/spec/credentials";
+import type { CrudAction, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { Json } from "@opt2-tealbrick/spec/sdk";
+import type { AppClient, CallOptions, OpAnswer, PersonSession } from "../app-client.ts";
+import { tamperValue } from "../app-client.ts";
+import type { FakeBridge } from "../fake-bridge.ts";
+import { SDK_EXPORTS } from "../generated/sdk-exports.ts";
+import { errorCode } from "../http.ts";
+import type { PayloadScan } from "../report.ts";
+import { sampleInput } from "../sample.ts";
+import { scanPayloads } from "../scan.ts";
+import { SDK_COVERAGE } from "../sdk-coverage.ts";
+import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
+import { Mint, newId, nowS, peek } from "../tokens.ts";
+import { CHECK_IDS } from "./catalog.ts";
+
+export interface AppTargetContext {
+  bridge: FakeBridge;
+  /** current client (replaced after a restart) */
+  client(): AppClient;
+  manifest: Manifest;
+  env: Record<string, string>;
+  /** stops and starts the app on the same data dir with `extraEnv` merged; absent in --url mode */
+  restart?: (extraEnv?: Record<string, string>) => Promise<void>;
+  /** triggers one backup (programmatic harness: RunningApp.backups.runNow) */
+  backupNow?: () => Promise<void>;
+  /** known-good inputs per op id (fixtures) */
+  inputs: Record<string, Json>;
+  /** deploy template JSON for A9 */
+  deployTemplate?: unknown;
+  timeoutMs: number;
+}
+
+const PROOF_CODES = ["call_proof_invalid"] as const;
+const GRANT_INVALID = ["grant_invalid"] as const;
+const AUTH_CODES = new Set(["call_proof_invalid", "invalid_token", "unauthenticated", "grant_invalid", "grant_expired", "grant_revoked"]);
+const PERSON_AT_AGENT = ["call_proof_invalid", "grant_invalid", "unauthenticated", "invalid_token"];
+const CAPPABLE = new Set(["write", "outward", "destructive"]);
+const ALLOWED_ENV = new Set(["TB_INSTANCE_ID", "TB_ENROL_CODE", "TB_BRIDGE_URL", "TB_PORTAL_KEYS", "TB_KEK", "TB_DATA_DIR", "TB_BACKUP_DIR", "TB_LOG_LEVEL", "TB_RESTORE_FROM"]);
+const SECRET_ENV = new Set(["TB_ENROL_CODE", "TB_KEK"]);
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const isHeld = (a: { status: number; body: unknown }) => a.status === 202 && isObj(a.body) && a.body.status === "held" && typeof a.body.holdId === "string" && a.body.holdId.startsWith("hld_");
+const isOk = (a: { status: number; body: unknown }) => a.status === 200 && isObj(a.body) && a.body.status === "ok";
+const holdIdOf = (a: { body: unknown }) => (isObj(a.body) && typeof a.body.holdId === "string" ? a.body.holdId : "");
+const show = (a: { status: number; body: unknown }) => {
+  const code = errorCode(a.body);
+  if (code) return `${a.status} ${code}`;
+  if (isObj(a.body) && typeof a.body.status === "string") return `${a.status} ${a.body.status}${a.body.holdId ? ` ${a.body.holdId}` : ""}`;
+  return `${a.status}`;
+};
+const subset = (a: readonly string[], b: readonly string[]) => a.every((x) => b.includes(x));
+
+interface ScopeRow {
+  agent: string;
+  type: string;
+  instanceId: string;
+  access: string;
+}
+
+function collectRows(v: unknown, out: ScopeRow[], depth = 0): void {
+  if (depth > 6) return;
+  if (Array.isArray(v)) for (const x of v) collectRows(x, out, depth + 1);
+  else if (isObj(v)) {
+    if (typeof v.agent === "string" && typeof v.type === "string" && typeof v.instanceId === "string" && typeof v.access === "string") {
+      out.push({ agent: v.agent, type: v.type, instanceId: v.instanceId, access: v.access });
+    }
+    for (const x of Object.values(v)) collectRows(x, out, depth + 1);
+  }
+}
+
+/** Runs every app-target check into `s`; returns the payload scan for the report. */
+export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<PayloadScan> {
+  const b = ctx.bridge;
+  const m = ctx.manifest;
+  const c = () => ctx.client();
+  const T = ctx.timeoutMs;
+  const [agentA, agentB] = b.ids.agents;
+  const product = m.id;
+  const agentOps = m.operations.filter((o) => o.audience === "agent" && !o.dynamic);
+  const personOps = withStandardOps(m).filter((o) => o.audience === "person");
+  const secrets = { tickets: [] as string[], cookies: [] as string[], keyValues: [] as string[], clerk: [] as string[], owner: [] as string[] };
+  const okAnswers: OpAnswer[] = [];
+  const track = (a: OpAnswer) => {
+    if (isOk(a)) okAnswers.push(a);
+    return a;
+  };
+
+  // ── account-default keys: set values so the app can fetch them; their values must never leak ──
+  const defaultKeys = (m.settings?.keys ?? []).filter((k) => k.source === "account_default" && k.usedBy.includes("app"));
+  for (const k of defaultKeys) {
+    const value = `tbconf-${ulid()}-${ulid()}`;
+    secrets.keyValues.push(value);
+    b.control.setKey(k.name, value);
+  }
+
+  // ── A1 claim via the bridge ──
+  await s.run("A1", "claim via the bridge with the enrolment code; instance key generated", "one claim with TB_ENROL_CODE, manifestDigest = digest(manifest), then status pushes signed by the claimed key", () => {
+    const claim = b.claims.find((x) => x.request.code === ctx.env.TB_ENROL_CODE);
+    if (!claim) return bad(`no claim with the enrolment code (claims seen: ${b.claims.length})`);
+    if (claim.request.manifestDigest !== manifestDigest(m)) return bad(`claim manifestDigest ${claim.request.manifestDigest} ≠ ${manifestDigest(m)}`);
+    const st = b.statuses.find((x) => x.ins === b.ids.ins);
+    return verdict(!!st, st ? `claimed (sdk ${claim.request.sdkVersion}); status push kid ${st.assertion.kid.slice(0, 8)}…` : "claimed but no verified status push");
+  });
+  await s.run("A1.no_claim_route", "no claim route other than the SDK's", "the app answers 404/405 on /tb/v1/claim (and the other bridge-only paths)", async () => {
+    const probes = [
+      ["POST", "/tb/v1/claim"],
+      ["GET", "/tb/v1/claim"],
+      ["POST", "/tb/v1/status"],
+      ["GET", "/tb/v1/keys/ANY"],
+      ["POST", "/tb/v1/call"],
+    ] as const;
+    const seen: string[] = [];
+    for (const [method, path] of probes) {
+      const a = method === "GET" ? await c().get(path) : await c().post(path, "{}");
+      seen.push(`${method} ${path} ${a.status}`);
+      if (a.status !== 404 && a.status !== 405) return bad(seen.join("; "));
+    }
+    return ok(seen.join("; "));
+  });
+  await s.run("A1.manifest_served", "GET /tb/v1/manifest = the deployed manifest", "served manifest digest = manifestDigest(manifest)", async () => {
+    const a = await c().get("/tb/v1/manifest");
+    if (a.status !== 200 || !isObj(a.body)) return bad(`${a.status}`);
+    const d = manifestDigest(a.body as unknown as Manifest);
+    return verdict(d === manifestDigest(m), d);
+  });
+  await s.run("A1.health", "GET /tb/v1/health derived status, keys as booleans", "200 {status, sdk, version, manifestDigest, keys[{name, present: boolean, source}]}, no key values", async () => {
+    const a = await c().get("/tb/v1/health");
+    const h = a.body as Record<string, unknown>;
+    if (a.status !== 200 || !isObj(h)) return bad(`${a.status}`);
+    const statuses = ["ok", "needs_claim", "needs_keys", "slice_stale", "restoring", "failed"];
+    if (!statuses.includes(String(h.status))) return bad(`status ${String(h.status)}`);
+    if (h.manifestDigest !== manifestDigest(m)) return bad(`manifestDigest ${String(h.manifestDigest)}`);
+    if (!Array.isArray(h.keys) || !h.keys.every((k) => isObj(k) && typeof k.name === "string" && typeof k.present === "boolean")) return bad("keys[] not name + boolean");
+    if (secrets.keyValues.some((v) => a.text.includes(v))) return bad("health echoes a key value");
+    return ok(`status ${String(h.status)}, sdk ${String(h.sdk)}, ${h.keys.length} keys`);
+  });
+  await s.run("M4.openapi", "OpenAPI generated from the manifest", "GET /tb/v1/openapi.json is OpenAPI 3.1 and lists every agent op under /tb/v1/ops", async () => {
+    const a = await c().get("/tb/v1/openapi.json");
+    if (a.status !== 200 || !isObj(a.body)) return bad(`${a.status}`);
+    const doc = a.body as { openapi?: unknown; paths?: Record<string, unknown> };
+    const paths = Object.keys(doc.paths ?? {});
+    const missing = agentOps.filter((o) => !paths.some((p) => p.endsWith(`/ops/${o.id}`)));
+    if (!String(doc.openapi).startsWith("3.1")) return bad(`openapi ${String(doc.openapi)}`);
+    return verdict(missing.length === 0, missing.length ? `missing ops: ${missing.map((o) => o.id).join(",")}` : `${paths.length} paths, all ${agentOps.length} agent ops present`);
+  });
+
+  // ── A6 person sign-in (first: the scope discovery below needs a session) ──
+  let sess: PersonSession | null = null;
+  await s.run("A6", "launch ticket redeemed; one session cookie", "303 to /a/<product>/…, Set-Cookie tb_session (HttpOnly, SameSite=Lax, Path=/a/<product>/, ≤ 8 h)", async () => {
+    const l = await c().launch();
+    secrets.tickets.push(l.ticket);
+    if (l.status !== 303 || !l.cookie) return bad(`${show(l)}; cookie ${l.cookie ? "set" : "absent"}`);
+    secrets.cookies.push(l.cookie);
+    const attrs = l.setCookie.toLowerCase();
+    const maxAge = /max-age=(\d+)/.exec(attrs);
+    const problems = [
+      !attrs.includes("httponly") && "HttpOnly",
+      !attrs.includes("samesite=lax") && "SameSite=Lax",
+      !attrs.includes(`path=/a/${product}/`) && `Path=/a/${product}/`,
+      maxAge && Number(maxAge[1]) > 8 * 3600 && "Max-Age ≤ 28800",
+    ].filter(Boolean);
+    const loc = l.location ?? "";
+    if (!loc.includes(`/a/${product}`)) problems.push(`Location ${loc}`);
+    const ss = await c().session(l.cookie);
+    if (ss.status !== 200 || !ss.csrf) problems.push(`session ${ss.status}`);
+    else sess = { cookie: l.cookie, csrf: ss.csrf };
+    return verdict(problems.length === 0, problems.length ? `missing: ${problems.join(", ")}` : `303 → ${loc}; cookie attributes ok`);
+  });
+  await s.run("A6.principal", "one principal shape", "session → {principal: {type: person, id: per_ (ticket sub), ws, instance}, csrf}", async () => {
+    if (!sess) return bad("no session");
+    const ss = await c().session((sess as PersonSession).cookie);
+    const p = ss.principal ?? {};
+    const good = p.type === "person" && p.id === b.ids.person && p.ws === b.ids.ws && p.instance === b.ids.ins;
+    return verdict(good, `type ${String(p.type)}, id ${p.id === b.ids.person ? "= ticket sub" : String(p.id)}, ws ${p.ws === b.ids.ws ? "ok" : String(p.ws)}, instance ${p.instance === b.ids.ins ? "ok" : String(p.instance)}`);
+  });
+  await s.run("C6.ticket_replay", "person ticket one-time (cred one-time codes)", "the same launch ticket redeemed twice → refused ticket_used", async () => {
+    const l = await c().launch();
+    secrets.tickets.push(l.ticket);
+    if (l.cookie) secrets.cookies.push(l.cookie);
+    if (l.status !== 303) return bad(`first redemption ${show(l)}`);
+    return refusedWith(await c().launch({ ticket: l.ticket }), ["ticket_used", "ticket_invalid"]);
+  });
+  for (const [id, tamper, title] of [
+    ["C2.ticket_aud_foreign", "aud", "launch ticket for another instance"],
+    ["C5.ticket_expired", "expired", "expired launch ticket"],
+    ["C5.ticket_unannounced_kid", "key", "launch ticket signed by an unannounced key"],
+    ["C2.ticket_ws_foreign", "ws", "launch ticket for another workspace"],
+    ["C3.grant_as_ticket", "grant_as_ticket", "grant presented as a launch ticket"],
+  ] as const) {
+    await s.run(id, title, "refused ticket_invalid", async () => refusedWith(await c().launch({ tamper }), ["ticket_invalid"]));
+  }
+  await s.run("A6.csrf", "one CSRF header", "person op without TB-CSRF → 403 csrf_invalid; with it → 200", async () => {
+    if (!sess) return bad("no session");
+    const no = await c().personOp(sess, "tb.agents_list", {}, { omitCsrf: true });
+    const yes = await c().personOp(sess, "tb.agents_list", {});
+    return verdict(no.code === "csrf_invalid" && no.status === 403 && yes.status === 200, `without: ${show(no)}; with: ${show(yes)}`);
+  });
+  await s.run("A6.session_required", "person ops need the session", "person op without cookie → refused session_required", async () => {
+    const a = await c().personOp({ cookie: "invalid-session-value", csrf: "x" }, "tb.agents_list", {});
+    return refusedWith(a, ["session_required"]);
+  });
+
+  // ── scope discovery (tb.agents_list) and op selection ──
+  let rows: ScopeRow[] = [];
+  const refreshRows = async () => {
+    if (!sess) return;
+    const r = await c().personOp(sess, "tb.agents_list", {});
+    rows = [];
+    collectRows(r.output, rows);
+  };
+  await refreshRows();
+  const levelCrud = (type: string, level: string): CrudAction[] => m.scopes?.find((x) => x.type === type)?.access.find((a) => a.id === level)?.crud ?? [];
+  const fillFor = (op: Operation, agent: string): string | null => {
+    if (!op.scopeType) return "conformance";
+    const row = rows.find((r) => r.agent === agent && r.type === op.scopeType && subset(op.crud, levelCrud(r.type, r.access)));
+    return row ? row.instanceId : null;
+  };
+  const inputFor = (op: Operation, agent: string = agentA.id): Json => ctx.inputs[op.id] ?? sampleInput(op.input, fillFor(op, agent) ?? "conformance");
+  /** Schema-valid inputs that differ from `input` in one place (optional property added, or one string changed). */
+  const variants = (op: Operation, input: Json): Json[] => {
+    const out: Json[] = [];
+    const valid = (x: Json) => validateInput({ ...op, standard: false }, x).ok;
+    if (isObj(input) && isObj(op.input)) {
+      const props = isObj(op.input.properties) ? (op.input.properties as Record<string, unknown>) : {};
+      for (const [k, sch] of Object.entries(props)) {
+        if (k in input) continue;
+        const one = sampleInput({ type: "object", required: [k], properties: { [k]: sch } }, "conformance-variant") as Record<string, Json>;
+        const cand = { ...(input as Record<string, Json>), [k]: one[k] ?? null };
+        if (valid(cand)) out.push(cand);
+      }
+      for (const k of Object.keys(input).reverse()) {
+        const v = (input as Record<string, Json>)[k];
+        if (typeof v !== "string") continue;
+        const cand = { ...(input as Record<string, Json>), [k]: `${v}-variant` };
+        if (valid(cand)) out.push(cand);
+      }
+    }
+    if (out.length === 0) out.push(tamperValue(input));
+    return out.slice(0, 4);
+  };
+  const reachable = (op: Operation) => ctx.inputs[op.id] !== undefined || fillFor(op, agentA.id) !== null;
+  const holdable = (op: Operation) => op.effect === "money" || op.holdFamily !== undefined || CAPPABLE.has(op.effect);
+  const holdOpts = (op: Operation): CallOptions =>
+    op.effect === "money" ? {} : op.holdFamily ? { held: [op.holdFamily] } : { caps: { [op.effect]: { max: 0, per: "hour" } } };
+  const rank = (op: Operation) => (reachable(op) ? 0 : 2) + (op.scopeType ? 1 : 0);
+  const byRank = (ops: Operation[]) => [...ops].sort((x, y) => rank(x) - rank(y));
+  const holdOp = byRank(agentOps.filter(holdable))[0];
+  const idemOp = byRank(agentOps.filter((o) => holdable(o) && o.idempotency !== "none"))[0];
+  const idemKey = (op: Operation | undefined) => (op && op.idempotency !== "none" ? `conf-${ulid()}` : undefined);
+
+  // ── A8 default scope grants ──
+  await s.run("A8", "default scope grants applied on first sight of an agent edge", "for every scopes[].defaultGrants kind own: each slice agent holds a row of that type with that access", () => {
+    const owns = (m.scopes ?? []).flatMap((sc) => sc.defaultGrants.filter((g) => g.kind === "own").map((g) => ({ type: sc.type, access: g.access })));
+    if (owns.length === 0) return na("manifest declares no own defaultGrants");
+    if (!sess) return bad("no person session to read tb.agents_list");
+    const missing: string[] = [];
+    for (const a of [agentA, agentB]) for (const g of owns) if (!rows.some((r) => r.agent === a.id && r.type === g.type && r.access === g.access)) missing.push(`${a.name}:${g.type}=${g.access}`);
+    return verdict(missing.length === 0, missing.length ? `missing: ${missing.join(", ")}` : `${owns.length} own grants present for 2 agents (${rows.length} rows)`);
+  });
+  await s.run("A8.applied_once", "defaults applied once; owner edits win", "after tb.scopes_set and a new slice with the same agents, the edited access stays", async () => {
+    const sc = (m.scopes ?? []).find((x) => x.access.length > 1 && rows.some((r) => r.agent === agentB.id && r.type === x.type));
+    if (!sc) return na("no scope type with ≥ 2 access levels and an agent row");
+    if (!sess) return bad("no session");
+    const row = rows.find((r) => r.agent === agentB.id && r.type === sc.type) as ScopeRow;
+    const other = sc.access.find((a) => a.id !== row.access)?.id as string;
+    const set = await c().personOp(sess, "tb.scopes_set", { agent: agentB.id, type: sc.type, id: row.instanceId, access: other });
+    if (set.status !== 200) return bad(`tb.scopes_set ${show(set)}`);
+    await b.control.waitForSliceRevision(await b.control.republish(), T);
+    await refreshRows();
+    const now = rows.find((r) => r.agent === agentB.id && r.type === sc.type && r.instanceId === row.instanceId);
+    await c().personOp(sess, "tb.scopes_set", { agent: agentB.id, type: sc.type, id: row.instanceId, access: row.access });
+    await refreshRows();
+    return verdict(now?.access === other, `after re-sight: ${now?.access ?? "none"} (edited to ${other}, default ${row.access})`);
+  });
+  await s.run("A8.scope_summary", "scope summary bridge op", "POST /tb/v1/bridge/scope-summary (bridge-op proof) → [{agent ∈ slice agents, label ≤ 80}]", async () => {
+    const a = await c().callBridgeOp("scope_summary", {});
+    if (a.status !== 200 || !Array.isArray(a.body)) return bad(show(a));
+    const ids = new Set(b.ids.agents.map((x) => x.id));
+    const good = a.body.every((e) => isObj(e) && ids.has(e.agent as never) && typeof e.label === "string" && e.label.length <= 80);
+    return verdict(good && a.body.length > 0, `${a.body.length} entries${good ? "" : " (shape/label violation)"}`);
+  });
+
+  // ── A2 the app re-verifies every grant and call proof (probe: tb.hold_status, valid grant suffices, I4) ──
+  const hs = { holdId: `hld_${ulid()}` };
+  let baseline: OpAnswer | null = null;
+  await s.run("A2", "a correct bridge call passes proof + grant verification", "tb.hold_status with a valid grant + op proof is not refused by an auth code (200 or 404 hold_not_found)", async () => {
+    baseline = await c().callOp("tb.hold_status", hs);
+    const code = baseline.code;
+    return verdict(!AUTH_CODES.has(code ?? "") && (baseline.status === 200 || baseline.status === 404), show(baseline));
+  });
+  const negatives: [string, string, CallOptions["tamper"], readonly string[]][] = [
+    ["A2.no_proof", "request without TB-Call (direct call on the private network)", "no_proof", PROOF_CODES],
+    ["B8.tampered_input", "input changed after the bridge signed it", "input", PROOF_CODES],
+    ["A2.tampered_context", "context changed after the bridge signed it", "context", PROOF_CODES],
+    ["A2.proof_op", "proof for another operation", "op", PROOF_CODES],
+    ["A2.proof_gjti", "proof bound to another grant (gjti)", "gjti", PROOF_CODES],
+    ["A2.proof_sub", "proof for another caller (sub)", "sub", PROOF_CODES],
+    ["C5.proof_unannounced_kid", "proof signed by a key not in slice bridge.keys", "proof_key", PROOF_CODES],
+    ["C5.proof_expired", "expired call proof", "proof_expired", PROOF_CODES],
+    ["C2.proof_aud_foreign", "proof for another instance", "proof_aud", PROOF_CODES],
+    ["C2.proof_aud_missing", "proof without aud", "proof_aud_missing", PROOF_CODES],
+    ["A2.no_grant", "proof without the grant", "no_grant", ["call_proof_invalid", "grant_invalid", "unauthenticated"]],
+    ["C5.grant_unannounced_kid", "grant signed by an unannounced key", "grant_key", GRANT_INVALID],
+    ["C5.grant_expired", "expired grant", "grant_expired", ["grant_expired"]],
+    ["C5.grant_not_yet_valid", "grant with iat in the future", "grant_future", GRANT_INVALID],
+    ["C2.grant_aud_foreign", "grant for another instance", "grant_aud", GRANT_INVALID],
+    ["C2.grant_aud_missing", "grant without aud", "grant_aud_missing", GRANT_INVALID],
+    ["C2.grant_aud_array", "grant with aud as an array", "grant_aud_array", GRANT_INVALID],
+    ["A2.grant_ws", "grant for another workspace", "grant_ws", GRANT_INVALID],
+    ["A2.grant_cnf", "grant bound to another bridge (cnf.brg)", "grant_cnf", GRANT_INVALID],
+  ];
+  for (const [id, title, tamper, codes] of negatives) {
+    await s.run(id, title, `refused ${codes.join("|")}`, async () => refusedWith(await c().callOp("tb.hold_status", hs, { tamper }), codes));
+  }
+  await s.run("C5.grant_wrong_issuer", "grant with a foreign issuer", "grant iss tb:brg:<other> signed by a trusted key → refused grant_invalid", async () => {
+    const grant = await b.mint.grant({ sub: `tb:agt:${agentA.id}`, aud: `tb:ins:${b.ids.ins}`, crud: ["read"], mode: "free", iss: `tb:brg:${newId("brg")}` as `tb:brg:brg_${string}` });
+    return refusedWith(await c().callOp("tb.hold_status", hs, { grant }), GRANT_INVALID);
+  });
+  await s.run("A2.grant_revoked", "grant withdrawn via slice revoked.jtis", "after the slice lists the grant jti → refused grant_revoked", async () => {
+    const grant = await b.mint.grant({ sub: `tb:agt:${agentA.id}`, aud: `tb:ins:${b.ids.ins}`, crud: ["read"], mode: "free" });
+    const before = await c().callOp("tb.hold_status", hs, { grant });
+    if (AUTH_CODES.has(before.code ?? "")) return bad(`before revocation already ${show(before)}`);
+    const g = peek(grant) as { jti: string; exp: number };
+    await b.control.waitForSliceRevision(await b.control.revokeJti(g.jti, g.exp), T);
+    return refusedWith(await c().callOp("tb.hold_status", hs, { grant }), ["grant_revoked"]);
+  });
+  await s.run("C6.call_proof_replay", "call proof one-time (replay set)", "the same request (same proof jti) sent twice → second refused call_proof_invalid", async () => {
+    const first = await c().callOp("tb.hold_status", hs);
+    if (AUTH_CODES.has(first.code ?? "")) return bad(`first call ${show(first)}`);
+    return refusedWith(await c().resend(first), PROOF_CODES);
+  });
+
+  // ── C3 typ confusion + C4 person credentials at the app op route ──
+  const ticket = await b.mint.launchTicket({ person: b.ids.person, aud: `tb:ins:${b.ids.ins}` });
+  secrets.tickets.push(ticket);
+  const clerk = Mint.clerkLikeJwt();
+  const tbo = Mint.ownerCliLike();
+  secrets.clerk.push(clerk);
+  secrets.owner.push(tbo);
+  const aGrant = await b.mint.grant({ sub: `tb:agt:${agentA.id}`, aud: `tb:ins:${b.ids.ins}`, crud: ["read"], mode: "free" });
+  const hookProof = await b.mint.hookProof({ sub: `tb:agt:${agentA.id}`, aud: `tb:ins:${b.ids.ins}`, hook: "tb_conformance", phase: "before", context: {} });
+  const bopProof = await b.mint.bridgeOpProof({ aud: `tb:ins:${b.ids.ins}`, bop: "scope_summary" });
+  const confusion: [string, string, CallOptions, readonly string[]][] = [
+    ["C3.ticket_as_grant", "person ticket presented as the grant", { grant: ticket }, ["grant_invalid", "call_proof_invalid"]],
+    ["C3.session_as_grant", "agent session (K5) presented as the grant", { grant: await b.mint.agentSession(agentA.id) }, ["grant_invalid", "call_proof_invalid"]],
+    ["C3.grant_as_proof", "grant presented as the call proof", { proof: aGrant }, PROOF_CODES],
+    ["C3.hook_proof_at_op", "hook proof presented at an op route", { proof: hookProof }, PROOF_CODES],
+    ["B13.bridge_op_proof_at_op", "bridge-op proof presented at /tb/v1/ops", { proof: bopProof }, PROOF_CODES],
+    ["cred.p1.app_op_rejects_person", "Clerk-like person JWT at an app op route (C4)", { authorization: `Bearer ${clerk}` }, PERSON_AT_AGENT],
+    ["C4.owner_cli_session_at_op", "owner CLI session (tbo_) at an app op route", { authorization: `Bearer ${tbo}` }, PERSON_AT_AGENT],
+  ];
+  for (const [id, title, opts, codes] of confusion) {
+    await s.run(id, title, `refused ${codes.join("|")}`, async () => refusedWith(await c().callOp("tb.hold_status", hs, opts), codes));
+  }
+  await s.run("C4.session_cookie_at_op", "app UI session cookie at an agent route", "cookie + CSRF without grant/proof at /tb/v1/ops → refused", async () => {
+    if (!sess) return bad("no session");
+    const headers = { cookie: `tb_session=${(sess as PersonSession).cookie}`, "tb-csrf": (sess as PersonSession).csrf };
+    return refusedWith(await c().callOp("tb.hold_status", hs, { tamper: "no_proof", authorization: "", headers }), PERSON_AT_AGENT);
+  });
+
+  // ── B13 bridge-op routes accept only the bridge-op proof ──
+  for (const [id, title, tamper] of [
+    ["B13.op_proof_at_bridge_route", "op proof at /tb/v1/bridge/scope-summary", "op_proof"],
+    ["B13.hook_proof_at_bridge_route", "hook proof at /tb/v1/bridge/scope-summary", "hook_proof"],
+    ["B13.no_proof_at_bridge_route", "no proof at /tb/v1/bridge/scope-summary", "no_proof"],
+    ["B13.bop_mismatch", "bridge-op proof for another bop", "bop_mismatch"],
+  ] as const) {
+    await s.run(id, title, "refused call_proof_invalid", async () => refusedWith(await c().callBridgeOp("scope_summary", {}, { tamper }), PROOF_CODES));
+  }
+
+  // ── hooks (B6 app side): only when the manifest declares hooks ──
+  const hook = m.hooks?.[0];
+  const hookCall = (): Record<string, Json> => ({
+    id: newId("call"),
+    ws: b.ids.ws,
+    caller: { type: "agent", id: agentA.id, mode: "free" },
+    target: { instance: newId("ins"), product: "tb-conformance-target", op: "probe_op", crud: ["read"], effect: "read" },
+  });
+  await s.run("A2.hook_valid", "hook call with a valid hook proof", "200 with the phase shape (before {allow}, context {add} keys `<product>.`, after {output?|redactions?})", async () => {
+    if (!hook) return na("manifest declares no hooks");
+    const a = await c().callHook(hook.id, hook.phase, { call: hookCall(), context: {} });
+    if (a.status !== 200 || !isObj(a.body)) return bad(show(a));
+    const body = a.body;
+    const shape =
+      hook.phase === "before"
+        ? typeof body.allow === "boolean"
+        : hook.phase === "context"
+          ? isObj(body.add) && Object.keys(body.add).every((k) => k.startsWith(`${product}.`))
+          : !("allow" in body);
+    return verdict(shape, `${a.status} ${JSON.stringify(Object.keys(body))}`);
+  });
+  // SPEC-GAP: SDK-API §3.2 names `call_proof_invalid` for /tb/v1/ops only; the same code is expected on hook and bridge-op routes.
+  for (const [id, title, tamper] of [
+    ["A2.hook_no_proof", "hook call without proof", "no_proof"],
+    ["A2.hook_wrong_phase", "hook proof for another phase", "phase"],
+    ["A2.hook_op_proof", "op proof presented at a hook route", "op_proof"],
+    ["A2.hook_tampered_context", "hook context changed after signing", "context"],
+  ] as const) {
+    await s.run(id, title, "refused call_proof_invalid", async () => {
+      if (!hook) return na("manifest declares no hooks");
+      return refusedWith(await c().callHook(hook.id, hook.phase, { call: hookCall(), context: {} }, { tamper }), PROOF_CODES);
+    });
+  }
+
+  // ── A3 authorize() ──
+  await s.run("A3.audience", "person-audience ops unreachable on the agent route", "a person op at /tb/v1/ops → refused audience_not_agent", async () => {
+    const op = personOps[0];
+    const a = await c().callOp(op.id, {}, { crud: op.crud });
+    return refusedWith(a, ["audience_not_agent", "unknown_tool"]);
+  });
+  await s.run("A3.crud_ceiling", "grant.crud ∩ access.crud", "an op whose crud exceeds grant.crud → refused scope_denied", async () => {
+    const op = agentOps.find((o) => o.crud.some((x) => x !== "read")) ?? agentOps[0];
+    if (!op) return na("no agent op");
+    const narrower: CrudAction[] = (["create", "read", "update", "delete"] as CrudAction[]).filter((x) => !op.crud.includes(x)).slice(0, 1);
+    const a = await c().callOp(op.id, inputFor(op), { crud: narrower.length ? narrower : [], idempotencyKey: idemKey(op) });
+    return refusedWith(a, ["scope_denied", "crud_exceeds_grant"]);
+  });
+  let hold: { op: Operation; input: Json; answer: OpAnswer; key?: string } | null = null;
+  await s.run("A3.hold", "held family / caps / money → {status: held, holdId}", "202 {status: held, holdId: hld_…, expiresAt}", async () => {
+    if (!holdOp) return na("no agent op with a write/outward/destructive/money effect or a holdFamily");
+    const input = inputFor(holdOp);
+    const key = idemKey(holdOp);
+    const a = track(await c().callOp(holdOp.id, input, { ...holdOpts(holdOp), idempotencyKey: key }));
+    if (isHeld(a)) hold = { op: holdOp, input, answer: a, ...(key ? { key } : {}) };
+    return verdict(isHeld(a), `${holdOp.id} (${holdOp.effect}${holdOp.holdFamily ? `/${holdOp.holdFamily}` : ""}): ${show(a)}${reachable(holdOp) ? "" : " — no scope instance found; supply inputs fixture"}`);
+  });
+  await s.run("A3.held_family", "op holdFamily ∈ grant.held → hold", "202 held with the family in grant.held", async () => {
+    const op = byRank(agentOps.filter((o) => o.holdFamily && o.effect !== "money"))[0];
+    if (!op) return na("no agent op declares a holdFamily (other than money)");
+    const a = track(await c().callOp(op.id, inputFor(op), { held: [op.holdFamily as never], idempotencyKey: idemKey(op) }));
+    return verdict(isHeld(a), `${op.id}: ${show(a)}`);
+  });
+  await s.run("A3.money", "money always held", "a money op with grant.held = [] → 202 held", async () => {
+    const op = byRank(agentOps.filter((o) => o.effect === "money"))[0];
+    if (!op) return na("no money op declared");
+    const a = track(await c().callOp(op.id, inputFor(op), { held: [], idempotencyKey: idemKey(op) }));
+    return verdict(isHeld(a), `${op.id}: ${show(a)}`);
+  });
+  await s.run("A3.caps", "Free caps exceeded → hold", "caps {<effect>: {max: 0}} on a write/outward/destructive op → 202 held", async () => {
+    const op = byRank(agentOps.filter((o) => CAPPABLE.has(o.effect)))[0];
+    if (!op) return na("no write/outward/destructive op");
+    const a = track(await c().callOp(op.id, inputFor(op), { caps: { [op.effect]: { max: 0, per: "hour" } }, idempotencyKey: idemKey(op) }));
+    return verdict(isHeld(a), `${op.id}: ${show(a)}`);
+  });
+
+  await s.run("A3.run", "an allowed call runs and writes its receipt", "a receipt op the grant and scope allow (no hold) → 200 {status: ok, output, receiptId}", async () => {
+    const op = byRank(agentOps.filter((o) => o.receipt && o.effect !== "money")).sort((x, y) => Number(x.effect !== "write") - Number(y.effect !== "write"))[0];
+    if (!op) return na("no agent op with receipt true (other than money)");
+    const a = track(await c().callOp(op.id, inputFor(op), { idempotencyKey: idemKey(op) }));
+    if (isOk(a)) return verdict(isObj(a.body) && typeof a.body.receiptId === "string", `${op.id}: ${show(a)}${isObj(a.body) && a.body.receiptId ? ` receipt ${String(a.body.receiptId)}` : " (no receiptId)"}`);
+    const authLike = AUTH_CODES.has(a.code ?? "") || ["scope_denied", "paused", "audience_not_agent", "input_invalid"].includes(a.code ?? "") || isHeld(a);
+    return authLike ? bad(`${op.id}: ${show(a)}`) : notRun(`${op.id}: handler rejected the generated input (${show(a)}); supply an inputs fixture`);
+  });
+
+  // ── A4 holds / receipts ──
+  await s.run("A4.hold_status", "agents poll their own holds only", "tb.hold_status: owner agent → {status: held}; another agent → refused/not found", async () => {
+    if (!hold) return bad("no hold was created (A3.hold)");
+    const id = holdIdOf(hold.answer);
+    const own = await c().callOp("tb.hold_status", { holdId: id });
+    const out = isObj(own.body) && isObj(own.body.output) ? own.body.output : {};
+    const foreign = await c().callOp("tb.hold_status", { holdId: id }, { agent: agentB.id });
+    const foreignOut = isObj(foreign.body) && isObj(foreign.body.output) ? foreign.body.output : null;
+    return verdict(isOk(own) && out.status === "held" && foreign.status >= 400 && !foreignOut, `own: ${show(own)} ${String(out.status)}; other agent: ${show(foreign)}`);
+  });
+  await s.run("A4.decide_person_only", "approvals only through person-audience ops", "tb.holds_decide on the agent route → refused; via the person session → ok", async () => {
+    if (!hold) return bad("no hold");
+    const viaAgent = await c().callOp("tb.holds_decide", { holdId: holdIdOf(hold.answer), decision: "approve" }, { crud: ["update"] });
+    return verdict(viaAgent.status >= 400 && viaAgent.status < 500, `agent route: ${show(viaAgent)}`);
+  });
+  await s.run("A4.holds_list", "one table: holds are receipt rows", "person tb.holds_list contains the hold with status held", async () => {
+    if (!hold || !sess) return bad("no hold/session");
+    const r = await c().personOp(sess, "tb.holds_list", {});
+    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
+    const row = items.find((x) => isObj(x) && x.id === holdIdOf((hold as { answer: OpAnswer }).answer));
+    return verdict(isObj(row) && row.status === "held", row ? `row status ${String((row as Record<string, unknown>).status)}` : `${show(r)}, ${items.length} items, hold missing`);
+  });
+  await s.run("A4.receipt_digest", "receipt stores input digest, never raw input", "receipt row: inputDigest = sha256(JCS input); the canonical input is not in the receipt list", async () => {
+    if (!hold || !sess) return bad("no hold/session");
+    const r = await c().personOp(sess, "tb.receipts_list", {});
+    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
+    const h = hold as { input: Json; answer: OpAnswer };
+    const row = items.find((x) => isObj(x) && x.id === holdIdOf(h.answer)) as Record<string, unknown> | undefined;
+    if (!row) return bad(`${show(r)}; hold row missing`);
+    const raw = JSON.stringify(h.input);
+    const leaked = raw.length > 12 && r.text.includes(raw.slice(1, -1));
+    const forbidden = ["input", "body", "arguments"].filter((k) => k in row);
+    return verdict(row.inputDigest === digest(h.input) && !leaked && forbidden.length === 0, `inputDigest ${row.inputDigest === digest(h.input) ? "matches" : String(row.inputDigest)}; raw input ${leaked ? "LEAKED" : "absent"}${forbidden.length ? `; fields ${forbidden.join(",")}` : ""}`);
+  });
+
+  // ── A5 idempotency ──
+  await s.run("A5", "idempotency: same key + same input → same result; different input → 409", "replay → same holdId/output; other input with the same key → 409 idempotency_conflict", async () => {
+    if (!idemOp) return na("no holdable agent op with idempotency required|supported");
+    const key = `conf-${ulid()}`;
+    const input = inputFor(idemOp);
+    const o = holdOpts(idemOp);
+    const a1 = track(await c().callOp(idemOp.id, input, { ...o, idempotencyKey: key }));
+    const a2 = track(await c().callOp(idemOp.id, input, { ...o, idempotencyKey: key }));
+    const a3 = await c().callOp(idemOp.id, tamperValue(input), { ...o, idempotencyKey: key });
+    const same = (isHeld(a1) && isHeld(a2) && holdIdOf(a1) === holdIdOf(a2)) || (isOk(a1) && isOk(a2) && JSON.stringify((a1.body as Record<string, unknown>).output) === JSON.stringify((a2.body as Record<string, unknown>).output));
+    return verdict(same && a3.status === 409 && a3.code === "idempotency_conflict", `first ${show(a1)}; replay ${show(a2)}; other input ${show(a3)}`);
+  });
+  await s.run("A5.required", "idempotency required and missing → 400", "an op with idempotency required called without a key → 400 idempotency_key_required", async () => {
+    const op = byRank(agentOps.filter((o) => o.idempotency === "required"))[0];
+    if (!op) return na("no op with idempotency required");
+    return refusedWith(await c().callOp(op.id, inputFor(op), holdOpts(op)), ["idempotency_key_required"]);
+  });
+
+  // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──
+  let retry: OpAnswer | null = null;
+  const decide = async (id: string, decision: "approve" | "deny") => (sess ? c().personOp(sess, "tb.holds_decide", { holdId: id, decision }) : null);
+  await s.run("A10", "approved hold runs only on the same input", "after approval: different input → new hold; same input (+ key) → runs (not held), hold row → run|failed", async () => {
+    if (!hold || !sess) return bad("no hold/session");
+    const h = hold as { op: Operation; input: Json; answer: OpAnswer; key?: string };
+    const id = holdIdOf(h.answer);
+    const d = await decide(id, "approve");
+    if (d?.status !== 200) return bad(`approve ${d ? show(d) : "no session"}`);
+    let other: OpAnswer | null = null;
+    for (const v of variants(h.op, h.input)) {
+      other = await c().callOp(h.op.id, v, { ...holdOpts(h.op), idempotencyKey: idemKey(h.op) });
+      if (isHeld(other) || isOk(other)) break;
+    }
+    const otherOk = other !== null && isHeld(other) && holdIdOf(other) !== id;
+    const pausedRev = await b.control.pauseWorkspace(true);
+    await b.control.waitForSliceRevision(pausedRev, T);
+    const whilePaused = await c().callOp(h.op.id, h.input, { ...holdOpts(h.op), ...(h.key ? { idempotencyKey: h.key } : {}) });
+    await b.control.waitForSliceRevision(await b.control.pauseWorkspace(false), T);
+    retry = track(await c().callOp(h.op.id, h.input, { ...holdOpts(h.op), ...(h.key ? { idempotencyKey: h.key } : {}) }));
+    const st = await c().callOp("tb.hold_status", { holdId: id });
+    const status = isObj(st.body) && isObj(st.body.output) ? String(st.body.output.status) : "?";
+    s.record("P1.held_release_paused", "held action released while paused is refused (A)", "approved hold retried under the workspace kill switch → refused paused; approval kept", {
+      pass: whilePaused.code === "paused",
+      asserted: `while paused: ${show(whilePaused)}`,
+    });
+    const ran = retry.status !== 202 && !AUTH_CODES.has(retry.code ?? "") && (status === "run" || status === "failed");
+    return verdict(otherOk && ran, `other input: ${other ? show(other) : "none"}; same input: ${show(retry)}; hold row ${status}`);
+  });
+  if (!s.has("P1.held_release_paused")) s.record("P1.held_release_paused", "held action released while paused is refused (A)", "approved hold retried under the workspace kill switch → refused paused", bad("A10 did not reach the paused retry"));
+  await s.run("A3.no_standing_approval", "no always-allow record after an approval (C8)", "the same call again after the approved retry → held again (new holdId)", async () => {
+    if (!hold || !retry) return bad("A10 did not complete");
+    const h = hold as { op: Operation; input: Json; answer: OpAnswer };
+    const again = track(await c().callOp(h.op.id, h.input, { ...holdOpts(h.op), idempotencyKey: idemKey(h.op) }));
+    return verdict(isHeld(again) && holdIdOf(again) !== holdIdOf(h.answer), show(again));
+  });
+  await s.run("A4.mark_after_failed", "bridge mark → receipt after_failed", "POST /tb/v1/bridge/mark {call, mark: after_failed} → the receipt of that call is after_failed (direct run: its call id; post-approval retry: the held call's id)", async () => {
+    // Rule (Lead · Specs, accepting SPEC-GAP 3 of SDK-API §4.3): the receipt of a post-approval retry keeps the held
+    // call's id, so `mark` for it names the held call.
+    if (!sess) return bad("no session");
+    const targets: { rid: string; call: string; kind: string }[] = [];
+    const direct = okAnswers.find((a) => isObj(a.body) && typeof a.body.receiptId === "string" && a.body.receiptId.startsWith("rcp_"));
+    if (direct) targets.push({ rid: String((direct.body as Record<string, unknown>).receiptId), call: String(direct.callId), kind: "direct run" });
+    const held = hold as { answer: OpAnswer } | null;
+    const r0 = retry as OpAnswer | null;
+    if (held && r0 && isOk(r0) && isObj(r0.body) && r0.body.receiptId === holdIdOf(held.answer)) targets.push({ rid: holdIdOf(held.answer), call: String(held.answer.callId), kind: "post-approval retry (held call id)" });
+    if (targets.length === 0) return notRun("no call ran ok with a receipt (supply an inputs fixture for a receipt op)");
+    const seen: string[] = [];
+    for (const t of targets) {
+      const a = await c().callBridgeOp("mark", { call: t.call, mark: "after_failed" });
+      if (a.status !== 200) return bad(`mark (${t.kind}) ${show(a)}`);
+    }
+    const r = await c().personOp(sess, "tb.receipts_list", {});
+    const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
+    let pass = true;
+    for (const t of targets) {
+      const row = items.find((x) => isObj(x) && x.id === t.rid) as Record<string, unknown> | undefined;
+      pass &&= row?.status === "after_failed";
+      seen.push(`${t.kind} ${t.rid}: ${String(row?.status ?? "missing")}`);
+    }
+    return verdict(pass, seen.join("; "));
+  });
+
+  // ── P1 pause cells for the app (A refuses ≤ 60 s after B) ──
+  // Probed with a manifest op: `tb.hold_status` (valid grant suffices, I4) is not required to run authorize() step 0.
+  const pauseOp = holdOp ?? agentOps[0];
+  const pauseCall = (agent = agentA.id) => c().callOp(pauseOp.id, inputFor(pauseOp, agent), { agent, ...holdOpts(pauseOp), idempotencyKey: idemKey(pauseOp) });
+  if (pauseOp) {
+    await s.run("P1.workspace", "workspace kill switch → app refuses agent grants", "slice pause.workspace → op call refused paused", async () => {
+      const rev = await b.control.pauseWorkspace(true);
+      const seen = await b.control.waitForSliceRevision(rev, T);
+      const a = await pauseCall();
+      await b.control.waitForSliceRevision(await b.control.pauseWorkspace(false), T);
+      const o = refusedWith(a, ["paused"]);
+      return { ...o, asserted: `${o.asserted}; status push accepted while paused (slice rev ${seen.status.sliceRevision})` };
+    });
+    await s.run("P1.agent", "agent pause → that agent refused, others unaffected", "slice pause.agents=[A] → A refused paused; B not refused paused", async () => {
+      await b.control.waitForSliceRevision(await b.control.pauseAgent(agentA.id, true), T);
+      const a = await pauseCall(agentA.id);
+      const other = await pauseCall(agentB.id);
+      await b.control.waitForSliceRevision(await b.control.pauseAgent(agentA.id, false), T);
+      return verdict(a.code === "paused" && other.code !== "paused", `A: ${show(a)}; B: ${show(other)}`);
+    });
+    await s.run("P1.instance", "instance pause → app refuses all ops on itself", "slice pause.instances=[self] → refused paused", async () => {
+      await b.control.waitForSliceRevision(await b.control.pauseInstance(true), T);
+      const a = await pauseCall();
+      await b.control.waitForSliceRevision(await b.control.pauseInstance(false), T);
+      return refusedWith(a, ["paused"]);
+    });
+  } else {
+    for (const id of ["P1.workspace", "P1.agent", "P1.instance"]) s.record(id, "pause cell", "op call refused paused", na("manifest declares no agent operation"));
+  }
+
+  // ── C5 key rotation (Portal key and bridge key) ──
+  await s.run("C5.portal_key_rotation", "Portal key rotation: announced key accepted after activation; removed key refused", "grant by new key ok after activate; grant by old key ok while retired-listed, refused after removal", async () => {
+    const old = b.activePortalKey();
+    await b.control.waitForSliceRevision(await b.control.rotatePortalKey("announce"), T);
+    await b.control.waitForSliceRevision(await b.control.rotatePortalKey("activate"), T);
+    const byNew = await c().callOp("tb.hold_status", hs);
+    const byOldRetired = await c().callOp("tb.hold_status", hs, { grantKey: old });
+    await b.control.waitForSliceRevision(await b.control.rotatePortalKey("retire"), T);
+    const byOldRemoved = await c().callOp("tb.hold_status", hs, { grantKey: old });
+    const pass = !AUTH_CODES.has(byNew.code ?? "") && !AUTH_CODES.has(byOldRetired.code ?? "") && byOldRemoved.code === "grant_invalid";
+    return verdict(pass, `new: ${show(byNew)}; old (retired): ${show(byOldRetired)}; old (removed): ${show(byOldRemoved)}`);
+  });
+  await s.run("C5.bridge_key_rotation", "bridge re-enrolment: proofs by the new key accepted, old key refused", "after a slice with only the new bridge key: new-key proof ok, old-key proof refused", async () => {
+    const old = b.bridgeKeys[0];
+    await b.control.waitForSliceRevision(await b.control.rotateBridgeKey(), T);
+    const byNew = await c().callOp("tb.hold_status", hs);
+    const grant = await b.mint.grant({ sub: `tb:agt:${agentA.id}`, aud: `tb:ins:${b.ids.ins}`, crud: ["read"], mode: "free" });
+    const proof = await b.mint.callProof({ sub: `tb:agt:${agentA.id}`, aud: `tb:ins:${b.ids.ins}`, gjti: String(peek(grant)?.jti), op: "tb.hold_status", input: hs, context: {}, key: old });
+    const byOld = await c().callOp("tb.hold_status", hs, { grant, proof });
+    return verdict(!AUTH_CODES.has(byNew.code ?? "") && byOld.code === "call_proof_invalid", `new: ${show(byNew)}; old: ${show(byOld)}`);
+  });
+
+  // ── A6 session end: personNbf, logout ──
+  await s.run("A6.person_nbf", "sign out everywhere (slice personNbf)", "a session created before personNbf → session_required", async () => {
+    const fresh = await c().signIn();
+    if (!fresh) return bad("sign-in failed");
+    secrets.cookies.push(fresh.cookie);
+    await b.control.waitForSliceRevision(await b.control.setPersonNbf(nowS() + 1), T);
+    const a = await c().personOp(fresh, "tb.agents_list", {});
+    return refusedWith(a, ["session_required"]);
+  });
+  await new Promise((r) => setTimeout(r, 1100));
+  sess = await c().signIn();
+  if (sess) secrets.cookies.push(sess.cookie);
+  await s.run("A6.logout", "logout ends the session", "POST …/tb/v1/logout → the cookie no longer works (session_required)", async () => {
+    const fresh = await c().signIn();
+    if (!fresh) return bad("sign-in failed");
+    secrets.cookies.push(fresh.cookie);
+    const out = await c().logout(fresh);
+    const after = await c().personOp(fresh, "tb.agents_list", {});
+    const o = refusedWith(after, ["session_required"]);
+    return { ...o, asserted: `logout ${out.status}; after: ${o.asserted}` };
+  });
+
+  // ── A7 data plumbing ──
+  await s.run("A7.export", "export produces the documented format", "tb.export → gzip tar with meta.json {format: tealbrick.export/1, files[] sha256} + receipts.jsonl + audit.jsonl; no tb_keys/sessions", async () => {
+    if (!sess) return bad("no session");
+    const a = await c().personOp(sess, "tb.export", {});
+    if (a.status !== 200) return bad(show(a));
+    const { readTar } = await import("../tar.ts");
+    const entries = readTar(a.bytes);
+    const metaEntry = entries.find((e) => e.name === "meta.json");
+    if (!metaEntry) return bad(`no meta.json (${entries.map((e) => e.name).join(",")})`);
+    const meta = JSON.parse(new TextDecoder().decode(metaEntry.data)) as { format?: string; files?: { file: string; sha256: string }[] };
+    const names = entries.map((e) => e.name);
+    const { createHash } = await import("node:crypto");
+    const shaBad = (meta.files ?? []).filter((f) => {
+      const e = entries.find((x) => x.name === f.file);
+      return !e || createHash("sha256").update(e.data).digest("hex") !== f.sha256.replace(/^sha256:/, "");
+    });
+    const forbidden = names.filter((n) => /tb_keys|tb_sessions|tb_used_jti/.test(n));
+    const good = meta.format === "tealbrick.export/1" && names.includes("receipts.jsonl") && names.includes("audit.jsonl") && shaBad.length === 0 && forbidden.length === 0;
+    return verdict(good, `format ${meta.format}; ${names.length} files; sha mismatches ${shaBad.length}; forbidden ${forbidden.join(",") || "none"}`);
+  });
+  const extraHold = holdOp ? await c().callOp(holdOp.id, inputFor(holdOp), { ...holdOpts(holdOp), idempotencyKey: idemKey(holdOp) }) : null;
+  await s.run("A7.restart", "migrations repeatable; state survives a restart; no re-claim", "restart on the same data dir: no new claim, same instance key kid, holds still readable", async () => {
+    if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");
+    if (!extraHold || !isHeld(extraHold)) return bad("no hold to persist");
+    const claims = b.claims.length;
+    const kid = b.statuses.at(-1)?.assertion.kid;
+    const n = b.statuses.length;
+    await ctx.restart();
+    const st = await b.control.waitForStatus((x) => b.statuses.indexOf(x) >= n, T);
+    const hsAns = await c().callOp("tb.hold_status", { holdId: holdIdOf(extraHold) });
+    const status = isObj(hsAns.body) && isObj(hsAns.body.output) ? hsAns.body.output.status : null;
+    s.record("A1.key_persisted", "instance key kept sealed on the volume", "after restart the status push is signed by the same instance key, with no new claim", {
+      pass: st.assertion.kid === kid && b.claims.length === claims,
+      asserted: `kid ${st.assertion.kid === kid ? "unchanged" : "CHANGED"}; claims ${claims} → ${b.claims.length}`,
+    });
+    return verdict(b.claims.length === claims && status === "held", `claims ${claims} → ${b.claims.length}; hold after restart: ${String(status)}`);
+  });
+  if (!s.has("A1.key_persisted")) s.record("A1.key_persisted", "instance key kept sealed on the volume", "after restart the same key, no new claim", ctx.restart ? bad("restart did not complete") : notRun("needs a restartable app"));
+  await s.run("A7.backup_roundtrip", "backup to TB_BACKUP_DIR + restore round-trip", "archive tb-backup-*.tar.gz with meta {format tealbrick.backup/1, parts sha256}; TB_RESTORE_FROM restores the state at backup time", async () => {
+    if (!ctx.backupNow || !ctx.restart) return notRun("needs start() returning backupNow (programmatic harness) and a restartable app");
+    if (!holdOp || !extraHold || !isHeld(extraHold)) return bad("no hold to back up");
+    const dir = ctx.env.TB_BACKUP_DIR;
+    const before = new Set(readdirSync(dir));
+    await ctx.backupNow();
+    const file = readdirSync(dir).filter((f) => /^tb-backup-.*\.tar\.gz$/.test(f) && !before.has(f)).sort().at(-1);
+    if (!file) return bad(`no new tb-backup-*.tar.gz in TB_BACKUP_DIR`);
+    const { readTar } = await import("../tar.ts");
+    const { createHash } = await import("node:crypto");
+    const entries = readTar(new Uint8Array(readFileSync(join(dir, file))));
+    const metaE = entries.find((e) => e.name === "meta.json");
+    const meta = metaE ? (JSON.parse(new TextDecoder().decode(metaE.data)) as { format?: string; manifestDigest?: string; instance?: string; parts?: { file: string; sha256: string; bytes: number }[] }) : null;
+    if (meta?.format !== "tealbrick.backup/1") return bad(`meta ${meta ? meta.format : "missing"}`);
+    const partBad = (meta.parts ?? []).filter((p) => {
+      const e = entries.find((x) => x.name === p.file);
+      return !e || e.data.length !== p.bytes || createHash("sha256").update(e.data).digest("hex") !== p.sha256.replace(/^sha256:/, "");
+    });
+    if (partBad.length || meta.manifestDigest !== manifestDigest(m) || meta.instance !== b.ids.ins) return bad(`parts bad ${partBad.length}; digest ${meta.manifestDigest === manifestDigest(m) ? "ok" : "mismatch"}; instance ${meta.instance === b.ids.ins ? "ok" : "mismatch"}`);
+    const after = await c().callOp(holdOp.id, inputFor(holdOp), { ...holdOpts(holdOp), idempotencyKey: idemKey(holdOp) });
+    const n = b.statuses.length;
+    await ctx.restart({ TB_RESTORE_FROM: file });
+    await b.control.waitForStatus((x) => b.statuses.indexOf(x) >= n, T);
+    const kept = await c().callOp("tb.hold_status", { holdId: holdIdOf(extraHold) });
+    const gone = isHeld(after) ? await c().callOp("tb.hold_status", { holdId: holdIdOf(after) }) : null;
+    const keptOk = isObj(kept.body) && isObj(kept.body.output) && kept.body.output.status === "held";
+    const goneOk = gone !== null && gone.status === 404;
+    return verdict(keptOk && goneOk, `archive ${file} (${meta.parts?.length ?? 0} parts); hold before backup: ${show(kept)}; hold after backup: ${gone ? show(gone) : "not created"}`);
+  });
+
+  // ── C7 lifetimes, C8 no shared secret ──
+  await s.run("C7.assertion_lifetime", "no long-lived bearer from the app", "every instance assertion seen has exp − iat ≤ 60 s", () => {
+    const lt = b.statuses.map((x) => x.assertion.exp - x.assertion.iat);
+    if (lt.length === 0) return bad("no assertions seen");
+    return verdict(Math.max(...lt) <= 60, `${lt.length} assertions, max lifetime ${Math.max(...lt)} s`);
+  });
+  await s.run("C8.no_shared_secret", "no shared secret between app and bridge", "requests to the bridge carry no Authorization header; every request after the claim carries TB-Assert", () => {
+    const reqs = b.captured.filter((p) => p.dir === "bridge-in");
+    const withAuth = reqs.filter((p) => "authorization" in p.headers).length;
+    const unasserted = reqs.filter((p) => !p.path.startsWith("/tb/v1/claim") && !("tb-assert" in p.headers)).length;
+    return verdict(reqs.length > 0 && withAuth === 0 && unasserted === 0, `${reqs.length} requests; with Authorization ${withAuth}; without TB-Assert ${unasserted}`);
+  });
+  await s.run("C8.env", "only the enrolment code and TB_KEK as secret env", "TB_* env given to the app ⊆ SDK-API §13 names; secret values only TB_ENROL_CODE and TB_KEK", () => {
+    const names = Object.keys(ctx.env).filter((k) => k.startsWith("TB_"));
+    const unknown = names.filter((k) => !ALLOWED_ENV.has(k));
+    return verdict(unknown.length === 0, `env ${names.join(",")}; secret ${names.filter((n) => SECRET_ENV.has(n)).join(",")}${unknown.length ? `; unknown ${unknown.join(",")}` : ""}`);
+  });
+  await s.run("C8.keys_via_bridge", "keys only from /tb/v1/keys, declared names only, values never echoed", "no key_not_declared refusal recorded; key values absent from every app answer", () => {
+    const undeclared = b.violations.filter((v) => v.code === "key_not_declared").length;
+    const answers = b.captured.filter((p) => p.dir === "app-in");
+    const leaked = secrets.keyValues.filter((v) => answers.some((p) => p.body.includes(v))).length;
+    if (defaultKeys.length === 0) return verdict(undeclared === 0, `no account_default keys declared; undeclared fetches ${undeclared}`);
+    return verdict(undeclared === 0 && leaked === 0, `${b.keyFetches.length} fetches of ${defaultKeys.length} declared keys; undeclared ${undeclared}; leaked ${leaked}`);
+  });
+
+  // ── A9 public address ──
+  await s.run("A9", "app has no public address", "manifest declares no public exposure (only bridge-served publicRoutes, no public-binding env), the app answers on a private address; with a deploy template: no app service has a public domain", () => {
+    if (ctx.deployTemplate === undefined) {
+      // Manifest level (Lead · Specs): the schema has no public-address field (strict, M1); publicRoutes are served only
+      // through the bridge at /p/<product>/…; runtime.port is the internal listen port.
+      const problems: string[] = [];
+      for (const r of m.publicRoutes ?? []) if (!r.path.startsWith("/") || !["oauth_callback", "webhook"].includes(r.purpose)) problems.push(`publicRoute ${r.path}`);
+      const envs = [...(m.runtime.env ?? []), ...(m.runtime.services ?? []).flatMap((x) => x.env ?? [])];
+      for (const e of envs) if (/^(PORT|HOST|HOSTNAME|BIND|LISTEN)$|PUBLIC_(URL|DOMAIN|HOST)/.test(e.name)) problems.push(`env ${e.name}`);
+      const host = new URL(c().url).hostname.replace(/^\[|\]$/g, "");
+      const priv = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|localhost$)|\.internal$/.test(host);
+      if (!priv) problems.push(`app reached at non-private host ${host}`);
+      return verdict(problems.length === 0, problems.length ? problems.join("; ") : `manifest-level; the live project check is QA (CONFORMANCE open Q1). ${m.publicRoutes?.length ?? 0} bridge-served publicRoutes; listen port ${m.runtime.port} internal; reached at ${host}`);
+    }
+    // SPEC-GAP: CONFORMANCE open question 1 — the deploy template format is not specified; any `*domain*` key with a
+    // value on a non-bridge service counts as a public address.
+    const offenders: string[] = [];
+    const walk = (v: unknown, path: string, service: string | null) => {
+      if (Array.isArray(v)) {
+        for (const [i, x] of v.entries()) walk(x, `${path}[${i}]`, service);
+      } else if (isObj(v)) {
+        const name = typeof v.name === "string" ? v.name : service;
+        for (const [k, x] of Object.entries(v)) {
+          if (/domain/i.test(k) && x !== null && x !== false && !(Array.isArray(x) && x.length === 0) && x !== "" && !/bridge/i.test(String(name))) offenders.push(`${path}.${k} (${name ?? "?"})`);
+          walk(x, `${path}.${k}`, name);
+        }
+      }
+    };
+    walk(ctx.deployTemplate, "$", null);
+    return verdict(offenders.length === 0, offenders.length ? `public domains: ${offenders.join(", ")}` : "no public domain on app services");
+  });
+
+  // ── A11 SDK coverage ──
+  await s.run("A11", "every exported function of types/sdk.ts has a check", "each generated SDK export maps to ≥ 1 catalogued check id", () => coverageOutcome());
+
+  // ── payload scan (cred.p1.payload_scan_no_person_cred) ──
+  const scan = scanPayloads(
+    b.captured,
+    [
+      { label: "launch ticket value", values: secrets.tickets },
+      { label: "app session cookie value", values: secrets.cookies },
+      { label: "Clerk-like person JWT", values: secrets.clerk },
+      { label: "owner CLI session (tbo_)", pattern: /\btbo_[A-Za-z0-9_-]{43}\b/ },
+      { label: "account-default key value", values: secrets.keyValues },
+    ],
+    { select: (p) => (p.dir === "bridge-in" ? `app→bridge ${p.path.split("?")[0]}` : p.dir === "app-in" && p.path.startsWith("/tb/v1/") ? `app answer ${p.path.split("?")[0]}` : null) },
+    [TYP.personTicket],
+  );
+  s.record("cred.p1.payload_scan_no_person_cred", "no person credential or key value in agent-facing payloads (C4)", "0 findings in app→bridge requests and agent-route answers", {
+    pass: scan.findings.length === 0,
+    asserted: `${scan.payloads} payloads; ${scan.findings.length} findings${scan.findings.length ? `: ${scan.findings.join("; ")}` : ""}`,
+  });
+  return scan;
+}
+
+/** A11: generated export list vs the coverage map vs the check catalogue. */
+export function coverageOutcome(): Outcome {
+  const unmapped = SDK_EXPORTS.filter((e) => !(SDK_COVERAGE[e.name]?.length > 0)).map((e) => e.name);
+  const unknownIds = Object.entries(SDK_COVERAGE).flatMap(([n, ids]) => ids.filter((id) => !CHECK_IDS.has(id)).map((id) => `${n}→${id}`));
+  const stale = Object.keys(SDK_COVERAGE).filter((n) => !SDK_EXPORTS.some((e) => e.name === n));
+  const pass = unmapped.length === 0 && unknownIds.length === 0 && stale.length === 0;
+  return verdict(pass, pass ? `${SDK_EXPORTS.length} exports, all mapped to catalogued checks` : `unmapped ${unmapped.join(",") || "-"}; unknown ids ${unknownIds.join(",") || "-"}; stale ${stale.join(",") || "-"}`);
+}
