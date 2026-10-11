@@ -1,8 +1,8 @@
 {
   "name": "@opt2-tealbrick/miniapp-sdk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
-  "description": "Teal Brick opt2 Miniapp SDK: server runtime (defineApp/startApp), React client (/client) and the tb-exec wrapper bin.",
+  "description": "Teal Brick opt2 Miniapp SDK: server runtime (defineApp/startApp), React client (/client), the tb-exec wrapper bin and the tb-gen generator bin.",
   "license": "MIT",
   "type": "module",
   "exports": {
@@ -16,7 +16,8 @@
     }
   },
   "bin": {
-    "tb-exec": "./dist/exec/cli.js"
+    "tb-exec": "./dist/exec/cli.js",
+    "tb-gen": "./dist/gen/cli.js"
   },
   "files": [
     "dist"
