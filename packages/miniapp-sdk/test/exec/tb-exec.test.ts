@@ -249,3 +249,29 @@ describe("tb-exec lifecycle", () => {
     }
   });
 });
+
+test("keysInForce: drops a listed key whose manifest `when` is false for the settings this service carries (live-probe gap)", async () => {
+  const { keysInForce } = await import("../../src/exec/run.ts");
+  const manifest = {
+    runtime: { env: [{ name: "MODEL_PROVIDER", setting: "model_provider" }] },
+    settings: {
+      steps: [{ id: "s", title: "S", fields: [{ key: "model_provider", type: "enum", label: "P", default: "openai", choices: [] }, { key: "other", type: "enum", label: "O", choices: [] }] }],
+      keys: [
+        { name: "OPENAI_API_KEY", label: "o", provider: "o", required: true, source: "account_default", usedBy: ["engine"], when: { model_provider: "openai" } },
+        { name: "ANTHROPIC_API_KEY", label: "a", provider: "a", required: true, source: "account_default", usedBy: ["engine"], when: { model_provider: "anthropic" } },
+        { name: "UNJUDGED_KEY", label: "u", provider: "u", required: true, source: "account_default", usedBy: ["engine"], when: { other: "x" } },
+      ],
+    },
+  } as never;
+  const listed = [
+    { name: "OPENAI_API_KEY", env: "OPENAI_API_KEY" },
+    { name: "ANTHROPIC_API_KEY", env: "ANTHROPIC_API_KEY" },
+    { name: "UNJUDGED_KEY", env: "UNJUDGED_KEY" },
+  ];
+  assert.deepEqual(
+    keysInForce(manifest, "engine", listed, { MODEL_PROVIDER: "openai" }).map((k) => k.name),
+    ["OPENAI_API_KEY", "UNJUDGED_KEY"],
+  );
+  // setting not carried in the service env → trust the bridge list
+  assert.equal(keysInForce(manifest, "engine", listed, {}).length, 3);
+});

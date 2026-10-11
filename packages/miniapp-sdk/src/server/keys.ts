@@ -1,6 +1,8 @@
 // Keys (SDK-API §8, CORE §10, C2): app-own value (tb_keys, sealed under TB_KEK) wins over the workspace default
 // fetched from the bridge (`GET /tb/v1/keys/<name>` with TB-Assert). Defaults are cached in memory until `keysRev`
 // changes or the slice shows a pause. Values are never logged, returned to persons, or compared in clear.
+
+import { conditionHolds, settingsFromEnv } from "@opt2-tealbrick/manifest";
 import { BRIDGE_INTERNAL_PATHS, type KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import type { Condition, KeyRequirement, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { AuditLog, KeyApi, KeyStatus, Logger, PersonPrincipal } from "@opt2-tealbrick/spec/sdk";
@@ -15,21 +17,11 @@ const KEY_PURPOSE = "app-key";
 const MAX_KEY_BYTES = 16 * 1024;
 
 /**
- * `when` on a key: settings reach the app only as env (`runtime.env[].setting`, C16 S6), so a condition is evaluated
- * against the env var that carries the setting. SPEC-GAP: a setting no env entry carries cannot be evaluated by the
- * app; the condition then counts as true (the key is treated as needed).
+ * `when` on a key: ONE evaluation (manifest package `conditionHolds` over `settingsFromEnv`): settings reach the app
+ * only as env (`runtime.env[].setting`, C16 S6); a setting no env entry carries takes its manifest default.
  */
-export function conditionHolds(when: Condition | undefined, manifest: Manifest, env: Record<string, string | undefined>): boolean {
-  if (!when) return true;
-  for (const [setting, expected] of Object.entries(when)) {
-    const entry = manifest.runtime.env?.find((e) => "setting" in e && e.setting === setting);
-    if (!entry) continue;
-    const raw = env[entry.name];
-    if (raw === undefined) continue;
-    const ok = (Array.isArray(expected) ? expected : [expected]).some((v) => String(v) === raw);
-    if (!ok) return false;
-  }
-  return true;
+export function keyConditionHolds(when: Condition | undefined, manifest: Manifest, env: Record<string, string | undefined>): boolean {
+  return conditionHolds(when, settingsFromEnv(manifest, env));
 }
 
 export interface KeysInternals extends KeyApi {
@@ -124,7 +116,7 @@ export function createKeys(opts: {
       return () => listeners.delete(cb);
     },
     async status() {
-      return [...declared.values()].map((k) => ({ name: k.name, required: k.required && conditionHolds(k.when, manifest, opts.env), ...present(k) }));
+      return [...declared.values()].map((k) => ({ name: k.name, required: k.required && keyConditionHolds(k.when, manifest, opts.env), ...present(k) }));
     },
     async set(principal, name, value) {
       if (principal?.type !== "person") throw new TbError("session_required", "only the owner can set keys", 403);
@@ -167,7 +159,7 @@ export function createKeys(opts: {
       }
     },
     needsKeys() {
-      return [...declared.values()].some((k) => k.required && conditionHolds(k.when, manifest, opts.env) && !present(k).present);
+      return [...declared.values()].some((k) => k.required && keyConditionHolds(k.when, manifest, opts.env) && !present(k).present);
     },
     keysRev: () => rev,
   };

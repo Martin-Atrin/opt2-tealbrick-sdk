@@ -1,5 +1,6 @@
 // @opt2-tealbrick/manifest — the ONE owner of contract primitives (SDK-API §2, CORE §3, C21).
 
+export * from "./conditions.ts";
 export * from "./decision.ts";
 export * from "./jcs.ts";
 export * from "./jws.ts";

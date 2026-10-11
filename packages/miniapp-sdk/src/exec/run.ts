@@ -3,7 +3,9 @@
 // exit with the child's code.
 import { createHash } from "node:crypto";
 import type { Server } from "node:http";
+import { conditionHolds, settingsFromEnv } from "@opt2-tealbrick/manifest";
 import type { AppStatus } from "@opt2-tealbrick/spec/bridge";
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "../server/errors.ts";
 import { createLogger, type LogSink, SecretRegistry } from "../server/log.ts";
@@ -43,6 +45,31 @@ interface FetchedKeys {
   rev: number;
   /** digest of the values, to restart only on a real change */
   fingerprint: string;
+}
+
+/**
+ * The bridge's `serviceKeys` list is authoritative, but a key whose manifest `when` is false for the settings this
+ * service can see is dropped (ONE evaluation: manifest `conditionHolds` / `settingsFromEnv`). Only settings carried in
+ * this service's env are judged; a key whose condition references a setting the env does not carry is kept.
+ */
+export function keysInForce(
+  manifest: Manifest,
+  serviceId: string,
+  listed: { name: string; env: string }[],
+  env: Record<string, string | undefined>,
+  log?: Logger,
+): { name: string; env: string }[] {
+  const carried = new Set((manifest.runtime.env ?? []).filter((e) => "setting" in e && typeof e.setting === "string" && env[e.name] !== undefined).map((e) => e.setting as string));
+  const settings = settingsFromEnv(manifest, env);
+  const reqs = new Map((manifest.settings?.keys ?? []).filter((k) => k.usedBy.includes(serviceId)).map((k) => [k.name, k]));
+  return listed.filter((k) => {
+    const req = reqs.get(k.name);
+    if (!req?.when) return true;
+    if (!Object.keys(req.when).every((s) => carried.has(s))) return true;
+    const ok = conditionHolds(req.when, settings);
+    if (!ok) log?.info("key not in force", { key: k.name });
+    return ok;
+  });
 }
 
 async function fetchKeys(rec: ClaimRecord, bridge: ServiceBridge, secrets: SecretRegistry, log: Logger, signal: AbortSignal): Promise<FetchedKeys> {
@@ -110,7 +137,8 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     checkHelperFlags(cfg, args.helperCmd);
     const key = await loadServiceKey(cfg);
     const bridge = new ServiceBridge({ baseUrl: cfg.bridgeUrl, instanceId: cfg.instanceId, service: cfg.service.id, key });
-    const rec = await claimOrLoad(cfg, key, bridge, log, startup.signal);
+    const claimed = await claimOrLoad(cfg, key, bridge, log, startup.signal);
+    const rec = { ...claimed, serviceKeys: keysInForce(cfg.manifest, cfg.service.id, claimed.serviceKeys, o.env, log) };
     let keys = await fetchKeys(rec, bridge, secrets, log, startup.signal);
     if (keys.missing.length > 0) log.warn("needs_keys", { missing: keys.missing });
     if (startup.signal.aborted) throw new TbError("stopped", "stopped before start", 500);
