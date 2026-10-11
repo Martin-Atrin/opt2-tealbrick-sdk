@@ -3,7 +3,7 @@
 // manifest, handler set or migration set.
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
-import { keySetFrom, manifestDigest, memoryReplayGuard, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
+import { keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
 import type { InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { App, AppDefinition, HealthStatus, HoldDecideInput, OperationView, PersonPrincipal, Receipt, RunningApp, SliceAgent } from "@opt2-tealbrick/spec/sdk";
@@ -33,7 +33,7 @@ export const SDK_VERSION: string = (JSON.parse(readFileSync(new URL("../../packa
  * SDK major the manifest `sdkMajor` must equal. SPEC-GAP: the schema requires `sdkMajor ≥ 1` while the SDK ships as
  * 0.x during the opt2 build; 0.x is treated as major 1.
  */
-export const SDK_MAJOR: number = Math.max(1, Number(SDK_VERSION.split(".")[0]));
+export const SDK_MAJOR: number = sdkMajorOf(SDK_VERSION);
 
 const SWEEP_MS = 60_000;
 const definitions = new WeakMap<App, SdkAppDefinition<string>>();
