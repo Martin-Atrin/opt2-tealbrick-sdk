@@ -112,7 +112,10 @@ export async function startApp(app: App, env: Record<string, string | undefined>
     throw new TbError("env_invalid", "TB_INSTANCE_ID, TB_BRIDGE_URL and TB_PORTAL_KEYS are required unless TB_STANDALONE=1", 500);
 
   const sealer = createSealer(resolveKeks(cfg.dataDir, cfg.kek, cfg.kekPrevious));
-  await restoreAtBoot({ manifest, dataDir: cfg.dataDir, backupDir: cfg.backupDir, instanceId: cfg.instanceId ?? "", sdkVersion: SDK_VERSION, log, hooks: def.backup }, cfg.restoreFrom);
+  await restoreAtBoot(
+    { manifest, dataDir: cfg.dataDir, backupDir: cfg.backupDir, instanceId: cfg.instanceId ?? "", sdkVersion: SDK_VERSION, log, hooks: def.backup, env, instanceKey: () => loadInstanceKey(cfg.dataDir, sealer), bridgeId: () => null },
+    cfg.restoreFrom,
+  );
   const db = openStore(cfg.dataDir);
   const closeOnFail = <T>(fn: () => T): T => {
     try {
@@ -184,7 +187,20 @@ export async function startApp(app: App, env: Record<string, string | undefined>
     },
   });
   const person = createPersonAuth({ db, product: manifest.id, launchPath: manifest.ui?.launchPath ?? "/", trust, audit, log, instanceKey, standalone: cfg.standalone });
-  const backup = createBackupApi({ manifest, dataDir: cfg.dataDir, backupDir: cfg.backupDir, instanceId, sdkVersion: SDK_VERSION, log, hooks: def.backup, db, audit });
+  const backup = createBackupApi({
+    manifest,
+    dataDir: cfg.dataDir,
+    backupDir: cfg.backupDir,
+    instanceId,
+    sdkVersion: SDK_VERSION,
+    log,
+    hooks: def.backup,
+    env,
+    instanceKey: async () => instanceKey,
+    bridgeId: () => trust.bridgeId,
+    db,
+    audit,
+  });
   const helper = createServiceHelperCaller({ manifest, env, instanceId, instanceKey, bridgeId: () => trust.bridgeId });
   let onStartRan = false;
 

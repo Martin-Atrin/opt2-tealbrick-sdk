@@ -1,0 +1,251 @@
+// tb-exec end-to-end against a fake bridge: claim, keys → env, restart on keysRev, helper auth, control port, signals.
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
+import { type Ed25519KeyPair, generateKeyPair, manifestDigest, signInstanceAssertion, validateManifest } from "@opt2-tealbrick/manifest";
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import { DEFAULT_MANIFEST_PATH, parseArgs } from "../../src/exec/args.ts";
+import { childEnv } from "../../src/exec/config.ts";
+import { startTbExec, type TbExecHandle } from "../../src/exec/run.ts";
+import { freePort, nowS } from "../helpers.ts";
+import { type ExecWorld, execWorld, HELPER, KEY_VALUE, SERVICE, UPSTREAM, until } from "./world.ts";
+
+describe("parseArgs", () => {
+  test("upstream only, default manifest path", () => {
+    assert.deepEqual(parseArgs(["--", "postgres", "-c", "x=1"]), { helperCmd: null, helperTarget: null, manifestPath: DEFAULT_MANIFEST_PATH, command: ["postgres", "-c", "x=1"] });
+  });
+  test("helper flags and manifest override", () => {
+    const a = parseArgs(["--helper-cmd", "node helper.ts", "--helper-target", "127.0.0.1:3141", "--manifest", "/m.json", "--", "run"]);
+    assert.equal(a.helperCmd, "node helper.ts");
+    assert.deepEqual(a.helperTarget, { host: "127.0.0.1", port: 3141 });
+    assert.equal(a.manifestPath, "/m.json");
+  });
+  test("refusals: missing --, empty command, lone helper flag, non-loopback target, unknown flag", () => {
+    for (const argv of [["postgres"], ["--"], ["--helper-cmd", "x", "--", "a"], ["--helper-cmd", "x", "--helper-target", "10.0.0.1:80", "--", "a"], ["--helper-target", "127.0.0.1:0", "--helper-cmd", "x", "--", "a"], ["--bogus", "--", "a"]]) {
+      assert.throws(() => parseArgs(argv), (e: Error & { code?: string }) => e.code === "usage", JSON.stringify(argv));
+    }
+  });
+});
+
+test("childEnv strips every TB_* name and adds the keys", () => {
+  const env = childEnv({ PATH: "/bin", TB_KEK: "k", TB_ENROL_CODE: "c", HOME: "/h" }, new Map([["ENGINE_KEY", "v"]]));
+  assert.deepEqual(env, { PATH: "/bin", HOME: "/h", ENGINE_KEY: "v" });
+});
+
+function run(w: ExecWorld, extra: string[] = [], controlPort?: number): TbExecHandle {
+  return startTbExec({ argv: [...extra, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: w.env, host: "127.0.0.1", controlPort, logSink: w.sink });
+}
+
+describe("tb-exec with helper and backup", () => {
+  let w: ExecWorld;
+  let h: TbExecHandle;
+  let controlPort: number;
+  before(async () => {
+    w = await execWorld();
+    controlPort = await freePort();
+    h = run(w, ["--helper-cmd", `${JSON.stringify(process.execPath)} ${JSON.stringify(HELPER)} ${w.helperTarget}`, "--helper-target", `127.0.0.1:${w.helperTarget}`], controlPort);
+    await until(() => w.starts().length === 1);
+  });
+  after(async () => {
+    h.signal("SIGTERM");
+    await h.exited;
+    await w.cleanup();
+  });
+
+  test("claims as the service with the manifest digest, version and own key", async () => {
+    assert.equal(w.bridge.claims.length, 1);
+    const c = w.bridge.claims[0];
+    assert.ok(c);
+    const m = validateManifest(JSON.parse(readFileSync(w.manifestPath, "utf8")));
+    assert.ok(m.ok);
+    assert.equal(c.service, SERVICE);
+    assert.equal(c.code, w.env.TB_ENROL_CODE);
+    assert.equal(c.manifestDigest, manifestDigest(m.manifest as Manifest));
+    assert.equal(c.version, "1.0.0");
+    assert.equal(c.instancePublicKey.kty, "OKP");
+    assert.ok(!("d" in c.instancePublicKey));
+    assert.ok(existsSync(join(w.env.TB_DATA_DIR as string, "tb", "instance-key")));
+    const rec = JSON.parse(readFileSync(join(w.env.TB_DATA_DIR as string, "tb", "claim.json"), "utf8"));
+    assert.equal(rec.ins, w.bridge.ins);
+    assert.deepEqual(rec.app.publicKey, w.bridge.appKey.publicJwk);
+  });
+
+  test("fetches each declared key with a valid service assertion and passes it as env, never TB_* names", () => {
+    assert.deepEqual(w.bridge.keyFetches.slice(0, 1), ["ENGINE_KEY"]);
+    assert.deepEqual(w.bridge.refused, []);
+    const s = w.starts()[0];
+    assert.equal(s?.key, KEY_VALUE);
+    assert.deepEqual(s?.tbNames, []);
+    assert.ok(!w.logs.some((l) => l.includes(KEY_VALUE)), "key value must never be logged");
+  });
+
+  async function helperCall(path: string, opts: { key?: Ed25519KeyPair; svc?: string; body?: string; token?: string; signedBody?: string } = {}) {
+    const body = opts.body ?? JSON.stringify({ id: "ka-1", name: "area" });
+    const token =
+      opts.token ??
+      (await signInstanceAssertion({
+        key: opts.key ?? w.bridge.appKey,
+        ins: w.bridge.ins,
+        bridge: w.bridge.brg,
+        ...(opts.svc ? { svc: opts.svc } : {}),
+        method: "POST",
+        pathAndQuery: path,
+        body: new TextEncoder().encode(opts.signedBody ?? body),
+        now: nowS(),
+      }));
+    const res = await fetch(`http://127.0.0.1:${w.helperPort}${path}`, { method: "POST", headers: { "content-type": "application/json", "tb-assert": token }, body });
+    return { status: res.status, body: (await res.json()) as Record<string, unknown>, token };
+  }
+
+  test("helper proxy forwards a declared path signed by the own app instance key", async () => {
+    let r = await helperCall("/sources");
+    for (let i = 0; r.status === 502 && i < 50; i++) {
+      await new Promise((ok) => setTimeout(ok, 50)); // helper process still starting
+      r = await helperCall("/sources");
+    }
+    assert.equal(r.status, 200);
+    assert.equal(r.body.path, "/sources");
+    assert.equal(r.body.body, JSON.stringify({ id: "ka-1", name: "area" }));
+    assert.equal(r.body.assert, null, "the assertion is not forwarded to the helper");
+  });
+
+  test("helper proxy refuses a wrong key, a sibling service, a tampered body, a missing header and a replay", async () => {
+    const other = await generateKeyPair();
+    assert.equal((await helperCall("/sources", { key: other })).status, 401);
+    const sib = await helperCall("/sources", { svc: "other-service" });
+    assert.equal(sib.status, 401);
+    assert.equal((sib.body.error as { code: string }).code, "unauthenticated");
+    assert.equal((await helperCall("/sources", { signedBody: "{}" })).status, 401);
+    const missing = await fetch(`http://127.0.0.1:${w.helperPort}/sources`, { method: "POST", body: "{}" });
+    assert.equal(missing.status, 401);
+    const first = await helperCall("/sources");
+    assert.equal(first.status, 200);
+    const replay = await helperCall("/sources", { token: first.token });
+    assert.equal(replay.status, 401);
+  });
+
+  test("helper proxy refuses an undeclared path even with a valid assertion", async () => {
+    const r = await helperCall("/admin");
+    assert.equal(r.status, 404);
+    assert.equal((r.body.error as { code: string }).code, "helper_path_undeclared");
+  });
+
+  test("control port: backup streams backup.dump stdout (with keys in env), restore pipes the body; foreign key refused", async () => {
+    const sign = async (path: string, body: Uint8Array | undefined, key: Ed25519KeyPair = w.bridge.appKey) =>
+      signInstanceAssertion({ key, ins: w.bridge.ins, bridge: w.bridge.brg, method: "POST", pathAndQuery: path, body, now: nowS() });
+    const empty = new TextEncoder().encode("{}");
+    const b = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/backup`, { method: "POST", headers: { "tb-assert": await sign("/tb/v1/exec/backup", empty) }, body: empty });
+    assert.equal(b.status, 200);
+    assert.equal(b.headers.get("content-type"), "application/octet-stream");
+    assert.equal(await b.text(), "DUMP:with-key");
+    const dump = new TextEncoder().encode("restore-me-\u0000-bytes");
+    const r = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/restore`, { method: "POST", headers: { "tb-assert": await sign("/tb/v1/exec/restore", dump) }, body: dump });
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { ok: true });
+    assert.deepEqual(new Uint8Array(readFileSync(w.restoreFile)), dump);
+    const foreign = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/backup`, { method: "POST", headers: { "tb-assert": await sign("/tb/v1/exec/backup", empty, await generateKeyPair()) }, body: empty });
+    assert.equal(foreign.status, 401);
+    const unknown = await fetch(`http://127.0.0.1:${controlPort}/tb/v1/exec/other`, { method: "POST", body: "{}" });
+    assert.equal(unknown.status, 404);
+  });
+
+  test("status long-poll reports readiness and the keysRev it holds", async () => {
+    await until(() => w.bridge.statusBodies.length > 0);
+    const s = w.bridge.statusBodies.at(-1);
+    assert.equal(s?.readiness, "ready");
+    assert.equal(s?.version, "1.0.0");
+    assert.equal(s?.pendingHolds, 0);
+  });
+
+  test("a new keysRev with a changed value restarts the child with the new value; SIGHUP is forwarded", async () => {
+    const firstPid = w.starts()[0]?.pid;
+    h.signal("SIGHUP");
+    await until(() => w.events().some((e) => e.event === "SIGHUP" && e.pid === firstPid));
+    w.bridge.setKey("ENGINE_KEY", "sk-test-rotated-value-xyz");
+    await until(() => w.starts().length === 2, 8000);
+    const second = w.starts()[1];
+    assert.equal(second?.key, "sk-test-rotated-value-xyz");
+    assert.notEqual(second?.pid, firstPid);
+    assert.ok(w.events().some((e) => e.event === "SIGTERM" && e.pid === firstPid), "old child got SIGTERM");
+    assert.ok(!w.logs.some((l) => l.includes("sk-test-rotated-value-xyz")));
+  });
+
+  test("a new keysRev with unchanged values does not restart the child", async () => {
+    w.bridge.setKey("ENGINE_KEY", "sk-test-rotated-value-xyz");
+    const rev = w.bridge.keysRev;
+    await until(() => w.bridge.statusBodies.some((b) => b.keysRev === rev));
+    assert.equal(w.starts().length, 2);
+  });
+});
+
+describe("tb-exec lifecycle", () => {
+  test("SIGTERM is forwarded and tb-exec exits with the child's code; a restart reuses the stored claim", async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    try {
+      const h = run(w);
+      await until(() => w.starts().length === 1);
+      h.signal("SIGTERM");
+      assert.equal(await h.exited, 42);
+      assert.ok(w.events().some((e) => e.event === "SIGTERM"));
+      // second boot: the one-time code would be refused, so no new claim may be sent
+      const h2 = run(w);
+      await until(() => w.starts().length === 2);
+      assert.equal(w.bridge.claims.length, 1);
+      h2.signal("SIGTERM");
+      assert.equal(await h2.exited, 42);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("the child's own exit code becomes tb-exec's exit code", async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    try {
+      const h = startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile, "exit3"], env: w.env, host: "127.0.0.1", logSink: w.sink });
+      assert.equal(await h.exited, 3);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("a refused claim (code_invalid) ends tb-exec with 1; a declared helper without flags is refused", async () => {
+    const w = await execWorld({ backup: false });
+    try {
+      const bad = startTbExec({ argv: ["--manifest", w.manifestPath, "--", "true"], env: { ...w.env, TB_ENROL_CODE: "tbe_wrong" }, host: "127.0.0.1", logSink: w.sink });
+      assert.equal(await bad.exited, 1);
+      assert.ok(w.logs.some((l) => l.includes("helper_flags_required")));
+      const noHelper = await execWorld({ helper: false, backup: false });
+      try {
+        const r = startTbExec({ argv: ["--manifest", noHelper.manifestPath, "--", "true"], env: { ...noHelper.env, TB_ENROL_CODE: "tbe_wrong" }, host: "127.0.0.1", logSink: noHelper.sink });
+        assert.equal(await r.exited, 1);
+        assert.ok(noHelper.logs.some((l) => l.includes("code_invalid")));
+      } finally {
+        await noHelper.cleanup();
+      }
+      assert.equal(await startTbExec({ argv: ["nope"], env: w.env, logSink: w.sink }).exited, 2);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("cli binary: a real SIGTERM reaches the child and the process exits with its code", async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    try {
+      const cli = new URL("../../src/exec/cli.ts", import.meta.url).pathname;
+      const p = spawn(process.execPath, [cli, "--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], { env: w.env, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      p.stderr.on("data", (d) => {
+        stderr += d;
+      });
+      await until(() => w.starts().length === 1, 10_000);
+      p.kill("SIGTERM");
+      const code = await new Promise<number | null>((r) => p.once("exit", (c) => r(c)));
+      assert.equal(code, 42, stderr);
+      assert.ok(!stderr.includes(KEY_VALUE));
+    } finally {
+      await w.cleanup();
+    }
+  });
+});

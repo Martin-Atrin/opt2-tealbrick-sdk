@@ -8,6 +8,9 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { errorFrom } from "./bridge-client.ts";
 import { TbError } from "./errors.ts";
 
+/** tb-exec control port (SDK-API §11), private network only. */
+export const TB_EXEC_CONTROL_PORT = 7077 as const;
+
 const HELPER_TIMEOUT_MS = 30_000;
 
 export interface ServiceHelperContext {
