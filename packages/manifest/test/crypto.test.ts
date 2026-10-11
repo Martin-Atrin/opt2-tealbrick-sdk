@@ -238,7 +238,7 @@ test("seal / unseal: round trip, AAD binding, tamper, previous KEK, unknown KEK"
   assert.deepEqual(unseal(seal(new Uint8Array(0), cur, aad), { current: cur }, aad), new Uint8Array(0));
 });
 
-test("kekFromEnv: base64url, hex, long string; stable non-secret id", () => {
+test("kekFromEnv: base64url or hex 32 bytes only; stable non-secret id", () => {
   const raw = randomBytes(32);
   const a = kekFromEnv(raw.toString("base64url"));
   const b = kekFromEnv(raw.toString("hex"));
@@ -246,7 +246,7 @@ test("kekFromEnv: base64url, hex, long string; stable non-secret id", () => {
   assert.deepEqual(b.key, a.key);
   assert.equal(a.id, b.id);
   assert.match(a.id, /^kek_[0-9a-f]{16}$/);
-  assert.equal(kekFromEnv("x".repeat(40)).key.length, 32);
+  assert.throws(() => kekFromEnv("x".repeat(40))); // C35: exactly 32 bytes, no hashed fallback
   assert.equal(kekFromEnv(raw.toString("hex"), "core-1").id, "core-1");
   assert.throws(() => kekFromEnv("short"));
 });

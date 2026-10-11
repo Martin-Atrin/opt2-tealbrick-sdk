@@ -3,13 +3,17 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@9.15.4",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "typecheck": "pnpm -r run typecheck",
+    "typecheck": "pnpm --filter @opt2-tealbrick/manifest run build && pnpm -r run typecheck",
     "lint": "biome check .",
-    "test": "pnpm -r run test",
-    "conformance": "pnpm -r --if-present run conformance",
+    "test": "pnpm --filter @opt2-tealbrick/manifest run build && pnpm -r run test",
+    "conformance": "pnpm --filter @opt2-tealbrick/manifest run build && pnpm -r --if-present run conformance",
     "build": "pnpm -r run build"
   },
-  "devDependencies": { "@biomejs/biome": "2.5.15" }
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15"
+  }
 }

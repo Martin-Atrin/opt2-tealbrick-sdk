@@ -70,8 +70,8 @@ export function kekFromEnv(value: string, id?: string): Kek {
   let key: Buffer;
   if (/^[A-Za-z0-9_-]{43}$/.test(value)) key = Buffer.from(value, "base64url");
   else if (/^[0-9a-fA-F]{64}$/.test(value)) key = Buffer.from(value, "hex");
-  else if (value.length >= 32) key = createHash("sha256").update(value, "utf8").digest();
-  else throw new TypeError("kekFromEnv: KEK too short");
+  else throw new TypeError("kekFromEnv: TB_KEK must be exactly 32 bytes, base64url (43 chars) or hex (64 chars) (C35)");
+  if (key.length !== 32) throw new TypeError("kekFromEnv: TB_KEK must decode to 32 bytes");
   const fp = createHash("sha256").update("tb:kek-id:").update(key).digest("hex").slice(0, 16);
   return { id: id ?? `kek_${fp}`, key: new Uint8Array(key) };
 }
