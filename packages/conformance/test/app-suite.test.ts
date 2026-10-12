@@ -224,6 +224,17 @@ describe("app target", () => {
     );
   });
 
+  it("v0.1.21: two runs at the same time each get their own free port (TBCONF_PORT), no clash", async () => {
+    const [a, b] = await Promise.all([run(), run()]);
+    const portOf = (r: Report) => r.notes.find((n) => n.startsWith("app port: "))?.match(/^app port: (\d+) \(suite offered TBCONF_PORT=(\d+)\)$/);
+    const pa = portOf(a);
+    const pb = portOf(b);
+    assert.ok(pa && pb, `${a.notes.join("\n")}\n${b.notes.join("\n")}`);
+    assert.equal(pa[1], pa[2]);
+    assert.notEqual(pa[1], pb[1]);
+    assert.equal(a.ok && b.ok, true);
+  });
+
   it("test roots offered but not pinned (a start module that drops TBCONF_PORTAL_ROOT_KEYS): boot fails with the same note", async () => {
     const r = await runApp({ manifest, manifestPath: path, start: (env) => startMiniApp(manifest, { ...env, TBCONF_PORTAL_ROOT_KEYS: "" }), timeoutMs: 8000, bootTimeoutMs: 3000 });
     assert.equal(r.ok, false);

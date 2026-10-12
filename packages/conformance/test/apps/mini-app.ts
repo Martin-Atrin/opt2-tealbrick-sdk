@@ -704,7 +704,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
   }
 
   const server = createServer((req, res) => void handle(req, res));
-  await new Promise<void>((r) => server.listen(port, "127.0.0.1", () => r()));
+  await new Promise<void>((r) => server.listen(port || Number(env.TBCONF_PORT ?? 0), "127.0.0.1", () => r()));
   const addr = server.address() as { port: number };
   return {
     url: `http://127.0.0.1:${addr.port}`,

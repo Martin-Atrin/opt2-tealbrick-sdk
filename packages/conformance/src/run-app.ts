@@ -5,6 +5,7 @@
 // process; the CLI's `--start <module>` passes forkStart(module), which boots the module in a child process per start.
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { manifestDigest } from "@opt2-tealbrick/manifest";
@@ -76,6 +77,21 @@ export interface RunAppOptions {
 
 /** Harness-only env name carrying the test root JWKs (never read by the SDK or the bridge; CONFORMANCE §7). */
 export const TEST_ROOTS_ENV = "TBCONF_PORTAL_ROOT_KEYS";
+/** v0.1.21: the free port the suite picked for a `start(env)` app (harness-only name; the app's own code never reads it). */
+export const PORT_ENV = "TBCONF_PORT";
+
+/** A free TCP port on 127.0.0.1 (bind port 0, read it, close). */
+export function freeTcpPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const a = srv.address();
+      const p = a && typeof a === "object" ? a.port : 0;
+      srv.close(() => resolve(p));
+    });
+  });
+}
 
 /** Boot-failure hint when the app claimed but installed no slice (a spec-0.1.12 app pins its Portal Root Keys). */
 export const PINNED_ROOTS_HINT =
@@ -132,7 +148,11 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   if (keysetRequired && testRoots) await bridge.control.publishKeySet();
   const ownDir = opts.dataDir === undefined;
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "tb-conformance-"));
-  const env = appEnv(bridge, dataDir, { ...(testRoots ? { [TEST_ROOTS_ENV]: JSON.stringify(bridge.testRootJwks()) } : {}), ...opts.env });
+  // v0.1.21 (conformance 0.1.13): a free port per run (TBCONF_PORT; the start module passes it to startApp's harness port), so two
+  // runs on one machine never clash; a start module that ignores it keeps manifest runtime.port (no regression). `opts.env`
+  // (or a caller-set TBCONF_PORT) pins it.
+  const port = opts.start ? await freeTcpPort() : null;
+  const env = appEnv(bridge, dataDir, { ...(testRoots ? { [TEST_ROOTS_ENV]: JSON.stringify(bridge.testRootJwks()) } : {}), ...(port ? { [PORT_ENV]: String(port) } : {}), ...opts.env });
   const timeoutMs = opts.timeoutMs ?? 20_000;
   let app: AppStartResult | null = null;
   let client: AppClient | null = null;
@@ -142,6 +162,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
     if (opts.start) app = await opts.start(env);
     else opts.onEnv?.(env);
     const url = app?.url ?? (opts.url as string);
+    if (port && env[PORT_ENV] === String(port)) notes.push(`app port: ${new URL(url).port || "?"} (suite offered TBCONF_PORT=${port}${new URL(url).port === String(port) ? "" : "; the start module ignored it and used its own port — update conformance.start.ts from create-tealbrick-miniapp ≥ 0.1.9"})`);
     client = bridge.client(url);
     try {
       await bridge.control.waitForClaim(opts.bootTimeoutMs ?? 30_000);

@@ -103,13 +103,15 @@ function listen(server: Server, port: number): Promise<void> {
  * types/sdk.ts) replaces the real process facade of the privilege drop so a root test runner is not dropped to uid 1000
  * by an app it starts in-process; `portalRootKeys` (types/sdk.ts v0.1.11 `StartHooks`, C63) replaces the build-pinned
  * Portal Root Keys so a conformance start module can sign key-set statements with a test root pair; `mountinfoPath`
- * (v0.1.12) replaces /proc/self/mountinfo for the first-claim mount check of TB_DATA_DIR. Production never passes it.
+ * (v0.1.12) replaces /proc/self/mountinfo for the first-claim mount check of TB_DATA_DIR; `port` (v0.1.21, conformance
+ * 0.1.13) replaces manifest `runtime.port` (0 = any free port) so two harness runs on one machine never clash; the chosen
+ * port is `RunningApp.port`. Production never passes it.
  */
 export async function startApp(
   app: App,
   env: Record<string, string | undefined>,
-  harness?: { privilegeProc?: PrivilegeProc; portalRootKeys?: Ed25519PublicJwk[]; mountinfoPath?: string },
-): Promise<RunningApp> {
+  harness?: { privilegeProc?: PrivilegeProc; portalRootKeys?: Ed25519PublicJwk[]; mountinfoPath?: string; port?: number },
+): Promise<RunningApp & { readonly port: number }> {
   const def = definitions.get(app);
   if (!def) throw new TbError("app_invalid", "startApp needs the value returned by defineApp", 500);
   const v = validateManifest(def.manifest);
@@ -374,12 +376,15 @@ export async function startApp(
   } else person.standaloneBoot(cfg.standaloneReset);
 
   const server = createHttpServer(rt);
+  const wantPort = harness?.port ?? manifest.runtime.port;
   try {
-    await listen(server, manifest.runtime.port);
+    await listen(server, wantPort);
   } catch (e) {
     db.close();
-    throw new TbError("listen_failed", `cannot listen on port ${manifest.runtime.port}: ${e instanceof Error ? e.message : "error"}`, 500);
+    throw new TbError("listen_failed", `cannot listen on port ${wantPort}: ${e instanceof Error ? e.message : "error"}`, 500);
   }
+  const addr = server.address();
+  const port = addr && typeof addr === "object" ? addr.port : wantPort;
   if (cfg.standalone || state.claimed) rt.onClaimed();
   // Fleet: the stored slice is the first slice after boot (a bridge answers a long-poll with 204 while it is current)
   if (trust.slice) void rt.notifyAgents();
@@ -421,9 +426,10 @@ export async function startApp(
   process.once("SIGTERM", onSignal);
   process.once("SIGINT", onSignal);
   current = rt;
-  log.info("app started", { port: manifest.runtime.port, instance: instanceId, standalone: cfg.standalone, status: rt.health() });
+  log.info("app started", { port, instance: instanceId, standalone: cfg.standalone, status: rt.health() });
 
   return {
+    port,
     status: () => rt.health(),
     receipts,
     scopes,
