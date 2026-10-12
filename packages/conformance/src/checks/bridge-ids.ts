@@ -128,6 +128,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "C5.keys_ticket_expired": "expired keys ticket refused",
     "C1.K11": "keys ticket opens a key-page session",
     "B11.cookie_flags": "key-page cookie flags",
+    "B11.ticket_post_is_form": "keys-ticket POST answered with the form itself, no redirect (C52)",
     "C6.keys_ticket_replay": "keys ticket one-time",
     "B11.page_lists": "page lists requirements, never values",
     "B11.set_and_fetch": "value set on the page reaches the declaring app",

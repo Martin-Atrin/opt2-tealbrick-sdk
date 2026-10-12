@@ -28,7 +28,7 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.5/opt2-tealbrick-spec-0.1.5.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.6/opt2-tealbrick-spec-0.1.6.tgz",
     "@opt2-tealbrick/manifest": "workspace:*"
   },
   "peerDependencies": {

@@ -129,7 +129,7 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
   const b = new Browser();
   const ticket = await c.w.keysTicket();
   const r = await redeem(b, ticket);
-  await c.run("C1.K11", "keys ticket (K11 pur: keys) opens a key-page session", "200 (or redirect) with a session cookie, then the page", () => {
+  await c.run("C1.K11", "keys ticket (K11 pur: keys) opens a key-page session", "200 (or redirect) with a session cookie, then the page (the no-redirect rule is B11.ticket_post_is_form, C52)", () => {
     const fine = redeemed(r, b);
     if (fine) c.evidence.set("K11", "keys ticket redeemed");
     return verdict(fine, `${r.a.status} → page ${r.page.status}; cookies ${b.jar.size}`);
@@ -140,6 +140,14 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
     const has = (re: RegExp) => re.test(sc);
     const fine = has(/;\s*HttpOnly/i) && (!https || has(/;\s*Secure/i)) && has(/;\s*SameSite=Strict/i) && has(/;\s*Path=\/keys\b/i);
     return verdict(fine, sc ? sc.replace(/=[^;]*/, "=…") : "no Set-Cookie");
+  });
+  await c.run("B11.ticket_post_is_form", "keys-ticket POST is answered with the key form itself (C52)", "200 (no 3xx) + Set-Cookie SameSite=Strict on that response + the response body is the key form (names the key, has a POST form)", () => {
+    const sc = r.a.headers.get("set-cookie") ?? "";
+    const isForm = r.a.status === 200 && r.a.text.includes(key.name) && parseForms(r.a.text).some((f) => f.method === "post");
+    const strict = /;\s*SameSite=Strict/i.test(sc);
+    const fine = r.a.status === 200 && isForm && strict;
+    const why = r.a.status >= 300 && r.a.status < 400 ? " (redirect: browsers drop the Strict cookie in a chain started by a cross-site POST)" : "";
+    return verdict(fine, `${r.a.status}${why}; form in POST answer ${isForm}; Strict cookie ${strict}`);
   });
   await c.run("C6.keys_ticket_replay", "keys ticket one-time", "the same ticket again → 4xx, no session", async () => refusedTicket(ticket));
   await c.run("B11.page_lists", "page lists the account_default requirements, never values", "page names the key and shows no value", () => verdict(r.page.text.includes(key.name), `${r.page.status}; names ${key.name}: ${r.page.text.includes(key.name)}`));
