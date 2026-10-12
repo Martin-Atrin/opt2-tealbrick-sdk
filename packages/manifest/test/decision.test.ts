@@ -182,3 +182,26 @@ test("C111a (spec 0.1.19): a non-empty wf limits ops in ANY mode; caps apply in 
   assert.equal(authorize(free.authIn({ op: add, access, usage: { write: 0 } })).decision, "run");
   assert.deepEqual(authorize(free.authIn({ op: add, access, usage: { write: 1 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps" });
 });
+
+test("opInGrantWorkflow / opVisibleToGrant (L1): tools/list shows exactly what gate() steps 3–4 pass", async () => {
+  const { gate: g, opInGrantWorkflow, opVisibleToGrant } = await import("../src/decision.ts");
+  assert.equal(opInGrantWorkflow({ mode: "free", wf: [] }, "x"), true);
+  assert.equal(opInGrantWorkflow({ mode: "free", wf: ["a"] }, "x"), false);
+  assert.equal(opInGrantWorkflow({ mode: "bound", wf: [] }, "x"), false);
+  assert.equal(opInGrantWorkflow({ mode: "bound", wf: ["x"] }, "x"), true);
+  const view = (id: string, crud: ("read" | "create")[], over: Record<string, unknown> = {}) =>
+    ({ standard: false, id, title: id, description: id, crud, effect: crud.includes("create") ? "write" : "read", audience: "agent", idempotency: "none", receipt: false, input: { type: "object" }, output: { type: "object" }, scopeType: "area", ...over }) as unknown as OperationView;
+  const hp = { standard: true as const, id: "tb.holds_pending" as const, title: "p", crud: ["read"] as "read"[], effect: "read" as const, audience: "agent" as const, idempotency: "none" as const, receipt: false as const };
+  for (const grant of [
+    { mode: "free" as const, wf: [] as string[], crud: ["read", "create"] as ("read" | "create")[] },
+    { mode: "free" as const, wf: ["notes_search"], crud: ["read", "create"] as ("read" | "create")[] },
+    { mode: "bound" as const, wf: ["notes_add"], crud: ["read"] as ("read" | "create")[] },
+  ]) {
+    const s = await setup(grant);
+    for (const op of [view("notes_search", ["read"]), view("notes_add", ["create"]), view("notes_other", ["read"], { scopeType: "ghost" }), view("person_op", ["read"], { audience: "person" }), hp]) {
+      const listed = opVisibleToGrant(op, grant, ["area"]);
+      const passes = g(s.gateIn({ op })).decision === "pass";
+      assert.equal(listed, passes, `${grant.mode} wf[${grant.wf}] crud[${grant.crud}] ${op.id}`);
+    }
+  }
+});

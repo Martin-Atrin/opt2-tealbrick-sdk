@@ -31,6 +31,29 @@ export const DECISION_REASON = {
 const subset = (a: readonly CrudAction[], b: readonly CrudAction[]) => a.every((x) => b.includes(x));
 
 /**
+ * v0.1.21 (C111a, Bridge request, L1): THE workflow rule — `op` is allowed by the grant's `wf` iff the grant is Bound or
+ * its `wf` is non-empty, and `wf` lists the op; otherwise (Free with an empty `wf`) every op passes this step. gate()
+ * step (4) and tools/list use this one function.
+ */
+export function opInGrantWorkflow(claims: { mode: string; wf: readonly string[] }, opId: string): boolean {
+  return !(claims.mode === "bound" || claims.wf.length > 0) || claims.wf.includes(opId);
+}
+
+/**
+ * v0.1.21 (L1): THE tools/list rule — the static part of gate() steps (3)–(4) for one op and one verified grant: the
+ * standard ops that need only a valid grant are listed; otherwise the op is agent-audience, `op.crud ⊆ grant.crud`, its
+ * `scopeType` is declared by the target manifest, and opInGrantWorkflow holds. Pause and validity are the caller's
+ * (a paused or invalid grant lists nothing). A tool listed here passes gate() steps (3)–(4) when called.
+ */
+export function opVisibleToGrant(op: GateInput["op"], claims: { mode: string; wf: readonly string[]; crud: readonly CrudAction[] }, declaredScopeTypes: readonly string[]): boolean {
+  if (op.standard && ANY_GRANT_OPS.has(op.id)) return true;
+  if (!subset(op.crud, claims.crud) || op.audience !== "agent") return false;
+  const scopeType = op.standard ? undefined : op.scopeType;
+  if (scopeType !== undefined && !declaredScopeTypes.includes(scopeType)) return false;
+  return opInGrantWorkflow(claims, op.id);
+}
+
+/**
  * Bridge, every routed call: (1) paused (workspace, agent, connection, instance) → refuse; (2) `verifyGrant` → refuse
  * with its code; (3) `op.crud ⊆ grant.crud`, agent audience, `scopeType` declared by the target manifest; (4) Bound or non-empty `wf`:
  * `op.id ∈ grant.wf` — v0.1.19 (C111a): also for a Free grant whose `wf` is non-empty. `tb.hold_status` and
@@ -48,7 +71,7 @@ export function gate(input: GateInput): GateDecision {
   const scopeType = op.standard ? undefined : op.scopeType;
   if (scopeType !== undefined && !input.declaredScopeTypes.includes(scopeType)) return { decision: "refuse", reason: DECISION_REASON.scopeTypeUnknown };
   // v0.1.19 (C111a): `wf`, when non-empty, limits ops in ANY mode (bound grants always carry a non-empty wf)
-  if ((g.claims.mode === "bound" || g.claims.wf.length > 0) && !g.claims.wf.includes(op.id)) return { decision: "refuse", reason: DECISION_REASON.notInWorkflow };
+  if (!opInGrantWorkflow(g.claims, op.id)) return { decision: "refuse", reason: DECISION_REASON.notInWorkflow };
   return { decision: "pass", reason: DECISION_REASON.pass };
 }
 
