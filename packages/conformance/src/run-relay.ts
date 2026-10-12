@@ -11,6 +11,7 @@ import { createInterface } from "node:readline";
 import type { AgentId } from "@opt2-tealbrick/spec/credentials";
 import { RELAY_CHECKS } from "./checks/catalog.ts";
 import { cannedUpstream, type RelayContext, relayDiskCheck, runRelayChecks, type StdioPeer, snapshot } from "./checks/relay.ts";
+import { spawnCommand } from "./command.ts";
 import { FakePortal } from "./fake-portal.ts";
 import { FakeUpstream } from "./fake-upstream.ts";
 import { buildReport, type Report } from "./report.ts";
@@ -87,7 +88,7 @@ export async function runRelayTarget(opts: RunRelayOptions): Promise<Report> {
       const agt = newId("agt") as AgentId;
       portal.agents.push({ agt, name: "Conformance relay agent", mode: "free" });
       const out: string[] = [];
-      const login = spawn(opts.loginCmd, { shell: true, env, cwd: home, stdio: ["ignore", "pipe", "pipe"], detached: true });
+      const login = spawnCommand(opts.loginCmd, { env, cwd: home, stdio: ["ignore", "pipe", "pipe"], detached: true });
       login.stdout?.on("data", (d: Buffer) => out.push(d.toString("utf8")));
       login.stderr?.on("data", (d: Buffer) => out.push(d.toString("utf8")));
       const exited = new Promise<number | null>((r) => login.once("exit", (code) => r(code)));
@@ -106,7 +107,7 @@ export async function runRelayTarget(opts: RunRelayOptions): Promise<Report> {
     const issuedBefore = upstream.issued.size;
     // ── 2. relay over stdio ──
     const before = snapshot(home, [heapDir]);
-    relay = spawn(opts.cmd, { shell: true, env: { ...env, NODE_OPTIONS: "--heapsnapshot-signal=SIGUSR2" }, cwd: heapDir, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    relay = spawnCommand(opts.cmd, { env: { ...env, NODE_OPTIONS: "--heapsnapshot-signal=SIGUSR2" }, cwd: heapDir, stdio: ["pipe", "pipe", "pipe"], detached: true });
     const child = relay;
     const received: Record<string, unknown>[] = [];
     const waiters = new Set<() => void>();

@@ -19,6 +19,7 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { BridgeStartResult } from "./bridge-world.ts";
+import { spawnCommand } from "./command.ts";
 import { checkStartModule, forkStart } from "./fork-start.ts";
 import { request } from "./http.ts";
 import { exitCode, type Report, renderMarkdown, resultLabel } from "./report.ts";
@@ -40,10 +41,10 @@ const USAGE = `usage:
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf8"));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Spawns `cmd` (shell) with the conformance env; ready when `url` answers HTTP. */
+/** Spawns `cmd` directly (no shell, C55) with the conformance env; ready when `url` answers HTTP. */
 function commandHarness(cmd: string, url: string, bootMs: number) {
   return async (env: Record<string, string>): Promise<AppStartResult> => {
-    const child: ChildProcess = spawn(cmd, { shell: true, env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"], detached: true });
+    const child: ChildProcess = spawnCommand(cmd, { env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"], detached: true });
     const deadline = Date.now() + bootMs;
     for (;;) {
       if (child.exitCode !== null) throw new Error(`app command exited with ${child.exitCode}`);

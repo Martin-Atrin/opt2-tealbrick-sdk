@@ -4,7 +4,7 @@
 // upstream traffic limited to /oauth/token + /mcp, nothing persisted, no grant / config / ticket in its heap, and no
 // person credential ever presented upstream.
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { digest } from "@opt2-tealbrick/manifest";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
@@ -102,6 +102,48 @@ export function cannedUpstream(u: FakeUpstream, canary: string): { okTool: strin
   return { okTool, pausedTool, personLooking };
 }
 
+/**
+ * Linux fallback for B10.stdio_only when lsof is missing: socket inodes held by the processes' fds, matched against
+ * /proc/net/{tcp,tcp6} rows in state 0A (LISTEN) and any /proc/net/{udp,udp6} row. null when /proc is not available.
+ */
+export function procListeners(pids: number[], root = "/proc"): string[] | null {
+  if (!existsSync(join(root, "net", "tcp"))) return null;
+  const inodes = new Set<string>();
+  for (const pid of pids) {
+    let fds: string[] = [];
+    try {
+      fds = readdirSync(join(root, String(pid), "fd"));
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(join(root, String(pid), "fd", fd)));
+        if (m) inodes.add(m[1] as string);
+      } catch {
+        // fd closed meanwhile
+      }
+    }
+  }
+  const found: string[] = [];
+  for (const table of ["tcp", "tcp6", "udp", "udp6"]) {
+    let text = "";
+    try {
+      text = readFileSync(join(root, "net", table), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length < 10) continue;
+      const [local, , state, inode] = [f[1], f[2], f[3], f[9]];
+      const listening = table.startsWith("udp") || state === "0A";
+      if (listening && inodes.has(inode as string)) found.push(`${table} ${local}`);
+    }
+  }
+  return found;
+}
+
 function processTree(root: number[]): number[] {
   try {
     const rows = execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" })
@@ -181,14 +223,19 @@ export async function runRelayChecks(x: RelayContext): Promise<void> {
     } catch (e) {
       const st = (e as { status?: number; stdout?: string }).status;
       if (st === 1) out = (e as { stdout?: string }).stdout ?? "";
-      else return notRun(`lsof unavailable: ${e instanceof Error ? e.message.slice(0, 80) : String(e)}`);
+      else {
+        // C55: CI images lack lsof → Linux /proc fallback (socket inodes of the tree's fds vs /proc/net tables)
+        const viaProc = procListeners(pids);
+        if (viaProc === null) return notRun(`lsof unavailable and no /proc: ${e instanceof Error ? e.message.slice(0, 80) : String(e)}`);
+        return verdict(viaProc.length === 0, `${pids.length} processes (via /proc); listeners [${viaProc.join("; ")}]`);
+      }
     }
     const lines = out.split("\n").filter((l) => /\(LISTEN\)|\bUDP\b/.test(l));
     return verdict(lines.length === 0, `${pids.length} processes; listeners [${lines.map((l) => l.replace(/\s+/g, " ").split(" ").slice(-2).join(" ")).join("; ")}]`);
   });
   await s.run("B10.memory_snapshot", "no grant, config, slice or person ticket in the relay's heap", "heap snapshot (--heapsnapshot-signal) holds no compact JWS of those typs", async () => {
-    const pids = processTree(peer.pids());
-    for (const p of pids) {
+    // C55: signal only the target process (the directly spawned relay), never a whole tree (dash dies on SIGUSR2)
+    for (const p of peer.pids().slice(0, 1)) {
       try {
         process.kill(p, "SIGUSR2");
       } catch {

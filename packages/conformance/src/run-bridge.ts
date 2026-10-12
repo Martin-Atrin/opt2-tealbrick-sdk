@@ -15,6 +15,7 @@ import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dyn
 import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
 import { configChecks, keyChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
+import { spawnCommand } from "./command.ts";
 import { request } from "./http.ts";
 import { buildReport, type PayloadScan, type Report } from "./report.ts";
 import { bad, notRun, Suite, verdict } from "./suite.ts";
@@ -72,7 +73,7 @@ async function waitHttp(url: string, ms: number, alive: () => boolean = () => tr
 /** `cmd` as a separate process (own process group); stdout/stderr captured for the log scan (B11). */
 export function processHarness(cmd: string, logs: { text: string }, echo = false): BridgeStart {
   return async (env) => {
-    const child: ChildProcess = spawn(cmd, { shell: true, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const child: ChildProcess = spawnCommand(cmd, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
     const take = (d: Buffer) => {
       logs.text += d.toString("utf8");
       if (echo) process.stderr.write(d);
