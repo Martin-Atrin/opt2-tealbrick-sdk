@@ -19,7 +19,7 @@ import { BridgeLink } from "./link.ts";
 import { createLogger, SecretRegistry } from "./log.ts";
 import { decide } from "./ops.ts";
 import { createPersonAuth } from "./person.ts";
-import { dropPrivileges } from "./privilege.ts";
+import { dropPrivileges, type PrivilegeProc } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 import { createScopeStore } from "./scopes.ts";
@@ -95,7 +95,12 @@ function listen(server: Server, port: number): Promise<void> {
 }
 
 /** Reads only the TB_* names of `env`; refuses to boot on an invalid manifest, handler set or migration set. */
-export async function startApp(app: App, env: Record<string, string | undefined>): Promise<RunningApp> {
+/**
+ * `harness` is for in-process test harnesses only (not part of types/sdk.ts): `privilegeProc` replaces the real process
+ * facade of the privilege drop so a root test runner is not dropped to uid 1000 by an app it starts in-process.
+ * Production and the conformance CLI (which forks the app) never pass it.
+ */
+export async function startApp(app: App, env: Record<string, string | undefined>, harness?: { privilegeProc?: PrivilegeProc }): Promise<RunningApp> {
   const def = definitions.get(app);
   if (!def) throw new TbError("app_invalid", "startApp needs the value returned by defineApp", 500);
   const v = validateManifest(def.manifest);
@@ -113,7 +118,7 @@ export async function startApp(app: App, env: Record<string, string | undefined>
     throw new TbError("env_invalid", "TB_INSTANCE_ID, TB_BRIDGE_URL and TB_PORTAL_KEYS are required unless TB_STANDALONE=1", 500);
 
   // C53 / BSA-05: started as root → hand the volumes to uid 1000 and drop before any file, key or listener opens.
-  if (dropPrivileges(cfg)) log.info("privileges_dropped", { uid: 1000 });
+  if (dropPrivileges(cfg, harness?.privilegeProc)) log.info("privileges_dropped", { uid: 1000 });
 
   const sealer = createSealer(resolveKeks(cfg.dataDir, cfg.kek, cfg.kekPrevious));
   await restoreAtBoot(

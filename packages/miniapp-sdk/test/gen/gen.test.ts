@@ -65,7 +65,8 @@ describe("openapi", () => {
         notebook_rename: async () => ({}),
       },
     });
-    const running = await startApp(app, { TB_DATA_DIR: dir, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" });
+    // harness proc: never drop the (possibly root, in CI) test runner to uid 1000
+    const running = await startApp(app, { TB_DATA_DIR: dir, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" }, { privilegeProc: { getuid: () => 1000 } });
     try {
       const served = await (await fetch(`http://127.0.0.1:${port}/tb/v1/openapi.json`)).json();
       const [[name, text]] = [...generate("openapi", fromManifest(manifest))] as [[string, string]];
