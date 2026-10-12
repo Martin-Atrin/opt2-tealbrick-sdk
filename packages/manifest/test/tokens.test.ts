@@ -8,6 +8,8 @@ import { type Issue, memoryReplayGuard, signJws } from "../src/jws.ts";
 import { keySetFrom } from "../src/keys.ts";
 import { opaqueValue, ulid } from "../src/random.ts";
 import {
+  bridgeOpBinding,
+  bridgeOpProofClaims,
   signAgentSession,
   signBridgeOpProof,
   signCallProof,
@@ -317,4 +319,20 @@ test("verifyCallProof v0.1.13 (G1): `hv` is part of the signed op proof; malform
   payload.hv = { ...hv, f: "money" };
   const forged = `${h64}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${s64}`;
   assert.equal(code(verifyCallProof(forged, w.trust, bind)), "invalid_token");
+});
+
+test("bridgeOpBinding (C91): catalog {bop, op} only; resolve {op, in}; mark {in}; scope_summary {}; sign == verify", async () => {
+  const { w, call, brg } = await proofs();
+  const cat = { op: "tools", query: "gmail list", limit: 5 };
+  assert.deepEqual(bridgeOpBinding("catalog", cat), { bop: "catalog", op: "tools" });
+  assert.deepEqual(bridgeOpBinding("resolve", { op: "tools", tool: "gmail_list" }), { bop: "resolve", op: "tools", inputDigest: digest({ op: "tools", tool: "gmail_list" }) });
+  assert.deepEqual(bridgeOpBinding("mark", { call, mark: "after_failed" }), { bop: "mark", inputDigest: digest({ call, mark: "after_failed" }) });
+  assert.deepEqual(bridgeOpBinding("scope_summary", {}), { bop: "scope_summary" });
+  for (const [bop, body] of [["catalog", cat], ["resolve", { op: "tools", tool: "x" }], ["mark", { call, mark: "after_failed" }], ["scope_summary", {}]] as const) {
+    const t = await signBridgeOpProof({ iss: brg, sub: brg, aud: `tb:ins:${w.ins}`, call: `call_${ulid()}` as CallId, ...bridgeOpProofClaims(bop, body), iat: NOW }, w.bridgeKey);
+    assert.ok(verifyBridgeOpProof(t, w.trust, bridgeOpBinding(bop, body)).ok, bop);
+  }
+  // the live QA S1 bug: a catalog proof that binds `in` is refused by the rule
+  const withIn = await signBridgeOpProof({ iss: brg, sub: brg, aud: `tb:ins:${w.ins}`, call, bop: "catalog", op: "tools", in: digest(cat), iat: NOW }, w.bridgeKey);
+  assert.equal(code(verifyBridgeOpProof(withIn, w.trust, bridgeOpBinding("catalog", cat))), "invalid_token");
 });

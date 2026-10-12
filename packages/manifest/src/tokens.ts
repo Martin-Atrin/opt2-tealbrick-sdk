@@ -127,6 +127,32 @@ export function verifyHookProof(
   return { ok: true, claims: c };
 }
 
+/**
+ * THE bridge-op binding rule (SDK-API §3.2, C91): which claims a bridge-op proof carries for a body. The bridge signs
+ * exactly these claims and the SDK (and conformance) verify exactly these — one function, so they cannot drift.
+ * catalog → {bop, op} (the search query is NOT bound); resolve → {bop, op, in}; mark → {bop, in}; scope_summary → {bop}.
+ * `in` = digest(body).
+ */
+export function bridgeOpBinding(bop: BridgeOp, body: Json): { bop: BridgeOp; op?: string; inputDigest?: Sha256Digest } {
+  const op = body && typeof body === "object" && !Array.isArray(body) && typeof body.op === "string" ? body.op : undefined;
+  switch (bop) {
+    case "catalog":
+      return { bop, ...(op !== undefined ? { op } : {}) };
+    case "resolve":
+      return { bop, ...(op !== undefined ? { op } : {}), inputDigest: digest(body) };
+    case "mark":
+      return { bop, inputDigest: digest(body) };
+    default:
+      return { bop };
+  }
+}
+
+/** Claims the bridge puts into a bridge-op proof for `body` ({@link bridgeOpBinding} as claim names). */
+export function bridgeOpProofClaims(bop: BridgeOp, body: Json): { bop: BridgeOp; op?: string; in?: Sha256Digest } {
+  const b = bridgeOpBinding(bop, body);
+  return { bop: b.bop, ...(b.op !== undefined ? { op: b.op } : {}), ...(b.inputDigest !== undefined ? { in: b.inputDigest } : {}) };
+}
+
 /** Bridge-op proof (`bop` variant, C16 B5): `iss = sub` = workspace bridge; `bop`, `op`, `in` bound (each present iff bound). */
 export function verifyBridgeOpProof(
   token: string,
