@@ -117,6 +117,7 @@ describe("bridge target", () => {
   const broken: [string, MiniFlags, string[], string[]][] = [
     ["skips the pause gate", { skipPause: true }, ["pause.workspace"], ["P1.workspace.mcp"]],
     ["forwards without a call proof", { noProof: true }, ["call"], ["B8.grant_and_proof", "B8.forward"]],
+    ["refuses a required op without _meta (no derived key, pre-C98)", { noDerivedKey: true }, ["call"], ["B8.idempotency_derived"]],
     ["lists person ops in tools/list", { listPerson: true }, ["mcp"], ["B7.no_person_ops", "B7.list_exact"]],
     ["sends tool payloads to Portal", { leakToPortal: true }, ["call", "scan"], ["B9.no_payload"]],
     ["accepts a person token at MCP", { acceptPerson: true }, ["auth"], ["cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo"]],

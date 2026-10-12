@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { channelSenderId, holdVerdictClaim, hookResponseProblem, isValidLaunchPath, onBehalfOfFromMeta, parseChannelSender, reduceBeforeChain } from "../src/index.ts";
+import { channelSenderId, deriveIdempotencyKey, holdVerdictClaim, hookResponseProblem, isValidLaunchPath, onBehalfOfFromMeta, parseChannelSender, reduceBeforeChain } from "../src/index.ts";
 
 test("hookResponseProblem: before (allow/refuse/hold), context (namespace, reserved tb.), after", () => {
   assert.equal(hookResponseProblem("before", { allow: true }, "rules"), null);
@@ -58,5 +58,15 @@ test("isValidLaunchPath (C86): app-relative only", () => {
   for (const ok of ["/", "/holds/hld_01", "/items?id=3#top", "/a/b%20c"]) assert.ok(isValidLaunchPath(ok), ok);
   for (const no of ["", "holds", "//evil.example/x", "/a//b", "https://evil.example", "/a/../b", "/a/%2e%2e/b", "/a\\b", "/a%5Cb", "/%2F%2Fevil", "/a\nb", `/${"x".repeat(512)}`, "/%E0%A4%A"]) {
     assert.equal(isValidLaunchPath(no), false, JSON.stringify(no).slice(0, 40));
+  }
+});
+
+test("deriveIdempotencyKey (C98): stable within the 10-min bucket, differs by session, op, input, connection, bucket", () => {
+  const base = { connection: "con_1", session: "s1", op: "note_write", input: { text: "a", n: 1 }, now: 1_000_000 * 600_000 + 5 };
+  const k = deriveIdempotencyKey(base);
+  assert.match(k, /^drv_[0-9a-f]{64}$/);
+  assert.equal(deriveIdempotencyKey({ ...base, input: { n: 1, text: "a" }, now: base.now + 1000 }), k, "key order and time inside the bucket do not matter");
+  for (const other of [{ session: "s2" }, { op: "x" }, { input: { text: "b", n: 1 } }, { connection: "con_2" }, { now: base.now + 600_000 }]) {
+    assert.notEqual(deriveIdempotencyKey({ ...base, ...other }), k, JSON.stringify(other));
   }
 });

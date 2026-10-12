@@ -418,6 +418,18 @@ function lastOp(c: BridgeCtx, app: FakeApp, seq: number, op?: string): Received 
   return c.since(app, seq, "op").filter((r) => op === undefined || r.name === op)[0];
 }
 
+function keyOf(g: { body: string } | undefined | null): string | undefined {
+  if (!g) return undefined;
+  const k = (JSON.parse(g.body) as { idempotencyKey?: unknown }).idempotencyKey;
+  return typeof k === "string" ? k : undefined;
+}
+/** A schema-agnostic different input: the first string field with "-2" appended, else null. */
+function variantOf(input: Json): Json | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  for (const [k, v] of Object.entries(input)) if (typeof v === "string") return { ...input, [k]: `${v}-2` };
+  return null;
+}
+
 export async function callChecks(c: BridgeCtx): Promise<void> {
   if (!c.on("call")) return;
   const p = c.primary;
@@ -470,12 +482,23 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
     const sent = g ? (JSON.parse(g.body) as { idempotencyKey?: unknown }).idempotencyKey : undefined;
     return verdict(c.isOk(a) && sent === key, `${describeCall(a)}; forwarded key ${sent === key ? "equal" : String(sent)}`);
   });
-  await c.run("B8.idempotency_required", "missing idempotency key on a required op → input_invalid", "isError input_invalid; the app is not called", async () => {
+  // C98 (spec 0.1.14, BRIDGE §7.2): model-driven clients cannot set `_meta`; the bridge derives the key from
+  // (connection, MCP session, op, canonical input, 10-min bucket). Root cause recorded (L2): every earlier test set _meta.
+  await c.run("B8.idempotency_derived", "no _meta key on a required op → the bridge derives one; an identical retry is deduplicated", "call without _meta → ok with a non-empty forwarded idempotencyKey; identical retry (same session, same input) → same key; other input → other key", async () => {
     if (!create) return bad("no idempotency: required op");
+    const input = c.input(p, create.id);
     const s0 = c.w.seqNow();
-    const a = await c.call("free", p, create.id, undefined, null);
-    const o = toolRefused(a, ["input_invalid"]);
-    return verdict(o.pass === true && !lastOp(c, p, s0), `${o.asserted}; app calls ${c.since(p, s0, "op").length}`);
+    const a = await c.call("free", p, create.id, input, null);
+    const k1 = keyOf(lastOp(c, p, s0, create.id));
+    const s1 = c.w.seqNow();
+    const b = await c.call("free", p, create.id, input, null);
+    const k2 = keyOf(lastOp(c, p, s1, create.id));
+    const other = variantOf(input);
+    const s2 = c.w.seqNow();
+    const o = other === null ? null : await c.call("free", p, create.id, other, null);
+    const k3 = other === null ? undefined : keyOf(lastOp(c, p, s2, create.id));
+    const pass = c.isOk(a) && c.isOk(b) && typeof k1 === "string" && k1.length > 0 && k1 === k2 && (other === null || (o !== null && k3 !== k1));
+    return verdict(pass, `first ${describeCall(a)} key ${k1 ? "derived" : "MISSING"}; retry ${describeCall(b)} key ${k2 === k1 ? "same" : "DIFFERENT"}; other input ${other === null ? "n/a" : k3 !== k1 ? "other key" : "SAME key"}`);
   });
   await c.run("B8.input_invalid", "input failing the op schema → input_invalid", "isError input_invalid; the app is not called", async () => {
     const s0 = c.w.seqNow();

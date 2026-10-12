@@ -57,7 +57,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B8.input_verbatim": "input forwarded verbatim; proof binds input and context",
     "B8.headers": "only grant + call proof authenticate the forward",
     "B8.idempotency_forwarded": "_meta idempotency key forwarded",
-    "B8.idempotency_required": "missing required idempotency key → input_invalid",
+    "B8.idempotency_derived": "no _meta key → derived key; identical retry deduplicated (C98)",
     "B8.input_invalid": "input failing the schema → input_invalid",
     "B8.held": "held answer returned with the hold-status tool",
     "B8.app_error_passthrough": "app refusal codes pass through",

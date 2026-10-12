@@ -768,13 +768,18 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const h = hvHold as { op: Operation; input: Json; id: string };
     const d = await decide(h.id, "approve");
     if (d?.status !== 200) return bad(`approve ${d ? show(d) : "no session"}`);
-    const alt = schemaVariants(h.op, h.input)[0];
-    const other = alt === undefined ? null : await hvCall(alt, "conformance other input");
-    const otherOk = other === null || (isHeld(other) && holdIdOf(other) !== h.id);
+    // try schema-valid variants until one is not refused by the app's own checks (a variant may target a scope
+    // instance the caller cannot reach → scope_denied; that says nothing about the hold rule, as in A10)
+    let other: OpAnswer | null = null;
+    for (const alt of schemaVariants(h.op, h.input)) {
+      other = await hvCall(alt, "conformance other input");
+      if (isHeld(other) || isOk(other)) break;
+    }
+    const otherOk = other === null || other.status >= 400 || (isHeld(other) && holdIdOf(other) !== h.id);
     const once = track(await hvCall(h.input, "conformance retry"));
     const twice = track(await hvCall(h.input, "conformance retry again"));
     const pass = otherOk && isOk(once) && isHeld(twice) && holdIdOf(twice) !== h.id;
-    return verdict(pass, `other input: ${other ? show(other) : "n/a (no schema-valid variant)"}; same input: ${show(once)}; again: ${show(twice)}`);
+    return verdict(pass, `other input: ${other ? `${show(other)}${other.status >= 400 ? " (every variant refused by the app: new-hold part not provable)" : ""}` : "n/a (no schema-valid variant)"}; same input: ${show(once)}; again: ${show(twice)}`);
   });
   await s.run("A14.scope_wins", "a scope refusal beats a hook hold verdict", "op whose crud exceeds grant.crud, proof with hv → refused scope_denied (not held)", async () => {
     const op = agentOps.find((o) => o.crud.some((x) => x !== "read")) ?? agentOps[0];

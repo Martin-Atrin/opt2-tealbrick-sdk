@@ -1,5 +1,9 @@
 // CLI: manifest target, pending targets, app --cmd against the mini app, usage errors.
 import assert from "node:assert/strict";
+import { readFileSync as readPkg } from "node:fs";
+
+const PKG_VERSION = (JSON.parse(readPkg(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,9 +51,9 @@ describe("tb-conformance CLI", () => {
     assert.match(m3?.asserted ?? "", /^fail: .*waived until 99\.0\.0: --waive \(command line\)$/);
     assert.equal(r.counts.waived, 1);
     assert.deepEqual(r.waivers.map((w) => [w.id, w.state, w.realStatus]), [["M3", "applied", "fail"]]);
-    const expired = run(["manifest", manifest, "--expect-digest", wrong, "--waive", "M3@0.1.9"]);
+    const expired = run(["manifest", manifest, "--expect-digest", wrong, "--waive", `M3@${PKG_VERSION}`]);
     assert.equal(expired.status, 1, "at or after `until` the waiver is ignored");
-    assert.match(expired.stdout, /waiver M3@0\.1\.9 ignored: conformance 0\.1\.9 ≥ 0\.1\.9/);
+    assert.ok(expired.stdout.includes(`waiver M3@${PKG_VERSION} ignored: conformance ${PKG_VERSION} ≥ ${PKG_VERSION}`), expired.stdout.slice(0, 400));
     assert.match(expired.stdout, /## Waivers/);
     assert.equal(run(["manifest", manifest, "--waive", "Z9.nope@1.0.0"]).status, 2, "unknown check id");
     assert.equal(run(["manifest", manifest, "--waive", "M3"]).status, 2, "missing @until");

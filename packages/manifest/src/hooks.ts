@@ -5,7 +5,7 @@
 import type { HookHoldVerdict, OnBehalfOfClaim, OnBehalfOfContext } from "@opt2-tealbrick/spec/bridge";
 import { RESERVED_CONTEXT_PREFIX } from "@opt2-tealbrick/spec/bridge";
 import { HOOK_HOLD_FAMILIES, type HookPhase } from "@opt2-tealbrick/spec/manifest";
-import { canonicalize } from "./jcs.ts";
+import { canonicalize, digest } from "./jcs.ts";
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const POINTER_RE = /^(\/([^~/]|~[01])*)*$/;
@@ -125,4 +125,19 @@ export function isValidLaunchPath(path: string): boolean {
     if (p.split(/[/?#]/).some((seg) => seg === "..")) return false;
   }
   return true;
+}
+
+/** C98 (BRIDGE §7.2, spec 0.1.14): window of a derived idempotency key. */
+export const DERIVED_IDEMPOTENCY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * C98: the idempotency key the bridge derives when a `tools/call` carries no `_meta["tealbrick/idempotencyKey"]`
+ * (model-driven clients cannot set `_meta`): `drv_` + hex sha256 of JCS {c: connection id, s: MCP session id, op,
+ * in: canonical input, b: 10-min bucket}. Same call in the same session and window → same key (deduplicated by the
+ * app); clients that send a key keep exact semantics. ONE implementation for the bridge and its conformance fakes.
+ */
+export function deriveIdempotencyKey(i: { connection: string; session: string; op: string; input: unknown; now: number }): string {
+  const bucket = Math.floor(i.now / DERIVED_IDEMPOTENCY_WINDOW_MS);
+  const d = digest({ c: i.connection, s: i.session, op: i.op, in: i.input as Parameters<typeof digest>[0], b: bucket });
+  return `drv_${d.slice("sha256:".length)}`;
 }

@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   bridgeOpProofClaims,
+  deriveIdempotencyKey,
   digest,
   dynamicToolNames,
   type Ed25519KeyPair,
@@ -45,6 +46,8 @@ import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/s
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 
 export interface MiniFlags {
+  /** pre-C98: a required op without a _meta key is refused input_invalid (no derived key) */
+  noDerivedKey?: boolean;
   skipPause?: boolean;
   noProof?: boolean;
   listPerson?: boolean;
@@ -392,7 +395,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     return { status: r.status, body };
   };
 
-  const callTool = async (agt: string, name: string, args: Json, idem?: string, meta?: Record<string, unknown>): Promise<unknown> => {
+  const callTool = async (agt: string, name: string, args: Json, idem?: string, meta?: Record<string, unknown>, session = ""): Promise<unknown> => {
     const c = cfg as WorkspaceConfig;
     const t = tools(agt).find((x) => x.name === name);
     if (!t) return toolError(flags.skipPause ? "unknown_tool" : c.pause.workspace || c.pause.agents.includes(agt as never) ? "paused" : "unknown_tool");
@@ -401,7 +404,11 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     const g = grantsOf(agt).find((x) => x.claims.aud === `tb:ins:${t.ins}`);
     if (!declared || !g) return toolError("no_grant");
     if (!t.kind && !declared.standard && !validateInput(declared, args).ok) return toolError("input_invalid");
-    if (!t.kind && !declared.standard && declared.idempotency === "required" && !idem) return toolError("input_invalid");
+    if (!t.kind && !declared.standard && declared.idempotency === "required" && !idem) {
+      // C98: derive the key (shared rule) instead of refusing model-driven clients that cannot set _meta
+      if (flags.noDerivedKey) return toolError("input_invalid");
+      idem = deriveIdempotencyKey({ connection: agt, session, op: declared.id, input: args, now: Date.now() });
+    }
     // dynamic ops (BRIDGE §7.2 / §8): _search answers from the catalog bridge op; _call resolves first; a list entry
     // carries its catalog crud / effect; gate() runs on the effective op
     let op = declared;
@@ -526,7 +533,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       if (msg.method === "tools/list") result = { tools: tools(agt).map((t) => ({ name: t.name, inputSchema: t.inputSchema })) };
       if (msg.method === "tools/call") {
         const meta = msg.params?._meta as Record<string, unknown> | undefined;
-        result = await callTool(agt, String(msg.params?.name), (msg.params?.arguments ?? {}) as Json, typeof meta?.["tealbrick/idempotencyKey"] === "string" ? (meta["tealbrick/idempotencyKey"] as string) : undefined, meta);
+        result = await callTool(agt, String(msg.params?.name), (msg.params?.arguments ?? {}) as Json, typeof meta?.["tealbrick/idempotencyKey"] === "string" ? (meta["tealbrick/idempotencyKey"] as string) : undefined, meta, String(req.headers["mcp-session-id"] ?? ""));
       }
       return send(res, 200, { jsonrpc: "2.0", id: msg.id, result });
     }

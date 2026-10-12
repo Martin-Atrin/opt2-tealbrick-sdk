@@ -10,16 +10,21 @@ const NAME = "__APP_NAME__";
 const PATHS: Record<string, string> = { holds: "./", agents: "./configure" };
 const PAGES = STANDARD_PAGES.filter((p) => p.id in PATHS);
 const pageOf = (pathname: string) => (pathname.replace(/\/+$/, "").endsWith("/configure") ? "agents" : "holds");
+/** SDK 0.1.13 (G4): `tb.holds_pending` decidePath `/holds/<id>` opens here (Portal launch ticket with path); show that hold. */
+const holdOf = (pathname: string) => /\/holds\/(hld_[0-9A-HJKMNP-TV-Z]{26})\/?$/.exec(pathname)?.[1] ?? null;
 
-function Holds() {
-  const { holds, loading, decide } = useHolds({ status: "held" });
+function Holds({ only }: { only: string | null }) {
+  const { holds: all, loading, decide } = useHolds({ status: "held" });
   if (loading) return <p>Loading holds.</p>;
-  if (holds.length === 0) return <p>No calls wait for your approval.</p>;
+  const holds = only ? all.filter((h) => h.id === only) : all;
+  if (holds.length === 0) return <p>{only ? "This approval is no longer waiting." : "No calls wait for your approval."}</p>;
   return (
     <ul>
       {holds.map((h) => (
         <li key={h.id}>
           <strong>{h.caller.name}</strong> {h.summary} <Tag tone="action">{h.op}</Tag>
+          {h.holdFamily ? <Tag>{h.holdFamily}</Tag> : null}
+          {h.heldBy ? <Tag>held by {h.heldBy}</Tag> : null}
           {h.view ? <pre>{h.view}</pre> : null}
           <Button variant="primary" onClick={() => void decide(h.id as Parameters<typeof decide>[0], "approve")}>
             Approve
@@ -79,7 +84,7 @@ export function App() {
         ) : null
       }
     >
-      {status === "signed_out" ? null : page === "agents" ? <Agents /> : <Holds />}
+      {status === "signed_out" ? null : page === "agents" ? <Agents /> : <Holds only={holdOf(globalThis.location.pathname)} />}
     </AppShell>
   );
 }
