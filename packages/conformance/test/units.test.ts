@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { generateKeyPair } from "@opt2-tealbrick/manifest";
-import { Mint, peek, rawSign, readTar, sampleInput, scanPayloads, tamperValue } from "../src/index.ts";
+import { jsonPointer, Mint, parseConformanceConfig, peek, rawSign, readTar, resolvePlaceholders, runSetup, sampleInput, scanPayloads, tamperValue } from "../src/index.ts";
 import { writeTarGz } from "./apps/tar-write.ts";
 
 describe("units", () => {
@@ -28,6 +28,35 @@ describe("units", () => {
     );
     assert.deepEqual(v, { s: "fil", n: 5, e: "x", b: false, a: ["fill-value", "fill-value"], o: { k: "fill-value" }, mail: "conformance@example.org", r: 7 });
     assert.deepEqual(sampleInput(undefined, "x"), {});
+  });
+
+  it("setup fixtures (v0.1.18): JSON pointers, whole-string placeholders, blocked captures", async () => {
+    assert.equal(jsonPointer({ a: [{ "b/c": 1, "d~e": 2 }] }, "/a/0/b~1c"), 1);
+    assert.equal(jsonPointer({ a: [{ "d~e": 2 }] }, "/a/0/d~0e"), 2);
+    assert.equal(jsonPointer({ a: 1 }, "/b"), undefined);
+    assert.deepEqual(jsonPointer({ a: 1 }, ""), { a: 1 });
+    const cfg = parseConformanceConfig(
+      {
+        setup: [
+          { id: "one", as: "owner", op: "tb.scopes_set", input: { agent: "${tb.app}" }, capture: { first: "/id" } },
+          { id: "two", as: "app", op: "area_create", input: { parent: "${first}" }, capture: { second: "/id" } },
+          { id: "three", as: "agentB", op: "area_create", capture: { third: "/id" } },
+        ],
+        inputs: { op: { a: "${second}", b: "x-${second}", c: ["${third}"] } },
+      },
+      "cfg",
+    );
+    const calls: string[] = [];
+    const r = await runSetup(cfg.setup, { "tb.app": "ins_APP" }, async (as, op, input) => {
+      calls.push(`${as} ${op} ${JSON.stringify(input)}`);
+      if (op === "tb.scopes_set") return { ok: false, output: undefined, shown: "403 forbidden" };
+      return { ok: true, output: { id: "area_3" }, shown: "200 ok" };
+    });
+    // step two needs `first` (step one failed): it does not run; step three runs
+    assert.deepEqual(calls, ['owner tb.scopes_set {"agent":"ins_APP"}', "agentB area_create {}"]);
+    const res = resolvePlaceholders(cfg.inputs.op as never, r);
+    assert.deepEqual(res.value, { a: "${second}", b: "x-${second}", c: ["area_3"] }, "only whole strings are placeholders");
+    assert.deepEqual(res.blocked, ["setup step two not run: its input needs setup step one (owner tb.scopes_set) failed: 403 forbidden"]);
   });
 
   it("tamperValue changes one value and keeps the shape", () => {

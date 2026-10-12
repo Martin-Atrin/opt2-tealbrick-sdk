@@ -87,6 +87,21 @@ export interface MiniAppFaults {
   resolveNoFamily?: boolean;
   /** pre-C108 strict reader: a grant whose held names an unknown family is refused grant_invalid (fails C3.grant_held_unknown) */
   strictHeld?: boolean;
+  /** pre-C111a: caps ignored when a Free grant carries a non-empty wf (fails A3.free_wf_caps) */
+  capsIgnoredWithWf?: boolean;
+  /**
+   * v0.1.18 (Knowledge-like, NOT a fault): keys app-caller data by caller. An app caller's `area_create` creates an area
+   * of its own (output {id}); any other op by an app caller must name one of ITS areas in the scope field, else
+   * 403 area_required (area-less app callers are refused; the owner's tb.scopes_set does not help). Needs an
+   * `area_create` op in the manifest; A12.caller_name passes only with a setup step + inputsAs.app fixture.
+   */
+  areaPerAppCaller?: boolean;
+  /**
+   * v0.1.18 (NOT a fault): the dynamic catalog is empty (an engine that lists nothing without its backend) but resolve
+   * still answers the known tools; an unknown tool resolves to null (200 null). A11.resolve_family needs
+   * dynamic.<op>.resolveTools.
+   */
+  emptyCatalog?: boolean;
 }
 
 /** Catalog of every dynamic op of the mini app (DynamicCatalogEntry): a read entry, an outward and a money entry. */
@@ -137,6 +152,8 @@ interface State {
   defaultsApplied: string[];
   sessions: { digest: string; per: string; createdAt: number; csrf: string; expiresAt: number }[];
   usedJti: string[];
+  /** areaPerAppCaller: app caller instance id → its area ids */
+  areas?: Record<string, string[]>;
   audit: { id: string; at: number; actor: string; action: string; target: string | null }[];
 }
 
@@ -438,6 +455,20 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       return json(res, 200, { status: "ok", output: { status: h.status, expiresAt: h.expiresAt ? new Date(h.expiresAt).toISOString() : null, family: h.holdFamily, reason: h.reason } });
     }
     if (!validateInput(op, body.input).ok) throw new E(400, "input_invalid");
+    let ownArea = false;
+    if (faults.areaPerAppCaller && callerType === "app") {
+      if (!st.areas) st.areas = {};
+      const areas = st.areas;
+      if (op.id === "area_create") {
+        const id = newId("area");
+        areas[callerId] = [...(areas[callerId] ?? []), id];
+        save();
+        return json(res, 200, { status: "ok", output: { id, name: (body.input as Record<string, Json>).name ?? null } });
+      }
+      const named = Object.values((body.input ?? {}) as Record<string, unknown>).filter((v): v is string => typeof v === "string");
+      if (!named.some((v) => (areas[callerId] ?? []).includes(v))) throw new E(403, "area_required");
+      ownArea = true;
+    }
     ensureAgent(callerId);
     const inputDigest = digest(body.input);
     const idemKey = op.idempotency === "none" ? null : (body.idempotencyKey ?? null);
@@ -459,6 +490,8 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       const sid = strs.find((v) => st.scopes.some((r) => r.agent === callerId && r.type === scoped && r.instanceId === v)) ?? strs[0] ?? "";
       const row = st.scopes.find((r) => r.agent === callerId && r.type === scoped && r.instanceId === sid);
       access = row ? { level: row.access, crud: levelCrud(scoped, row.access) } : null;
+      // areaPerAppCaller: the caller's own area grants it full access to that scope instance
+      if (ownArea) access = { level: "own_area", crud: ["create", "read", "update", "delete"] };
     }
     const approved = faults.standingApproval
       ? st.receipts.find((x) => x.caller.id === callerId && x.op === op.id && (x.status === "approved" || x.status === "run"))
@@ -477,7 +510,9 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       approval: approved && !(faults.hvIgnoresApproval && holdVerdict) ? "approved" : "none",
       holdVerdict,
     });
-    if (faults.appCallerNoHold && callerType === "app" && d.decision === "hold") {
+    if (faults.capsIgnoredWithWf && d.decision === "hold" && d.reason === "caps_exceeded" && Array.isArray(g0.wf) && g0.wf.length > 0) {
+      // a pre-C111a app: a workflow grant runs past its caps
+    } else if (faults.appCallerNoHold && callerType === "app" && d.decision === "hold") {
       // a broken app that runs every app→app call (C105a violated)
     } else if (faults.skipGrantVerify && d.decision === "refuse" && d.reason.startsWith("grant_")) {
       // a broken app that never verifies the grant runs anyway
@@ -498,7 +533,8 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       decidedBy: null,
       ...(faults.storesRawInput ? { input: body.input } : {}),
     };
-    if (d.decision === "hold" && !(faults.appCallerNoHold && callerType === "app")) {
+    const capsSkipped = faults.capsIgnoredWithWf && d.decision === "hold" && d.reason === "caps_exceeded" && Array.isArray(g0.wf) && g0.wf.length > 0;
+    if (d.decision === "hold" && !(faults.appCallerNoHold && callerType === "app") && !capsSkipped) {
       const h: Receipt = { ...base, id: newId("hld"), holdFamily: d.holdFamily ?? null, heldBy: d.heldBy ?? null, reason: d.heldBy && holdVerdict ? holdVerdict.reason : d.reason, status: "held", expiresAt: Date.now() + 15 * 60_000, view: op.title };
       st.receipts.push(h);
       if (ik) st.idem[ik] = { inputDigest, kind: "held", holdId: h.id };
@@ -621,8 +657,9 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         if (bop === "catalog" || bop === "resolve") {
           const dyn = ops.find((o) => o.id === b.op && !o.standard && o.dynamic);
           if (!dyn) throw new E(404, "unknown_tool");
-          if (bop === "catalog") return json(res, 200, DYN_ENTRIES);
+          if (bop === "catalog") return json(res, 200, faults.emptyCatalog ? [] : DYN_ENTRIES);
           const e = DYN_ENTRIES.find((x) => x.name === b.tool);
+          if (!e && faults.emptyCatalog) return json(res, 200, null);
           if (!e) throw new E(404, "unknown_tool");
           const fam = "holdFamily" in e && !faults.resolveNoFamily ? { holdFamily: e.holdFamily } : {};
           return json(res, 200, { tool: e.name, crud: e.crud, effect: e.effect, ...fam });

@@ -72,6 +72,34 @@ describe("tb-conformance CLI", () => {
     }
   });
 
+  it("v0.1.18: a malformed tealbrick-conformance.json (setup / inputs / inputsAs / dynamic) is a usage error (exit 2) before the app starts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tbconf-config-"));
+    try {
+      const copy = join(dir, "app.manifest.json");
+      writeFileSync(copy, readFileSync(manifest, "utf8"));
+      const cases: [unknown, RegExp][] = [
+        [{ setup: [{ id: "s1", as: "robot", op: "item_create" }] }, /setup\[0\]\.as must be one of owner, agentA, agentB, app/],
+        [{ setup: [{ id: "s1", as: "app", op: "area_create", capture: { area: "id" } }] }, /capture\.area must be a JSON pointer/],
+        [{ setup: [{ id: "s1", as: "app", op: "a", input: { x: "${later}" } }, { id: "s2", as: "app", op: "b", capture: { later: "/id" } }] }, /setup\[0\]\.input: placeholder \$\{later\} is not captured by an earlier setup step/],
+        [{ inputs: { item_create: { space: "${nope}" } } }, /inputs: placeholder \$\{nope\} is not captured by any setup step/],
+        [{ inputsAs: { owner: { item_create: {} } } }, /inputsAs\.owner: caller must be one of agentA, agentB, app/],
+        [{ dynamic: { item_lookup: { resolveTools: [] } } }, /dynamic\.item_lookup must be \{resolveTools: \[non-empty tool names\]\}/],
+        [{ setupp: [] }, /unknown key "setupp"/],
+      ];
+      for (const [doc, msg] of cases) {
+        writeFileSync(join(dir, "tealbrick-conformance.json"), JSON.stringify(doc));
+        const r = run(["app", "--start", startModule, "--manifest", copy, "--json"]);
+        assert.equal(r.status, 2, `${JSON.stringify(doc)}: ${r.stderr.slice(0, 300)}`);
+        assert.match(r.stderr, msg);
+        assert.equal(r.stdout, "", "nothing ran");
+      }
+      writeFileSync(join(dir, "tealbrick-conformance.json"), "{ not json");
+      assert.equal(run(["app", "--start", startModule, "--manifest", copy]).status, 2, "not JSON");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("app --start <module> runs every check (restart + backup round-trip included) and exits 0 (--test-roots: accepted no-op, the default)", () => {
     const r = run(["app", "--start", startModule, "--manifest", manifest, "--timeout", "8000", "--test-roots", "--json"]);
     const report = JSON.parse(r.stdout) as { ok: boolean; checks: { id: string; status: string }[] };

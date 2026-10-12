@@ -20,7 +20,7 @@ const KEYSET_IDS = ["B20.kss_enrolled", "B20.portal_keys_ignored", "B20.kss_unkn
 
 const SPINE013_IDS = ["B22.hold_verdict", "B22.hold_retry_refused", "B22.hv_tamper", "B23.on_behalf_of", "B23.reserved_tb_namespace", "B24.app_initiated", "B24.no_grant"];
 const B26_IDS = ["B26.app_initiated_real", "B26.app_initiated_rate", "B26.app_initiated_audit", "B26.parent_call_forged", "B26.parent_call_foreign", "B26.parent_call_expired"];
-const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark", ...B26_IDS];
+const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark", "B25.real_hook_hold", ...B26_IDS];
 const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"];
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
@@ -37,7 +37,7 @@ describe("bridge target", () => {
 
   it("C98a + C107 (conformance 0.1.11): a correct bridge derives keys for supported ops and refuses family-less outward / money resolutions", async () => {
     const r = await run({}, ["call", "dynamic"]);
-    for (const id of ["B8.idempotency_derived", "B5.grant_held_unknown", "B5.restored", "B16.resolve_family", "B16.dynamic_call_resolved", "B16.dynamic_ceiling_exceeded", "B16.dynamic_entry_call", "B7.dynamic_list", "B7.dynamic_search"]) {
+    for (const id of ["B8.idempotency_derived", "B5.grant_held_unknown", "B5.free_wf_limits", "B5.free_wf_caps", "B5.restored", "B16.resolve_family", "B16.dynamic_call_resolved", "B16.dynamic_ceiling_exceeded", "B16.dynamic_entry_call", "B7.dynamic_list", "B7.dynamic_search"]) {
       assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
     }
     assert.match(r.checks.find((c) => c.id === "B8.idempotency_derived")?.asserted ?? "", /supported \w+: .* key derived, retry .* key same/);
@@ -137,6 +137,7 @@ describe("bridge target", () => {
     ["derives the key for required ops only (supported forwarded keyless, pre-C98a)", { deriveRequiredOnly: true }, ["call"], ["B8.idempotency_derived"]],
     ["forwards an outward / money resolution without holdFamily (pre-C107)", { resolveNoFamilyCheck: true }, ["dynamic"], ["B16.resolve_family"]],
     ["drops a config grant whose held names an unknown family (strict reader, pre-C108)", { strictHeld: true }, ["call"], ["B5.grant_held_unknown"]],
+    ["limits only Bound grants by wf (pre-C111a gate)", { wfOnlyBound: true }, ["call"], ["B5.free_wf_limits"]],
     ["lists person ops in tools/list", { listPerson: true }, ["mcp"], ["B7.no_person_ops", "B7.list_exact"]],
     ["sends tool payloads to Portal", { leakToPortal: true }, ["call", "scan"], ["B9.no_payload"]],
     ["accepts a person token at MCP", { acceptPerson: true }, ["auth"], ["cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo"]],
@@ -158,6 +159,8 @@ describe("bridge target", () => {
     ["does not rate-limit app-initiated calls", { noAppRateLimit: true }, ["real_app"], ["B26.app_initiated_rate"]],
     ["does not audit app-initiated calls", { noAppInitiatedAudit: true }, ["real_app"], ["B26.app_initiated_audit"]],
     ["trusts a forged parentCall (child call, not app-initiated)", { parentTrusted: true }, ["real_app"], ["B26.parent_call_forged"]],
+    // L2: a REAL SDK before hook's hold verdict must reach the target app
+    ["treats a before hook's hold verdict as hook_failed", { holdAsHookFailed: true }, ["real_app"], ["B25.real_hook_hold"]],
     ["accepts another instance's in-flight call as parentCall", { parentAnyInstance: true }, ["real_app"], ["B26.parent_call_foreign"]],
     ["keeps finished calls as valid parentCalls", { parentKeepsFinished: true }, ["real_app"], ["B26.parent_call_expired"]],
   ];

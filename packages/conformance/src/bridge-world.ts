@@ -27,7 +27,7 @@ import {
   validateManifest,
 } from "@opt2-tealbrick/manifest";
 import type { AppEntry, EnrolCodeEntry, HookEntry, KeyRequirementEntry, SkillFile, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
-import { type AgentId, type BridgeId, type ConnectionId, type Ed25519PublicJwk, type InstanceId, type PersonId, type StandaloneState, TYP } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, type BridgeId, type ConnectionId, type Ed25519PublicJwk, type FreeCaps, type InstanceId, type PersonId, type StandaloneState, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import { FakeApp, type FakeAppWorld } from "./fake-app.ts";
@@ -201,7 +201,8 @@ export class BridgeWorld {
   appsPolicy: { held: HoldFamily[] } = { held: [...DEFAULT_HELD_FAMILIES] };
   /** live K4 grant specs, rebuilt into JWS by `publish()` */
   /** `held` overrides the agent card default (DEFAULT_HELD_FAMILIES); v0.1.17 (C108) it may name unknown families */
-  grantSpecs: { role: AgentRole; app: FakeApp; crud: CrudAction[]; mode: AgentMode; wf: string[]; held?: readonly string[] }[] = [];
+  /** agent grants the fake Portal mints into the config; `caps` (v0.1.19 C111a: applies in any mode) default {} */
+  grantSpecs: { role: AgentRole; app: FakeApp; crud: CrudAction[]; mode: AgentMode; wf: string[]; held?: readonly string[]; caps?: FreeCaps }[] = [];
   hooksOn = true;
   enrolCodes: EnrolCodeEntry[] = [];
   claimCode = "";
@@ -390,6 +391,10 @@ export class BridgeWorld {
     for (const a of this.apps)
       for (const h of a.manifest.hooks ?? [])
         out.push({ id: `${a.product}.${h.id}` as HookEntry["id"], ins: a.ins, product: a.product, hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match });
+    // the listed real SDK app's hooks (B25.real_hook_hold: a REAL before hook answering a hold verdict)
+    const real = this.realApp?.listed ? this.realApp : null;
+    for (const h of real?.manifest.hooks ?? [])
+      out.push({ id: `${real?.manifest.id}.${h.id}` as HookEntry["id"], ins: real?.ins as InstanceId, product: real?.manifest.id as HookEntry["product"], hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match });
     return out;
   }
 
@@ -437,7 +442,7 @@ export class BridgeWorld {
     this.grants.clear();
     for (const g of this.grantSpecs) {
       // v0.1.15 (C105, L1): agent grants carry the agent card default held families (Core mints a new card's policy so)
-      this.grants.set(`${g.role}|${g.app.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents[g.role].agt}`, aud: `tb:ins:${g.app.ins}`, crud: g.crud, mode: g.mode, held: [...(g.held ?? DEFAULT_HELD_FAMILIES)], wf: g.wf, iat: nowS() - 5 }));
+      this.grants.set(`${g.role}|${g.app.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents[g.role].agt}`, aud: `tb:ins:${g.app.ins}`, crud: g.crud, mode: g.mode, held: [...(g.held ?? DEFAULT_HELD_FAMILIES)], ...(g.caps ? { caps: g.caps } : {}), wf: g.wf, iat: nowS() - 5 }));
     }
     const real = this.realApp?.listed ? this.realApp : null;
     if (real) this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", held: [...DEFAULT_HELD_FAMILIES], wf: [], iat: nowS() - 5 }));

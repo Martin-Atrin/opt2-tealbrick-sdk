@@ -634,6 +634,66 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
       await c.apply();
     }
   });
+  // v0.1.19 (C111a, BRIDGE §8.1 gate step 4): a non-empty `wf` limits the ops in ANY mode (not only Bound)
+  const freeCrud = spec?.crud ?? [];
+  const inFreeCrud = (o: Operation) => o.crud.every((x) => freeCrud.includes(x));
+  const wfOther = c.pick(p, (o) => o.id !== read.id && inFreeCrud(o) && !o.dynamic);
+  await c.run("B5.free_wf_limits", "a Free grant with a non-empty wf limits the ops (C111a)", `config grant (free agent → primary, mode free) with wf [${read.id}]: ${read.id} is forwarded ok; another agent op within the grant's crud → isError not_in_workflow (or unknown_tool: not listed), no app request`, async () => {
+    if (!spec) return bad("no free-agent grant spec for the primary app");
+    if (!wfOther) return bad("no second agent op within the free grant's crud");
+    spec.wf = [read.id];
+    try {
+      await c.apply();
+      const g = c.w.grantFor("free", p) ?? "";
+      const r = await c.until(async () => {
+        const s0 = c.w.seqNow();
+        const a = await c.call("free", p, read.id);
+        const got = lastOp(c, p, s0, read.id);
+        return c.isOk(a) && got && got.grant?.jti === peek(g)?.jti ? { a, got } : null;
+      }, c.h.pauseLatencyMs);
+      if (!r.value) return bad(`${read.id} (in wf) not forwarded with the wf grant: ${describeCall(await c.call("free", p, read.id))}`);
+      const o = await refusedNoCall("free", p, wfOther.id, ["not_in_workflow", "unknown_tool"]);
+      return verdict(o.pass === true, `in wf ${read.id}: ${describeCall(r.value.a)}; outside wf ${wfOther.id}: ${o.asserted}`);
+    } finally {
+      spec.wf = [];
+      await c.apply();
+    }
+  });
+  const capOp = c.pick(p, (o) => o.effect === "write" && inFreeCrud(o) && !o.dynamic);
+  await c.run("B5.free_wf_caps", "a Free grant with wf + caps: caps travel to the app and still hold (C111a)", "config grant (mode free) with wf [<write op>] + caps {write: {max: 0, per: hour}} → the call is forwarded (grant with that wf and caps) and the app's hold (caps) comes back as held", async () => {
+    if (!spec) return bad("no free-agent grant spec for the primary app");
+    if (!capOp) return na("no write op within the free grant's crud");
+    spec.wf = [capOp.id];
+    spec.caps = { write: { max: 0, per: "hour" } };
+    const holdId = `hld_${ulid()}`;
+    // the fake app applies the forwarded grant's caps as the SDK's authorize() does (step 4, any mode since C111a)
+    p.onOp = (info) => {
+      const caps = info.grant.caps as Record<string, { max?: number }> | undefined;
+      if (info.op === capOp.id && caps?.write?.max === 0) return { status: 202, body: { status: "held", holdId, expiresAt: new Date(Date.now() + 3600_000).toISOString() } };
+      return { status: 200, body: { status: "ok", output: { op: info.op } } };
+    };
+    try {
+      await c.apply();
+      const g = c.w.grantFor("free", p) ?? "";
+      const r = await c.until(async () => {
+        const s0 = c.w.seqNow();
+        const a = await c.call("free", p, capOp.id, undefined, c.idemKey());
+        const got = lastOp(c, p, s0, capOp.id);
+        return got && got.grant?.jti === peek(g)?.jti ? { a, got } : null;
+      }, c.h.pauseLatencyMs);
+      if (!r.value) return bad(`${capOp.id} not forwarded with the wf + caps grant: ${describeCall(await c.call("free", p, capOp.id, undefined, c.idemKey()))}`);
+      const fg = r.value.got.grant as { mode?: string; wf?: string[]; caps?: Record<string, { max?: number }> };
+      const sc = r.value.a.structured ?? {};
+      const carried = fg.mode === "free" && JSON.stringify(fg.wf) === JSON.stringify([capOp.id]) && fg.caps?.write?.max === 0;
+      const held = !r.value.a.isError && sc.status === "held" && sc.holdId === holdId;
+      return verdict(carried && held, `${capOp.id}: ${describeCall(r.value.a)}; forwarded grant mode ${String(fg.mode)}, wf ${JSON.stringify(fg.wf)}, caps.write.max ${String(fg.caps?.write?.max)}`);
+    } finally {
+      p.onOp = null;
+      spec.wf = [];
+      delete spec.caps;
+      await c.apply();
+    }
+  });
 }
 
 // ── B6 hooks ─────────────────────────────────────────────────────────────────

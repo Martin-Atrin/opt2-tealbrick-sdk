@@ -50,8 +50,26 @@ export { type RunRelayOptions, runRelayTarget } from "./run-relay.ts";
 export { sampleInput } from "./sample.ts";
 export { scanPayloads } from "./scan.ts";
 export { SDK_COVERAGE } from "./sdk-coverage.ts";
+export { jsonPointer, type Resolved, resolvePlaceholders, runSetup, type SetupAnswer, type SetupResult } from "./setup.ts";
 export { type Outcome, Suite } from "./suite.ts";
 export { readTar, type TarEntry } from "./tar.ts";
 export { defaultScanDirs, runManifestTarget, runPendingTarget } from "./targets.ts";
 export { Mint, peek, rawSign } from "./tokens.ts";
-export { CONFORMANCE_VERSION, loadWaiverFile, parseWaiveFlag, WAIVER_FILE, WaiverError } from "./waivers.ts";
+export {
+  BUILTIN_PLACEHOLDERS,
+  CONFORMANCE_VERSION,
+  ConfigError,
+  type ConformanceConfig,
+  EMPTY_CONFIG,
+  INPUT_CALLERS,
+  type InputCaller,
+  loadConformanceConfig,
+  loadWaiverFile,
+  parseConformanceConfig,
+  parseWaiveFlag,
+  SETUP_CALLERS,
+  type SetupCaller,
+  type SetupStep,
+  WAIVER_FILE,
+  WaiverError,
+} from "./waivers.ts";

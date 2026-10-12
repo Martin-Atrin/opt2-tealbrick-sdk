@@ -23,17 +23,32 @@ export function refusedWith(a: { status: number; code: string | null; body?: unk
   return { pass, asserted: `${a.status} ${what}` };
 }
 
+/**
+ * Optional per-check guard (app setup fixtures, v0.1.18): `begin()` before each run, `end(o)` after it may replace the
+ * outcome (a check that resolved an input through a failed setup step → not_run), `record(o)` filters a fixed result
+ * recorded while a run is in progress.
+ */
+export interface SuiteGuard {
+  begin(): void;
+  end(o: Outcome): Outcome;
+  record(o: Outcome): Outcome;
+}
+
 export class Suite {
   readonly results: CheckResult[] = [];
+  guard: SuiteGuard | null = null;
 
   async run(id: string, title: string, expected: string, fn: () => Promise<Outcome> | Outcome): Promise<Outcome> {
     const t0 = Date.now();
     let o: Outcome;
+    const guard = this.guard;
+    guard?.begin();
     try {
       o = await fn();
     } catch (e) {
       o = bad(`error: ${e instanceof Error ? e.message : String(e)}`);
     }
+    if (guard) o = guard.end(o);
     const status: CheckStatus = o.status ?? (o.pass ? "pass" : "fail");
     this.results.push({ id, title, status, asserted: o.asserted, expected, ms: Date.now() - t0 });
     return { ...o, status };
@@ -44,7 +59,8 @@ export class Suite {
   }
 
   /** Records a fixed result (e.g. every remaining check after a fatal boot failure). */
-  record(id: string, title: string, expected: string, o: Outcome): void {
+  record(id: string, title: string, expected: string, o0: Outcome): void {
+    const o = this.guard ? this.guard.record(o0) : o0;
     this.results.push({ id, title, status: o.status ?? (o.pass ? "pass" : "fail"), asserted: o.asserted, expected });
   }
 }

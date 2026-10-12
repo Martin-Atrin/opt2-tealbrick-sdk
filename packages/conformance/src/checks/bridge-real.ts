@@ -14,7 +14,8 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { FakeApp, Received } from "../fake-app.ts";
 import { errorCode, type HttpAnswer } from "../http.ts";
 import type { ToolCallResult } from "../mcp-agent.ts";
-import { loadSdk, REAL_ENTRIES, REAL_OPS, type RealApp, type RealStartContext, realAppManifest, startRealApp } from "../real-app.ts";
+import { loadSdk, REAL_ENTRIES, REAL_HOOK, REAL_OPS, type RealApp, type RealStartContext, realAppManifest, startRealApp } from "../real-app.ts";
+import { sampleInput } from "../sample.ts";
 import { bad, notRun, type Outcome, verdict } from "../suite.ts";
 import { newId, nowS } from "../tokens.ts";
 import { type BridgeCtx, describeCall, isObj, sleep, toolRefused } from "./bridge-ctx.ts";
@@ -39,7 +40,11 @@ export async function realAppChecks(c: BridgeCtx): Promise<void> {
   // B26: the real app's companion edge = a plain read op of the primary fake app (its grant is minted like any app's)
   const target = c.primary;
   const targetOp = c.readOp(target);
-  const manifest = realAppManifest(c.primary.manifest, REAL_PRODUCT, port, targetOp ? { product: target.product, operations: [targetOp.id], crud: [...targetOp.crud] } : undefined);
+  // L2 (B25.real_hook_hold): the real app's before hook matches ANOTHER agent op of the primary fake app (not the B26
+  // companion op, whose hook counts B26 asserts), within the free agent's grant crud
+  const freeCrud = c.w.grantSpecs.find((g) => g.role === "free" && g.app === target)?.crud ?? [];
+  const hookOp = c.pick(target, (o) => o.id !== targetOp?.id && !o.dynamic && o.effect !== "money" && o.crud.every((x) => freeCrud.includes(x)));
+  const manifest = realAppManifest(c.primary.manifest, REAL_PRODUCT, port, targetOp ? { product: target.product, operations: [targetOp.id], crud: [...targetOp.crud] } : undefined, hookOp ? { product: target.product, operation: hookOp.id } : undefined);
   const ins = newId("ins") as InstanceId;
   const dataDir = mkdtempSync(join(tmpdir(), "tb-conformance-real-"));
   mkdirSync(join(dataDir, "backup"), { recursive: true });
@@ -108,6 +113,38 @@ export async function realAppChecks(c: BridgeCtx): Promise<void> {
         return verdict(o.pass === true && !!marked.value, `${o.asserted}; receipts since the call: ${rc.map((x) => x.status).join(",") || "none"}`);
       } finally {
         hookApp.onHook = null;
+      }
+    });
+    await c.run("B25.real_hook_hold", "a REAL SDK before hook's hold verdict reaches the target app (L2)", `the real app's before hook ${REAL_HOOK.id} matches <primary>.<agent op>: input with the marker → it answers {allow: false, hold: {family ${REAL_HOOK.family}, reason "${REAL_HOOK.reason}"}} → the bridge forwards with hv {f, r, by ${REAL_PRODUCT}/${REAL_HOOK.id}} and the fake app's hold comes back held (never hook_failed); without the marker → allow → ok, no hv`, async () => {
+      if (!hookOp) return bad("the primary fake app has no second agent op within the free grant for the real app's before hook");
+      const by = `${REAL_PRODUCT}/${REAL_HOOK.id}`;
+      const holdId = `hld_${ulid()}`;
+      // the fake app holds on a verdict as the SDK's authorize() step 2b does
+      target.onOp = (info) => {
+        const hv = info.proof.hv as { r?: unknown } | undefined;
+        if (info.op === hookOp.id && hv) return { status: 202, body: { status: "held", holdId, expiresAt: new Date(Date.now() + 3600_000).toISOString(), reason: hv.r } };
+        return { status: 200, body: { status: "ok", output: { op: info.op } } };
+      };
+      try {
+        const schema = hookOp.input ?? { type: "object" };
+        const idem = () => (hookOp.idempotency === "none" ? null : c.idemKey());
+        let s0 = c.w.seqNow();
+        const held = await c.call("free", target, hookOp.id, sampleInput(schema, `${REAL_HOOK.marker}-${ulid()}`), idem());
+        const recH = c.since(target, s0, "op").find((x) => x.name === hookOp.id);
+        s0 = c.w.seqNow();
+        const plain = await c.call("free", target, hookOp.id, c.input(target, hookOp.id), idem());
+        const recP = c.since(target, s0, "op").find((x) => x.name === hookOp.id);
+        const hv = (recH?.proof?.hv ?? null) as { f?: unknown; r?: unknown; by?: unknown } | null;
+        const sc = held.structured ?? {};
+        const heldOk = !held.isError && sc.status === "held" && sc.holdId === holdId;
+        const hvOk = !!hv && hv.f === REAL_HOOK.family && hv.r === REAL_HOOK.reason && hv.by === by;
+        const plainOk = c.isOk(plain) && !plain.isError && !!recP && recP.proof?.hv === undefined;
+        return verdict(
+          heldOk && hvOk && plainOk,
+          `with marker: ${describeCall(held)}; forwarded hv ${hv ? JSON.stringify(hv) : "NONE"}${recH ? "" : " (app not called)"}; without marker: ${describeCall(plain)}${recP ? (recP.proof?.hv === undefined ? ", no hv" : ", hv FORWARDED") : " (app not called)"}`,
+        );
+      } finally {
+        target.onOp = null;
       }
     });
     await appInitiatedChecks(c, ins, app, target, targetOp);

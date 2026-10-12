@@ -92,6 +92,9 @@ describe("fake bridge: claim", () => {
     if (sl.ok) {
       assert.deepEqual(sl.slice.companionTargets, [{ product: "conf-peer", ins: b.ids.peers["conf-peer"] }]);
       assert.deepEqual(sl.slice.companionCallers, []);
+      // spec 0.1.18 (C106a, L1): agent A carries scopeRequest {product: self, kind: connect_inbox, createName: conformance}
+      assert.deepEqual(sl.slice.agents[0]?.scopeRequest, { product: b.manifest.id, kind: "connect_inbox", createName: "conformance" });
+      assert.equal(sl.slice.agents[1]?.scopeRequest, undefined);
       assert.deepEqual(sl.slice.appsPolicy, { held: [...DEFAULT_HELD_FAMILIES] });
       assert.deepEqual((peek(sl.slice.grants[0] as string) as { held: string[] }).held, [...DEFAULT_HELD_FAMILIES]);
     }

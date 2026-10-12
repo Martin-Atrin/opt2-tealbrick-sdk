@@ -93,6 +93,10 @@ export interface MiniFlags {
   appCallsSkipHooks?: boolean;
   /** v0.1.13: companion calls are not gated by the grant's workflow (fails B24.no_grant) */
   companionNoWfCheck?: boolean;
+  /** pre-0.1.17 bridge (L2): a before hook answering a hold verdict is treated as hook_failed (fails B25.real_hook_hold) */
+  holdAsHookFailed?: boolean;
+  /** pre-C111a gate: `wf` limits Bound grants only, a Free grant's non-empty wf is ignored (fails B5.free_wf_limits) */
+  wfOnlyBound?: boolean;
   /** C91 (QA S1): signs catalog bridge-op proofs with `in` (the SDK binds {bop, op} only; fails B25.real_catalog_search) */
   catalogWithIn?: boolean;
   /** C85: hooks of an app-initiated call see caller type `system`, not `app` (fails B26.app_initiated_real) */
@@ -425,6 +429,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         const r = await hookCall(h, "before", sub, callId, call, context);
         if (r?.status !== 200 || hookResponseProblem("before", r.body, h.product)) return { error: "hook_failed" };
         const answer = r.body as { allow: boolean; reason?: string; hold?: never };
+        if (flags.holdAsHookFailed && answer.hold) return { error: "hook_failed" };
         answers.push({ by: `${h.product}/${h.hookId}`, answer });
         if (!answer.allow && !answer.hold) break;
         if (flags.holdStopsChain && answer.hold) break;
@@ -511,7 +516,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     const trust = { now: nowS(), self: `tb:ins:${t.ins}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) };
     const paused = flags.skipPause ? { workspace: false, agent: false, connection: false, instance: false } : { workspace: c.pause.workspace, agent: c.pause.agents.includes(agt as never), connection: false, instance: c.pause.instances.includes(t.ins as never) };
     const d = gate({ paused, grant: g.jws, trust, op, declaredScopeTypes: (m.scopes ?? []).map((x) => x.type) });
-    if (d.decision === "refuse") return toolError(d.reason);
+    const preC111a = flags.wfOnlyBound && d.decision === "refuse" && d.reason === "not_in_workflow" && g.claims.mode !== "bound";
+    if (d.decision === "refuse" && !preC111a) return toolError(d.reason);
     const context: Record<string, Json> = {};
     // BRIDGE §8.5: the claim lands in tb.onBehalfOf before the hooks; an invalid one is dropped and reported
     if (meta && ON_BEHALF_OF in meta && !flags.noOnBehalfOf) {

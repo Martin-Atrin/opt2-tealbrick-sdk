@@ -69,6 +69,10 @@ export interface OpInfo {
   /** call id from the verified proof */
   call: string;
   grantSub: string;
+  /** verified grant claims (v0.1.19 C111a: the app applies the forwarded grant's caps / wf) */
+  grant: Record<string, unknown>;
+  /** verified op proof claims (`hv` = a before hook's hold verdict, v0.1.13 G1) */
+  proof: Record<string, unknown>;
 }
 export type OpAnswerSpec = { status: number; body: unknown };
 export type OpHandler = (info: OpInfo) => Promise<OpAnswerSpec> | OpAnswerSpec;
@@ -238,6 +242,8 @@ export class FakeApp {
       ...(typeof body.idempotencyKey === "string" ? { idempotencyKey: body.idempotencyKey } : {}),
       call: String(p.claims.call),
       grantSub: g.claims.sub,
+      grant: g.claims as unknown as Record<string, unknown>,
+      proof: p.claims as unknown as Record<string, unknown>,
     };
     const a = this.onOp ? await this.onOp(info) : { status: 200, body: { status: "ok", output: { op: opId, marker: this.marker } } };
     sendJson(res, a.status, a.body);

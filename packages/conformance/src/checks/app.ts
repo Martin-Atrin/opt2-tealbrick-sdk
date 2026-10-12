@@ -17,8 +17,10 @@ import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";
 import { scanPayloads } from "../scan.ts";
 import { SDK_COVERAGE } from "../sdk-coverage.ts";
+import { resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
+import type { ConformanceConfig, InputCaller, SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -40,6 +42,14 @@ export interface AppTargetContext {
   testRoots?: boolean;
   /** C63a: strict spec-0.1.12 check A13.kss_first_missing */
   keysetRequired?: boolean;
+  /** v0.1.18: per-caller fixtures (`inputsAs.<caller>.<op>` overrides `inputs.<op>` for that caller) */
+  inputsAs?: ConformanceConfig["inputsAs"];
+  /** v0.1.18: setup steps run once before the checks; their captures fill `${name}` placeholders */
+  setup?: readonly SetupStep[];
+  /** v0.1.18: dynamic op id → tool names A11.resolve_family resolves instead of the catalog's */
+  dynamic?: ConformanceConfig["dynamic"];
+  /** report notes (setup step results are appended) */
+  notes?: string[];
 }
 
 const PROOF_CODES = ["call_proof_invalid"] as const;
@@ -105,6 +115,65 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     secrets.keyValues.push(value);
     b.control.setKey(k.name, value);
   }
+
+  // ── setup fixtures (CONFORMANCE v0.1.18): once, after the first status push, before the checks ──
+  // `as: app` is the suite's companion app caller: the SAME instance id every A12.* / A15 app call uses, so an app that
+  // keys data by caller (Knowledge: areas per caller) can create that caller's area first.
+  const appCaller = newId("ins") as InstanceId;
+  const callerKey = (id: string): InputCaller | null => (id === agentA.id ? "agentA" : id === agentB.id ? "agentB" : id === appCaller ? "app" : null);
+  let setupSess: PersonSession | null = null;
+  const setup = await runSetup(ctx.setup ?? [], { "tb.agentA": agentA.id, "tb.agentB": agentB.id, "tb.app": appCaller, "tb.instance": b.ids.ins }, async (as, opId, input) => {
+    if (as === "owner") {
+      if (!setupSess) {
+        setupSess = await c().signIn();
+        if (setupSess) secrets.cookies.push(setupSess.cookie);
+      }
+      if (!setupSess) return { ok: false, output: undefined, shown: "owner sign-in failed" };
+      const r = await c().personOp(setupSess, opId, input);
+      return { ok: r.status === 200 && r.output !== undefined, output: r.output, shown: show(r) };
+    }
+    const view = withStandardOps(m).find((o) => o.id === opId);
+    const key = view && view.idempotency !== "none" ? `conf-setup-${ulid()}` : undefined;
+    // a fixture call holds nothing (`held: []`): it prepares data, it does not probe the hold rules
+    const a = await c().callOp(opId, input, { ...(as === "app" ? { caller: appCaller } : { agent: as === "agentA" ? agentA.id : agentB.id }), held: [], ...(key ? { idempotencyKey: key } : {}) });
+    return { ok: isOk(a), output: isObj(a.body) ? a.body.output : undefined, shown: show(a) };
+  });
+  ctx.notes?.push(...setup.notes);
+  /** A check that resolved an input through a blocked capture reports not_run naming the step (never a silent pass). */
+  let taint: string[] = [];
+  let inRun = false;
+  const blockedOutcome = (o: Outcome): Outcome =>
+    notRun(`${[...new Set(taint)].join("; ")} — this check needs its captures (otherwise ${o.status ?? (o.pass ? "pass" : "fail")}: ${o.asserted.slice(0, 200)})`);
+  s.guard = {
+    begin: () => {
+      taint = [];
+      inRun = true;
+    },
+    end: (o) => {
+      inRun = false;
+      return taint.length ? blockedOutcome(o) : o;
+    },
+    record: (o) => (inRun && taint.length ? blockedOutcome(o) : o),
+  };
+  const rawFixture = (op: { id: string }, caller: string): Json | undefined => {
+    const k = callerKey(caller);
+    return (k ? ctx.inputsAs?.[k]?.[op.id] : undefined) ?? ctx.inputs[op.id];
+  };
+  /** The fixture for `op` called by `caller` with placeholders resolved; a blocked placeholder taints the running check. */
+  const fixtureFor = (op: { id: string }, caller: string): Json | undefined => {
+    const raw = rawFixture(op, caller);
+    if (raw === undefined) return undefined;
+    const r = resolvePlaceholders(raw, setup);
+    taint.push(...r.blocked);
+    return r.value;
+  };
+  /** Why the fixture for `op` / `caller` cannot be resolved (a failed setup step), else null. */
+  const blockedFor = (op: { id: string } | undefined, caller: string): string | null => {
+    const raw = op ? rawFixture(op, caller) : undefined;
+    if (raw === undefined) return null;
+    const r = resolvePlaceholders(raw, setup);
+    return r.blocked.length ? r.blocked.join("; ") : null;
+  };
 
   // ── A1 claim via the bridge ──
   await s.run("A1", "claim via the bridge with the enrolment code; instance key generated", "one claim with TB_ENROL_CODE, manifestDigest = digest(manifest), then status pushes signed by the claimed key", () => {
@@ -228,7 +297,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const row = rows.find((r) => r.agent === agent && r.type === op.scopeType && subset(op.crud, levelCrud(r.type, r.access)));
     return row ? row.instanceId : null;
   };
-  const inputFor = (op: Operation, agent: string = agentA.id): Json => ctx.inputs[op.id] ?? sampleInput(op.input, fillFor(op, agent) ?? "conformance");
+  const inputFor = (op: Operation, agent: string = agentA.id): Json => fixtureFor(op, agent) ?? sampleInput(op.input, fillFor(op, agent) ?? "conformance");
   /** Schema-valid inputs that differ from `input` in one place (optional property added, or one string changed). */
   const variants = (op: Operation, input: Json): Json[] => {
     const out = schemaVariants(op, input);
@@ -281,7 +350,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const alt = schemaVariants(op, input).find((x) => digest(x) !== digest(input));
     return alt === undefined ? null : { input: alt, how: "schema-valid variant" };
   };
-  const reachable = (op: Operation) => ctx.inputs[op.id] !== undefined || fillFor(op, agentA.id) !== null;
+  const reachable = (op: Operation) => rawFixture(op, agentA.id) !== undefined || fillFor(op, agentA.id) !== null;
   const holdable = (op: Operation) => op.effect === "money" || op.holdFamily !== undefined || CAPPABLE.has(op.effect);
   const holdOpts = (op: Operation): CallOptions =>
     op.effect === "money" ? {} : op.holdFamily ? { held: [op.holdFamily] } : { caps: { [op.effect]: { max: 0, per: "hour" } } };
@@ -291,7 +360,11 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const idemOp = byRank(agentOps.filter((o) => holdable(o) && o.idempotency !== "none"))[0];
   // Fleet (2026-10-12): an app whose agent ops are all read-only has no hold chain to test → not_applicable, not fail
   const NO_HOLDABLE = "no holdable agent op (all agent ops are read-only, no holdFamily)";
-  const noHold = (why: string) => (holdOp ? bad(why) : na(NO_HOLDABLE));
+  const noHold = (why: string) => {
+    // v0.1.18: the hold op's fixture needs a capture of a failed setup step → the whole hold chain is not_run
+    const blocked = blockedFor(holdOp, agentA.id);
+    return blocked ? notRun(`${blocked} — ${why}`) : holdOp ? bad(why) : na(NO_HOLDABLE);
+  };
   const idemKey = (op: Operation | undefined) => (op && op.idempotency !== "none" ? `conf-${ulid()}` : undefined);
 
   // ── A8 default scope grants ──
@@ -528,6 +601,14 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     return verdict(isHeld(a), `${op.id}: ${show(a)}`);
   });
 
+  // v0.1.19 (C111a): caps apply in ANY mode; a Free grant with a non-empty wf still carries and applies its caps
+  await s.run("A3.free_wf_caps", "a Free grant with a non-empty wf keeps its caps (C111a)", "grant mode free, wf [<write op>], caps {write: {max: 0, per: hour}}, held [] → the write op in wf → 202 held (caps)", async () => {
+    const op = byRank(agentOps.filter((o) => o.effect === "write" && !o.holdFamily))[0];
+    if (!op) return na("no agent op with effect write");
+    const a = track(await c().callOp(op.id, inputFor(op), { mode: "free", wf: [op.id], held: [], caps: { write: { max: 0, per: "hour" } }, idempotencyKey: idemKey(op) }));
+    return verdict(isHeld(a), `${op.id} (free, wf [${op.id}], caps write max 0): ${show(a)}`);
+  });
+
   // v0.1.17 (C108, tolerant reader): a newer Core may hold a family this app's build does not know; the grant stays
   // valid (verifyGrant ignores the unknown family) and the known families still hold
   const UNKNOWN_FAMILY = "future_x";
@@ -627,10 +708,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run("A12.companion_inbound", "a companion app calls this app (inbound app→app)", "op call with a bound companion grant (sub tb:ins:<other app>, wf = [op]) and its proof → runs (200 ok / 202 held; a scoped op may answer scope_denied), never an auth refusal", async () => {
     const op = [...agentOps].filter((o) => o.effect !== "money").sort((x, y) => Number(!!x.scopeType) - Number(!!y.scopeType) || Number(x.effect === "read") - Number(y.effect === "read"))[0];
     if (!op) return na("no agent operation");
-    const peer = newId("ins") as `ins_${string}`;
-    const a = track(await c().callOp(op.id, inputFor(op), { caller: peer, idempotencyKey: idemKey(op) }));
+    const a = track(await c().callOp(op.id, fixtureFor(op, appCaller) ?? inputFor(op), { caller: appCaller, idempotencyKey: idemKey(op) }));
     const pass = isOk(a) || isHeld(a) || (!!op.scopeType && a.code === "scope_denied");
-    return verdict(pass, `${op.id} from tb:ins:${peer.slice(0, 12)}…: ${show(a)}`);
+    return verdict(pass, `${op.id} from tb:ins:${appCaller.slice(0, 12)}…: ${show(a)}`);
   });
   await s.run("A12.companion_call", "app→app call through the bridge with the companion grant", "POST /tb/v1/call: TB-Assert valid, TB-Grant = the slice's companion grant (sub self, aud target, mode bound, wf = declared ops), target/op declared in companions[], parentCall = the running call's id; the op answers ok", async () => {
     if (companions.length === 0) return na("manifest declares no companions");
@@ -684,9 +764,14 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // agent A's instance through tb.scopes_set (a person op any owner may use).
   const appCall = async (caller: InstanceId, op: Operation, extra: CallOptions = {}): Promise<{ answer: OpAnswer; input: Json; key?: string; how: string }> => {
     const tries: { input: Json; how: string; grant?: ScopeRow }[] = [];
-    if (op.scopeType && ctx.inputs[op.id] === undefined) tries.push({ input: sampleInput(op.input, caller), how: "own instance" });
-    const row = op.scopeType ? rows.find((r) => r.agent === agentA.id && r.type === op.scopeType && subset(op.crud, levelCrud(r.type, r.access))) : undefined;
-    tries.push({ input: inputFor(op), how: row ? "agent A's instance, granted by the owner" : "generated input", ...(row ? { grant: row } : {}) });
+    // v0.1.18: an `inputsAs.app` fixture is the app caller's own input (e.g. the area its setup step created)
+    const own = callerKey(caller) === "app" && ctx.inputsAs?.app?.[op.id] !== undefined;
+    if (own) tries.push({ input: fixtureFor(op, caller) as Json, how: "inputsAs.app fixture" });
+    else {
+      if (op.scopeType && ctx.inputs[op.id] === undefined) tries.push({ input: sampleInput(op.input, caller), how: "own instance" });
+      const row = op.scopeType ? rows.find((r) => r.agent === agentA.id && r.type === op.scopeType && subset(op.crud, levelCrud(r.type, r.access))) : undefined;
+      tries.push({ input: inputFor(op), how: row ? "agent A's instance, granted by the owner" : "generated input", ...(row ? { grant: row } : {}) });
+    }
     let last: { answer: OpAnswer; input: Json; key?: string; how: string } | null = null;
     for (const t of tries) {
       if (t.grant && sess) await c().personOp(sess, "tb.scopes_set", { agent: caller, type: t.grant.type, id: t.grant.instanceId, access: t.grant.access });
@@ -708,12 +793,12 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const op = byRank(agentOps.filter((o) => o.receipt)).sort((x, y) => Number(x.effect === "money") - Number(y.effect === "money"))[0];
     if (!op) return na("no agent op with receipt: true");
     if (!sess) return bad("no person session");
-    const listed = newId("ins") as InstanceId;
-    const unlisted = newId("ins") as InstanceId;
+    // v0.1.18: ONE app caller identity (the setup `as: app` caller): first unlisted, then listed in companionCallers
     const name = `Conformance caller ${ulid().slice(-6)}`;
-    await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-caller" as ProductId, ins: listed, name }), T);
-    const one = await appCall(listed, op);
+    const unlisted = appCaller;
     const two = await appCall(unlisted, op);
+    await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-caller" as ProductId, ins: appCaller, name }), T);
+    const one = await appCall(appCaller, op);
     const shown = `${op.id}: listed ${show(one.answer)} (${one.how}); unlisted ${show(two.answer)} (${two.how})`;
     const [id1, id2] = [rowIdOf(one.answer), rowIdOf(two.answer)];
     if (!id1 || !id2) {
@@ -733,7 +818,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     if (!op) return na("no agent op with holdFamily first_contact");
     if (!sess) return bad("no person session");
     if (!b.appsPolicy.held.includes("first_contact")) return bad(`fake bridge apps policy ${b.appsPolicy.held.join(",")} does not hold first_contact`);
-    const caller = newId("ins") as InstanceId;
+    const caller = appCaller;
     const first = await appCall(caller, op);
     if (!isHeld(first.answer)) return bad(`${op.id} by app caller (${first.how}): ${show(first.answer)} (expected 202 held)`);
     const id = holdIdOf(first.answer);
@@ -744,26 +829,42 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const pass = isOk(same) && isHeld(again) && holdIdOf(again) !== id;
     return verdict(pass, `${op.id} (${first.how}): first ${show(first.answer)}; after approval same input${first.key ? " + key" : ""} ${show(same)}; again${first.key ? " (new key)" : ""} ${show(again)}`);
   });
+  // v0.1.18 (C106a, Connect F21): the fake slice carries agents[].scopeRequest for agent A; whether the app reads it
+  // (ctx.agentScopeRequest) is not observable black-box
+  s.record("A12.scope_request", "agent A's slice scopeRequest reaches the app (C106a)", `slice agents[].scopeRequest {product: ${product}, kind: connect_inbox, createName: conformance} for agent A → ctx.agentScopeRequest(agt)`, na("black-box apps need not expose the slice scopeRequest (CONFORMANCE v0.1.18); the fake slice carries it for agent A; the SDK's ctx.agentScopeRequest is covered by SDK unit tests"));
 
   // ── A11 resolve answers carry a hold family (MANIFEST v0.1.16 C107) ──
-  await s.run("A11.resolve_family", "resolve answers with effect outward or money carry a holdFamily (C107)", "for every dynamic op: each catalog entry resolved through the bridge op resolve {op, tool}; a resolution with effect outward|money has a known holdFamily (money → money)", async () => {
+  // v0.1.18: `dynamic.<op>.resolveTools` (tealbrick-conformance.json) names the tools to resolve instead of the catalog
+  // (an app whose catalog is empty without its engine makes them resolvable in its conformance start module); a listed
+  // tool that does not resolve FAILS (the app promised it).
+  await s.run("A11.resolve_family", "resolve answers with effect outward or money carry a holdFamily (C107)", "for every dynamic op: each catalog entry (or each configured dynamic.<op>.resolveTools name) resolved through the bridge op resolve {op, tool}; a resolution with effect outward|money has a known holdFamily (money → money); a configured tool that does not resolve fails", async () => {
     const dyn = m.operations.filter((o) => o.audience === "agent" && o.dynamic);
+    const configured = ctx.dynamic ?? {};
+    const strays = Object.keys(configured).filter((id) => !dyn.some((o) => o.id === id));
+    if (strays.length) return bad(`tealbrick-conformance.json dynamic names ${strays.join(", ")}: not a dynamic agent op of this manifest`);
     if (dyn.length === 0) return na("no dynamic op declared");
     const problems: string[] = [];
     const seen: string[] = [];
     let resolved = 0;
     for (const op of dyn) {
-      const body: Record<string, Json> = op.dynamic?.mode === "search" ? { op: op.id, query: "", limit: 50 } : { op: op.id };
-      const cat = await c().callBridgeOp("catalog", body);
-      const list = Array.isArray(cat.body) ? cat.body : isObj(cat.body) && Array.isArray(cat.body.entries) ? cat.body.entries : null;
-      if (cat.status !== 200 || !list) {
-        problems.push(`${op.id}: catalog ${show(cat)}`);
-        continue;
+      const listed = configured[op.id]?.resolveTools;
+      let names: string[];
+      if (listed) names = listed;
+      else {
+        const body: Record<string, Json> = op.dynamic?.mode === "search" ? { op: op.id, query: "", limit: 50 } : { op: op.id };
+        const cat = await c().callBridgeOp("catalog", body);
+        const list = Array.isArray(cat.body) ? cat.body : isObj(cat.body) && Array.isArray(cat.body.entries) ? cat.body.entries : null;
+        if (cat.status !== 200 || !list) {
+          problems.push(`${op.id}: catalog ${show(cat)}`);
+          continue;
+        }
+        names = list.filter(isObj).slice(0, 50).map((e) => String(e.name));
       }
-      for (const e of list.filter(isObj).slice(0, 50)) {
-        const r = await c().callBridgeOp("resolve", { op: op.id, tool: String(e.name) });
+      for (const name of names) {
+        const r = await c().callBridgeOp("resolve", { op: op.id, tool: name });
         if (r.status !== 200 || !isObj(r.body)) {
-          seen.push(`${op.id}/${String(e.name)}: resolve ${show(r)}`);
+          if (listed) problems.push(`${op.id}/${name}: listed in dynamic.${op.id}.resolveTools but resolve answered ${r.status === 200 ? "null" : show(r)}`);
+          else seen.push(`${op.id}/${name}: resolve ${show(r)}`);
           continue;
         }
         resolved++;
@@ -771,13 +872,14 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         const hf = r.body.holdFamily;
         if (eff !== "outward" && eff !== "money") continue;
         const known = typeof hf === "string" && (KNOWN_HOLD_FAMILIES as readonly string[]).includes(hf);
-        if (!known || (eff === "money" && hf !== "money")) problems.push(`${op.id}/${String(e.name)}: effect ${eff}, holdFamily ${hf === undefined ? "MISSING" : String(hf)}`);
-        else seen.push(`${op.id}/${String(e.name)}: ${eff}/${String(hf)}`);
+        if (!known || (eff === "money" && hf !== "money")) problems.push(`${op.id}/${name}: effect ${eff}, holdFamily ${hf === undefined ? "MISSING" : String(hf)}`);
+        else seen.push(`${op.id}/${name}: ${eff}/${String(hf)}`);
       }
     }
     if (problems.length) return bad(problems.slice(0, 6).join("; "));
-    if (resolved === 0) return notRun(`no catalog entry resolved (${seen.slice(0, 4).join("; ") || "empty catalogs"})`);
-    return ok(`${resolved} resolutions of ${dyn.length} dynamic op(s); outward/money ones carry a family${seen.length ? `: ${seen.slice(0, 4).join("; ")}` : ""}`);
+    if (resolved === 0) return notRun(`no catalog entry resolved (${seen.slice(0, 4).join("; ") || "empty catalogs"}); list tools in tealbrick-conformance.json dynamic.<op>.resolveTools`);
+    const via = dyn.filter((o) => configured[o.id]).length;
+    return ok(`${resolved} resolutions of ${dyn.length} dynamic op(s)${via ? ` (${via} via configured resolveTools)` : ""}; outward/money ones carry a family${seen.length ? `: ${seen.slice(0, 4).join("; ")}` : ""}`);
   });
 
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──
@@ -913,7 +1015,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const hB = await hvCall(inputFor(hvOp, agentB.id), "conformance pending B", { agent: agentB.id });
     if (!isHeld(hA) || !isHeld(hB)) return bad(`holds not created: A ${show(hA)}; B ${show(hB)}`);
     const [idA, idB] = [holdIdOf(hA), holdIdOf(hB)];
-    const peerIns = newId("ins") as `ins_${string}`;
+    const peerIns = appCaller;
     /** every page of tb.holds_pending for one caller; null on a non-ok answer */
     const all = async (opts: CallOptions, limit?: number): Promise<{ items: Record<string, unknown>[]; pages: number; shown: string } | null> => {
       const items: Record<string, unknown>[] = [];
@@ -1075,7 +1177,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run("A7.restart", "migrations repeatable; state survives a restart; no re-claim", "restart on the same data dir: no new claim, same instance key kid, holds still readable", async () => {
     if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");
     // without a holdable op the persisted facts are the claim record and the instance key (no new claim, same kid)
-    if (holdOp && (!extraHold || !isHeld(extraHold))) return bad("no hold to persist");
+    if (holdOp && (!extraHold || !isHeld(extraHold))) return noHold("no hold to persist");
     const claims = b.claims.length;
     const kid = b.statuses.at(-1)?.assertion.kid;
     const n = b.statuses.length;
@@ -1093,7 +1195,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   if (!s.has("A1.key_persisted")) s.record("A1.key_persisted", "instance key kept sealed on the volume", "after restart the same key, no new claim", ctx.restart ? bad("restart did not complete") : notRun("needs a restartable app"));
   await s.run("A7.backup_roundtrip", "backup to TB_BACKUP_DIR + restore round-trip", "archive tb-backup-*.tar.gz with meta {format tealbrick.backup/1, parts sha256}; TB_RESTORE_FROM restores the state at backup time", async () => {
     if (!ctx.backupNow || !ctx.restart) return notRun("needs start() returning backupNow (programmatic harness) and a restartable app");
-    if (holdOp && (!extraHold || !isHeld(extraHold))) return bad("no hold to back up");
+    if (holdOp && (!extraHold || !isHeld(extraHold))) return noHold("no hold to back up");
     const dir = ctx.env.TB_BACKUP_DIR;
     const before = new Set(readdirSync(dir));
     await ctx.backupNow();
@@ -1246,6 +1348,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     pass: scan.findings.length === 0,
     asserted: `${scan.payloads} payloads; ${scan.findings.length} findings${scan.findings.length ? `: ${scan.findings.join("; ")}` : ""}`,
   });
+  s.guard = null;
   return scan;
 }
 

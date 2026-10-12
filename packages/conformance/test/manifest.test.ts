@@ -158,7 +158,7 @@ describe("manifest checks", () => {
     }
   });
 
-  it("M2.outward_family (C107) is warn-only in 0.1.11: an outward op without a family passes with WARN and a report note", async () => {
+  it("M2.outward_family (C107) FAILS from conformance 0.1.12: an outward op without a family fails (the validator keeps its grace)", async () => {
     const send = { id: "item_send", title: "Send", description: "Send an item.", input: { type: "object", properties: {} }, output: { type: "object" }, crud: ["update"], effect: "outward", idempotency: "supported", receipt: true, audience: "agent" };
     const none = await runManifestChecks(manifest);
     assert.equal(byId(none.results, "M2.outward_family"), "not_applicable");
@@ -166,17 +166,18 @@ describe("manifest checks", () => {
     const fam = await runManifestChecks({ ...manifest, operations: [...(manifest.operations as unknown[]), { ...send, holdFamily: "first_contact" }] });
     assert.equal(byId(fam.results, "M2.outward_family"), "pass");
     assert.doesNotMatch(checkOf(fam.results, "M2.outward_family")?.asserted ?? "", /^WARN:/);
-    const warn = await runManifestChecks({ ...manifest, operations: [...(manifest.operations as unknown[]), send] });
-    const c = checkOf(warn.results, "M2.outward_family");
-    assert.equal(c?.status, "pass", c?.asserted);
-    assert.match(c?.asserted ?? "", /^WARN: 1 of 1 outward ops declare no holdFamily: item_send \(agent\)/);
-    assert.ok(warn.notes.some((n) => n.includes("M2.outward_family WARN") && n.includes("item_send")), warn.notes.join("\n"));
+    const missing = await runManifestChecks({ ...manifest, operations: [...(manifest.operations as unknown[]), send] });
+    const c = checkOf(missing.results, "M2.outward_family");
+    assert.equal(c?.status, "fail", c?.asserted);
+    assert.equal(c?.asserted, "1 of 1 outward ops declare no holdFamily: item_send (agent)");
+    assert.equal(byId(missing.results, "M1"), "pass", "the manifest validator keeps its grace for an absent outward family");
     const dir = mkdtempSync(join(tmpdir(), "tbconf-c107-"));
     try {
       const p = join(dir, "tealbrick.manifest.json");
       writeFileSync(p, JSON.stringify({ ...manifest, operations: [...(manifest.operations as unknown[]), send] }));
       const t = await runManifestTarget({ manifestPath: p });
-      assert.ok(t.notes.some((n) => n.includes("M2.outward_family WARN")), t.notes.join("\n"));
+      assert.equal(t.ok, false);
+      assert.equal(t.checks.find((x) => x.id === "M2.outward_family")?.status, "fail");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

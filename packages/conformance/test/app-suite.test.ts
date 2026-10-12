@@ -1,10 +1,12 @@
 // App target: a correct mini app passes every check; each deliberately broken variant FAILS the matching checks
 // (sensitivity). Ids reported by a run must all be catalogued.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import { APP_CHECK_IDS, CHECK_IDS, exitCode, type Report, renderMarkdown, runApp } from "../src/index.ts";
+import { APP_CHECK_IDS, CHECK_IDS, type ConformanceConfig, exitCode, parseConformanceConfig, type Report, renderMarkdown, runApp } from "../src/index.ts";
 import { freePort } from "./apps/free-port.ts";
 import { type MiniAppFaults, startMiniApp } from "./apps/mini-app.ts";
 
@@ -67,6 +69,8 @@ describe("app target", () => {
     ["names app callers by their instance id although companionCallers lists them", { callerNameIgnoresSlice: true }, ["A12.caller_name"]],
     // v0.1.17 (C108)
     ["refuses a grant whose held names an unknown family (strict reader)", { strictHeld: true }, ["C3.grant_held_unknown"]],
+    // v0.1.19 (C111a, conformance 0.1.12)
+    ["ignores the caps of a Free grant with a workflow (pre-C111a)", { capsIgnoredWithWf: true }, ["A3.free_wf_caps"]],
   ];
   // v0.1.15 / v0.1.16 (conformance 0.1.11): a manifest with an outward first_contact op and a search-mode dynamic op
   const c107 = structuredClone(manifest) as Manifest;
@@ -118,6 +122,96 @@ describe("app target", () => {
       assert.equal(r.ok, false);
     });
   }
+
+  // ── v0.1.18 (conformance 0.1.12): setup fixtures, inputsAs, dynamic resolveTools ──
+  // Knowledge-like app: app-caller data keyed by caller (areas), area-less app callers refused (areaPerAppCaller)
+  const kn = structuredClone(manifest) as Manifest;
+  kn.operations.push({
+    id: "area_create",
+    title: "Create area",
+    description: "Create an area for the caller.",
+    input: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
+    output: { type: "object" },
+    crud: ["read"],
+    effect: "read",
+    idempotency: "none",
+    receipt: false,
+    audience: "agent",
+  } as Manifest["operations"][number]);
+  const appArea = (input: unknown = { name: "conformance" }) =>
+    parseConformanceConfig(
+      {
+        setup: [{ id: "app_area", as: "app", op: "area_create", input, capture: { appArea: "/id" } }],
+        inputsAs: { app: { item_create: { space: "${appArea}", title: "Conformance item" }, item_delete: { space: "${appArea}", id: "conformance" } } },
+      },
+      "test config",
+    );
+  const runKn = (config: ConformanceConfig | null, extra: Partial<Parameters<typeof runApp>[0]> = {}) =>
+    runApp({ manifest: kn, config, start: (env) => startMiniApp(kn, env, { areaPerAppCaller: true }), deployTemplate: template, timeoutMs: 8000, ...extra });
+
+  it("v0.1.18: a Knowledge-like app (areas per app caller) without setup → A12.caller_name not_run (never a silent pass)", async () => {
+    const r = await runKn(null);
+    const cn = statusOf(r, "A12.caller_name");
+    assert.equal(cn?.status, "not_run", cn?.asserted);
+    assert.match(cn?.asserted ?? "", /area_required.*no receipt row to read/);
+    assert.equal(statusOf(r, "A12.scope_request")?.status, "not_applicable");
+  });
+
+  it("v0.1.18: tealbrick-conformance.json setup (as app) + inputsAs.app → the Knowledge-like app passes every check", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tbconf-setup-"));
+    try {
+      const mPath = join(dir, "app.manifest.json");
+      writeFileSync(mPath, JSON.stringify(kn));
+      writeFileSync(
+        join(dir, "tealbrick-conformance.json"),
+        JSON.stringify({
+          setup: [{ id: "app_area", as: "app", op: "area_create", input: { name: "conformance" }, capture: { appArea: "/id" } }],
+          inputsAs: { app: { item_create: { space: "${appArea}", title: "Conformance item" } } },
+        }),
+      );
+      // the file beside manifestPath is read by runApp itself (the CLI passes the same config)
+      const r = await runApp({ manifestPath: mPath, start: (env) => startMiniApp(kn, env, { areaPerAppCaller: true }), deployTemplate: template, timeoutMs: 8000 });
+      assert.deepEqual(failing(r), [], renderMarkdown(r));
+      const cn = statusOf(r, "A12.caller_name");
+      assert.equal(cn?.status, "pass", cn?.asserted);
+      assert.match(cn?.asserted ?? "", /listed 200 ok \(inputsAs\.app fixture\); unlisted 200 ok \(inputsAs\.app fixture\)/);
+      assert.ok(r.notes.some((n) => /^setup: step app_area \(app area_create\) 200 ok; captured appArea$/.test(n)), r.notes.join("\n"));
+      assert.equal(statusOf(r, "A12.scope_request")?.status, "not_applicable");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("v0.1.18: a failing setup step → every check that needs its capture reports not_run naming the step and its answer", async () => {
+    const r = await runKn(appArea({ name: 5 }));
+    const cn = statusOf(r, "A12.caller_name");
+    assert.equal(cn?.status, "not_run", cn?.asserted);
+    assert.match(cn?.asserted ?? "", /^setup step app_area \(app area_create\) failed: 400 input_invalid — this check needs its captures/);
+    assert.ok(r.notes.some((n) => n.includes("setup step app_area (app area_create) failed: 400 input_invalid")), r.notes.join("\n"));
+    // the generic inputs of the hold chain may need a capture too: then the chain is not_run, not fail
+    const held = await runKn(
+      parseConformanceConfig({ setup: [{ id: "agent_space", as: "agentA", op: "area_create", input: { name: 7 }, capture: { space: "/id" } }], inputs: { item_delete: { space: "${space}", id: "x" }, item_create: { space: "${space}", title: "x" } } }, "test config"),
+    );
+    for (const id of ["A3.hold", "A4.hold_status", "A10", "P1.held_release_paused", "A3.no_standing_approval", "A7.restart"]) {
+      const c = statusOf(held, id);
+      assert.equal(c?.status, "not_run", `${id}: ${c?.asserted}`);
+      assert.match(c?.asserted ?? "", /setup step agent_space \(agentA area_create\) failed: 400 input_invalid/, id);
+    }
+  });
+
+  it("v0.1.18: dynamic.<op>.resolveTools → A11.resolve_family resolves the configured tools of an empty catalog; a listed tool resolving to null fails", async () => {
+    const runDyn = (config: ConformanceConfig | null) => runApp({ manifest: c107, config, start: (env) => startMiniApp(c107, env, { emptyCatalog: true }), deployTemplate: template, timeoutMs: 8000 });
+    const none = await runDyn(null);
+    assert.equal(statusOf(none, "A11.resolve_family")?.status, "not_run", statusOf(none, "A11.resolve_family")?.asserted);
+    const listed = await runDyn(parseConformanceConfig({ dynamic: { item_lookup: { resolveTools: ["dyn_read", "dyn_send", "dyn_pay"] } } }, "test config"));
+    const rf = statusOf(listed, "A11.resolve_family");
+    assert.equal(rf?.status, "pass", rf?.asserted);
+    assert.match(rf?.asserted ?? "", /^3 resolutions of 1 dynamic op\(s\) \(1 via configured resolveTools\).*outward\/first_contact/);
+    const broken = await runDyn(parseConformanceConfig({ dynamic: { item_lookup: { resolveTools: ["dyn_send", "dyn_nope"] } } }, "test config"));
+    const bf = statusOf(broken, "A11.resolve_family");
+    assert.equal(bf?.status, "fail", bf?.asserted);
+    assert.match(bf?.asserted ?? "", /item_lookup\/dyn_nope: listed in dynamic\.item_lookup\.resolveTools but resolve answered null/);
+  });
 
   it("--no-test-roots: a strict app refuses every fake-bridge slice, the run fails at boot with the pinned-roots note", async () => {
     const r = await run({}, { testRoots: false, bootTimeoutMs: 3000 });

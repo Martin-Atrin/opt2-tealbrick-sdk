@@ -285,7 +285,14 @@ export class FakeBridge {
 
   // ── slice ─────────────────────────────────────────────────────────────────
   agentEntries(): InstanceSlice["agents"] {
-    return this.ids.agents.map((a) => ({ id: a.id, name: a.name, mode: a.mode, status: this.pause.agents.has(a.id) ? "paused" : "active" }));
+    // v0.1.18 (C106a, Connect F21; L1): agent A carries the channel the owner chose at adopt for THIS product
+    return this.ids.agents.map((a, i) => ({
+      id: a.id,
+      name: a.name,
+      mode: a.mode,
+      status: this.pause.agents.has(a.id) ? "paused" : "active",
+      ...(i === 0 ? { scopeRequest: { product: this.manifest.id, kind: "connect_inbox" as const, createName: "conformance" } } : {}),
+    }));
   }
 
   async companionGrants(): Promise<string[]> {

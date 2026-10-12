@@ -18,6 +18,7 @@ import { createFakeBridge, type FakeAgent, type FakeBridge } from "./fake-bridge
 import { request } from "./http.ts";
 import { buildReport, type PayloadScan, type Report } from "./report.ts";
 import { bad, Suite } from "./suite.ts";
+import { type ConformanceConfig, EMPTY_CONFIG, loadConformanceConfig } from "./waivers.ts";
 
 export interface AppStartResult {
   /** private-network origin of the app (e.g. http://127.0.0.1:8080) */
@@ -38,8 +39,13 @@ export interface RunAppOptions {
   onEnv?: (env: Record<string, string>) => void;
   /** extra env merged into the app env */
   env?: Record<string, string>;
-  /** known-good inputs per op id (generic fixtures; never needed for the standard ops) */
+  /** known-good inputs per op id (generic fixtures; never needed for the standard ops); the config file's `inputs` win per key */
   inputs?: Record<string, Json>;
+  /**
+   * v0.1.18: the per-app `tealbrick-conformance.json` (setup, inputs, inputsAs, dynamic; waivers are applied by the
+   * caller). Default: loaded from beside `manifestPath` (a malformed file throws WaiverError); `null`: none.
+   */
+  config?: ConformanceConfig | null;
   /** generated deploy template JSON (A9) */
   deployTemplate?: unknown;
   /** per-wait timeout in ms (slice install, status push); default 20 000 */
@@ -118,6 +124,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   }
   if (!opts.start && !opts.url) throw new TypeError("runApp: start or url required");
 
+  const config = opts.config === undefined ? (opts.manifestPath ? loadConformanceConfig(opts.manifestPath) : EMPTY_CONFIG) : (opts.config ?? EMPTY_CONFIG);
   const testRoots = opts.testRoots !== false;
   const keysetRequired = opts.keysetRequired !== false;
   const bridge = await createFakeBridge({ manifest: manifest as Manifest, ...(opts.agents ? { agents: opts.agents } : {}) });
@@ -171,7 +178,11 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
           }
         : {}),
       ...(app?.backupNow ? { backupNow: () => (app as AppStartResult).backupNow?.() ?? Promise.resolve() } : {}),
-      inputs: opts.inputs ?? {},
+      inputs: { ...(opts.inputs ?? {}), ...config.inputs },
+      inputsAs: config.inputsAs,
+      setup: config.setup,
+      dynamic: config.dynamic,
+      notes,
       testRoots,
       keysetRequired,
       ...(opts.deployTemplate !== undefined ? { deployTemplate: opts.deployTemplate } : {}),

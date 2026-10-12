@@ -130,7 +130,7 @@ export function findProductLiterals(dirs: readonly string[], productIds: readonl
 
 export async function runManifestChecks(json: unknown, opts: ManifestCheckOptions = {}): Promise<{ results: CheckResult[]; manifest: Manifest | null; notes: string[] }> {
   const s = new Suite();
-  /** report notes (v0.1.16 C107: the warn-only M2.outward_family lists its ops here) */
+  /** report notes (none since 0.1.12: M2.outward_family fails instead of warning) */
   const notes: string[] = [];
   const v = validateManifest(json);
   const m = v.ok ? v.manifest : null;
@@ -213,14 +213,14 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     const show = (r: ReturnType<typeof validateManifest>) => (r.ok ? "accepted" : codes(r).join(","));
     return verdict(refusedAt(policy) && refusedAt(caps) && knownOk.length === 0, `policy: ${show(policy)}; caps: ${show(caps)}; known families refused: ${knownOk.join(",") || "none"}`);
   });
-  // C107 (spec 0.1.16): every outward op declares a family. WARN-ONLY in conformance 0.1.11 (fails from 0.1.12)
-  await s.run("M2.outward_family", "outward ops declare a holdFamily (C107; warn-only in 0.1.11)", "every op with effect outward declares a holdFamily (0.1.11: a missing one is a WARN note, status pass; fails from 0.1.12)", () => {
+  // C107 (spec 0.1.16): every outward op declares a family. Warn-only in conformance 0.1.11; FAILS from 0.1.12 (spec
+  // 0.1.18 SDK sweep). The manifest validator keeps its grace (older releases stay deployable by Core).
+  await s.run("M2.outward_family", "outward ops declare a holdFamily (C107)", "every op with effect outward declares a holdFamily (fails since conformance 0.1.12; the manifest validator still accepts a missing one)", () => {
     const outward = rawOps().filter((o) => o.effect === "outward");
     if (outward.length === 0) return na("no outward op declared");
     const off = outward.filter((o) => o.holdFamily === undefined).map((o) => `${String(o.id)} (${String(o.audience)})`);
     if (off.length === 0) return ok(`${outward.length} outward ops, all declare a family`);
-    notes.push(`M2.outward_family WARN (C107, fails from conformance 0.1.12): ${off.length} outward op(s) without holdFamily: ${off.join(", ")}`);
-    return ok(`WARN: ${off.length} of ${outward.length} outward ops declare no holdFamily: ${off.join(", ")} (warn-only in 0.1.11; fails from 0.1.12)`);
+    return bad(`${off.length} of ${outward.length} outward ops declare no holdFamily: ${off.join(", ")}`);
   });
   await s.run("M2.tool_names", "MCP tool names ≤ 64 chars (M-OP-1, CORE I9)", "every <product>__<op> fits ^[a-z0-9_-]+$ and ≤ 64", () => {
     if (!m) return bad("manifest invalid");

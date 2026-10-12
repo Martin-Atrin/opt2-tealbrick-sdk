@@ -34,7 +34,7 @@ import { runBridgeTarget } from "./run-bridge.ts";
 import { runCoreTarget } from "./run-core.ts";
 import { runRelayTarget } from "./run-relay.ts";
 import { runManifestTarget } from "./targets.ts";
-import { CONFORMANCE_VERSION, loadWaiverFile, parseWaiveFlag, WAIVER_FILE, WaiverError } from "./waivers.ts";
+import { CONFORMANCE_VERSION, type ConformanceConfig, EMPTY_CONFIG, loadConformanceConfig, parseWaiveFlag, WAIVER_FILE, WaiverError } from "./waivers.ts";
 
 const USAGE = `usage:
   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file>
@@ -60,7 +60,15 @@ const USAGE = `usage:
                 [--waive <checkId>@<untilVersion>]...  a failing / not_run check reports "waived" (not counted) while this
                                    conformance version < untilVersion; at or after it the waiver is ignored and noted.
                                    app / manifest: also ${WAIVER_FILE} next to the manifest {"waivers": [{"id", "until", "reason"}]}.
-                                   Unknown check ids are a usage error.`;
+                                   Unknown check ids are a usage error.
+  app: ${WAIVER_FILE} next to the manifest may also hold setup fixtures (v0.1.18; malformed → usage error):
+      "setup": [{"id", "as": "owner"|"agentA"|"agentB"|"app", "op", "input", "capture": {"<name>": "<JSON pointer into output>"}}]
+        run once after the first status push, before the checks, in order; "app" = the suite's companion app caller (A12.*)
+      "inputs": {"<opId>": input}  merged over --inputs (the file wins per key)
+      "inputsAs": {"agentA"|"agentB"|"app": {"<opId>": input}}  overrides "inputs" for that caller
+      "dynamic": {"<dynamicOpId>": {"resolveTools": ["<tool>"]}}  A11.resolve_family resolves these instead of the catalog
+      "\${name}" (whole string values) = a captured value, or \${tb.agentA} \${tb.agentB} \${tb.app} \${tb.instance};
+      a check that needs a capture of a failed step reports not_run naming the step and its answer`;
 
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf8"));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -161,11 +169,13 @@ export async function main(argv: string[]): Promise<number> {
   if (values["test-roots"] && values["no-test-roots"]) throw new Error("use one of --test-roots (the default) and --no-test-roots");
   const testRoots = !values["no-test-roots"];
   const keysetRequired = !values["keyset-transitional"];
-  // waivers are checked before anything runs: an unknown id or a malformed entry is a usage error (exit 2)
+  // waivers and the config file are checked before anything runs: an unknown id or a malformed entry is a usage error (exit 2)
   let waivers: Waiver[];
+  let config: ConformanceConfig = EMPTY_CONFIG;
   try {
     const manifestFile = target === "manifest" ? (file ?? values.manifest) : target === "app" ? values.manifest : undefined;
-    waivers = [...(values.waive ?? []).map(parseWaiveFlag), ...(manifestFile ? loadWaiverFile(manifestFile) : [])];
+    if (manifestFile) config = loadConformanceConfig(manifestFile);
+    waivers = [...(values.waive ?? []).map(parseWaiveFlag), ...config.waivers];
   } catch (e) {
     if (!(e instanceof WaiverError)) throw e;
     process.stderr.write(`tb-conformance: ${e.message}\n${USAGE}\n`);
@@ -205,6 +215,7 @@ export async function main(argv: string[]): Promise<number> {
                 bootTimeoutMs: 120_000,
               }),
         ...(values.inputs ? { inputs: readJson(values.inputs) as Record<string, never> } : {}),
+        config,
         ...(values["deploy-template"] ? { deployTemplate: readJson(values["deploy-template"]) } : {}),
         testRoots,
         keysetRequired,

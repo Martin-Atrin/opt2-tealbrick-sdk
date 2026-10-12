@@ -71,6 +71,8 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B5.paused_first": "pause checked before the grant",
     "B5.restored": "unpause / un-revoke restore the agent",
     "B5.grant_held_unknown": "agent grant whose held names an unknown family still honoured (C108)",
+    "B5.free_wf_limits": "Free grant with a non-empty wf: an op outside wf refused not_in_workflow, the listed op forwarded (C111a)",
+    "B5.free_wf_caps": "Free grant with wf + caps: the call is forwarded with the caps and the app holds it (C111a)",
   }),
   hooks: ids({
     "B6.order": "hook order before → context → op → after",
@@ -120,6 +122,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B25.real_dynamic_call": "_call (resolve + op call) and a list-mode entry tool reach the real SDK app and answer ok",
     "B25.real_op_call": "a plain op passes the real SDK's proof / grant verification and authorize() and writes its receipt",
     "B25.real_mark": "a failing after hook marks the real SDK app's receipt after_failed (bridge op mark)",
+    "B25.real_hook_hold": "a REAL SDK before hook answering a hold verdict → the bridge forwards with hv, the fake app holds (never hook_failed; L2)",
     // C85 + v0.1.14 A2A-10: app-initiated companion calls (the real SDK app as the CALLER; fake apps for parentCall)
     "B26.app_initiated_real": "StartContext.callApp of the real SDK app reaches a fake app: ok, hooks see caller type app, no parentCall forwarded",
     "B26.app_initiated_rate": "app-initiated calls are rate-limited per caller instance (burst 30, then rate_limited; a refilled token passes)",
