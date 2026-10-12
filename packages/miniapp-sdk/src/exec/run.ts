@@ -9,6 +9,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "../server/errors.ts";
 import { createLogger, type LogSink, SecretRegistry } from "../server/log.ts";
+import { dropPrivileges, type PrivilegeProc } from "../server/privilege.ts";
 import { TB_EXEC_CONTROL_PORT } from "../server/service-helper.ts";
 import { parseArgs } from "./args.ts";
 import { ServiceBridge } from "./bridge.ts";
@@ -23,6 +24,8 @@ export const STOP_SIGNALS: readonly NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SI
 export const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = [...STOP_SIGNALS, "SIGHUP", "SIGUSR1", "SIGUSR2"];
 
 export interface TbExecOptions {
+  /** tests only: injected process facade for the privilege drop (default: the real process) */
+  privilegeProc?: PrivilegeProc;
   argv: readonly string[];
   env: Record<string, string | undefined>;
   /** listen address of the helper proxy and control port (default all interfaces of the private network) */
@@ -45,6 +48,11 @@ interface FetchedKeys {
   rev: number;
   /** digest of the values, to restart only on a real change */
   fingerprint: string;
+}
+
+/** C54: tb-exec drops privileges for a companion service only when `runtime.services[].dropPrivileges === true`. */
+export function shouldDropForService(service: { dropPrivileges?: boolean }): boolean {
+  return service.dropPrivileges === true;
 }
 
 /**
@@ -135,6 +143,10 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     log = createLogger(cfg.env.logLevel, secrets, { component: "tb-exec", svc: cfg.service.id }, o.logSink);
     for (const name of cfg.env.unknown) log.warn("env_unknown", { name });
     checkHelperFlags(cfg, args.helperCmd);
+    // C53 / BSA-05: started as root → hand the volumes to uid 1000 and drop before the key, any listener or the
+    // children (the upstream and helper inherit uid/gid 1000).
+    // C54: companions drop only when the manifest opts in (upstream images such as Postgres switch users themselves).
+    if (shouldDropForService(cfg.service) && dropPrivileges(cfg.env, o.privilegeProc)) log.info("privileges_dropped", { uid: 1000 });
     const key = await loadServiceKey(cfg);
     const bridge = new ServiceBridge({ baseUrl: cfg.bridgeUrl, instanceId: cfg.instanceId, service: cfg.service.id, key });
     const claimed = await claimOrLoad(cfg, key, bridge, log, startup.signal);

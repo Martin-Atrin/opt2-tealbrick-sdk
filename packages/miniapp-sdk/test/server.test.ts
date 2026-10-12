@@ -12,8 +12,22 @@ function testApp(port: number, migrations: string, counters: Record<string, numb
   const bump = (k: string) => {
     counters[k] = (counters[k] ?? 0) + 1;
   };
+  const manifest = fixtureManifest(port);
+  // a person op that requires an idempotency key (C53 / BSA-12: listed in the session answer)
+  manifest.operations.push({
+    id: "notebook_archive",
+    title: "Archive notebook",
+    description: "Archive a notebook (owner only).",
+    input: { type: "object", required: ["notebook"], properties: { notebook: { type: "string" } } },
+    output: { type: "object" },
+    crud: ["update"],
+    effect: "write",
+    idempotency: "required",
+    receipt: false,
+    audience: "person",
+  });
   return defineApp({
-    manifest: fixtureManifest(port),
+    manifest,
     migrations,
     handlers: {
       note_create: {
@@ -39,6 +53,10 @@ function testApp(port: number, migrations: string, counters: Record<string, numb
       notebook_rename: async (input) => {
         bump("notebook_rename");
         return { renamed: (input as { label: string }).label };
+      },
+      notebook_archive: async () => {
+        bump("notebook_archive");
+        return { archived: true };
       },
     },
   });
@@ -111,8 +129,10 @@ async function signIn(b: Booted): Promise<{ cookie: string; csrf: string }> {
   assert.match(set, new RegExp(`Path=/a/${PRODUCT}/`));
   const cookie = set.split(";")[0] as string;
   const s = await fetch(`${b.base}/a/${PRODUCT}/tb/v1/session`, { headers: { cookie } });
-  const body = (await s.json()) as { csrf: string; principal: { id: string } };
+  const body = (await s.json()) as { csrf: string; principal: { id: string }; idempotencyRequired: string[] };
   assert.equal(body.principal.id, b.w.per);
+  // exactly the person-audience ops with idempotency "required" (not agent note_create, not supported/standard ops)
+  assert.deepEqual(body.idempotencyRequired, ["notebook_archive"]);
   return { cookie, csrf: body.csrf };
 }
 
@@ -344,6 +364,14 @@ describe("agent operations via the bridge", () => {
     const ok = await personOp(b, s, "notebook_rename", { notebook: "x", label: "y" });
     assert.equal(ok.status, 200);
     assert.deepEqual(ok.body.output, { renamed: "y" });
+    const noKey = await personOp(b, s, "notebook_archive", { notebook: "x" });
+    assert.equal(noKey.body.error.code, "idempotency_key_required");
+    const keyed = await fetch(`${b.base}/a/${PRODUCT}/tb/v1/ops/notebook_archive`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: s.cookie, "tb-csrf": s.csrf, origin: b.base },
+      body: JSON.stringify({ input: { notebook: "x" }, idempotencyKey: crypto.randomUUID() }),
+    });
+    assert.equal(keyed.status, 200);
     const agentOp = await personOp(b, s, "note_get", { id: "n1" });
     assert.equal(agentOp.body.error.code, "audience_not_person");
     const noSession = await fetch(`${b.base}/a/${PRODUCT}/tb/v1/session`);

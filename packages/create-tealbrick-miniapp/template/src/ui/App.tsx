@@ -1,41 +1,15 @@
-// App pages over the SDK client hooks (holds, agents, session). Holds are decided here, one call at a time (C8).
-// SPEC-GAP: SDK-API §14 names <AppShell> from @opt2-tealbrick/ui; ui 0.1.0 does not export it yet. `Frame` is a
-// minimal stand-in built from ui primitives; replace it with <AppShell> when ui ships it (no other change needed).
+// App pages over the SDK client hooks (holds, agents, session) inside the ONE app shell, <AppShell> from
+// @opt2-tealbrick/ui (SDK-API §14). Holds are decided here, one call at a time (C8).
 import { useAgents, useHolds, useSession } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, Eyebrow, Notice, Tag } from "@opt2-tealbrick/ui";
-import type { ReactNode } from "react";
+import { AppShell, Button, Notice, STANDARD_PAGES, Tag } from "@opt2-tealbrick/ui";
+import { useEffect, useState } from "react";
 
 const NAME = "__APP_NAME__";
 
-function Frame({ children }: { children: ReactNode }) {
-  const { principal, status, signOut } = useSession();
-  return (
-    <main style={{ maxWidth: "48rem", margin: "0 auto", padding: "1.5rem" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "1rem" }}>
-        <div>
-          <Eyebrow>Teal Brick app</Eyebrow>
-          <h1>{NAME}</h1>
-        </div>
-        {status === "signed_in" && principal ? (
-          <Button onClick={() => void signOut()}>Sign out</Button>
-        ) : (
-          <Tag tone={status === "loading" ? "progress" : "action"}>{status === "loading" ? "Loading" : "Signed out"}</Tag>
-        )}
-      </header>
-      <nav style={{ display: "flex", gap: "1rem", margin: "1rem 0" }}>
-        <a href="./">Holds</a>
-        <a href="./configure">Agents</a>
-      </nav>
-      {status === "signed_out" ? (
-        <Notice tone="action" role="alert">
-          Open this app from Portal to sign in.
-        </Notice>
-      ) : (
-        children
-      )}
-    </main>
-  );
-}
+/** Pages this app serves, by shell page id → path under the base `/a/__APP_ID__/` (manifest `ui.launchPath`, `ui.configurePath`). */
+const PATHS: Record<string, string> = { holds: "./", agents: "./configure" };
+const PAGES = STANDARD_PAGES.filter((p) => p.id in PATHS);
+const pageOf = (pathname: string) => (pathname.replace(/\/+$/, "").endsWith("/configure") ? "agents" : "holds");
 
 function Holds() {
   const { holds, loading, decide } = useHolds({ status: "held" });
@@ -73,6 +47,39 @@ function Agents() {
 }
 
 export function App() {
-  const configure = globalThis.location.pathname.replace(/\/+$/, "").endsWith("/configure");
-  return <Frame>{configure ? <Agents /> : <Holds />}</Frame>;
+  const { principal, status, signOut } = useSession();
+  const [page, setPage] = useState(() => pageOf(globalThis.location.pathname));
+  useEffect(() => {
+    const onPop = () => setPage(pageOf(globalThis.location.pathname));
+    globalThis.addEventListener("popstate", onPop);
+    return () => globalThis.removeEventListener("popstate", onPop);
+  }, []);
+  const navigate = (id: string) => {
+    globalThis.history.pushState(null, "", PATHS[id]);
+    setPage(id);
+  };
+  return (
+    <AppShell
+      title={NAME}
+      pages={PAGES}
+      current={page}
+      onNavigate={navigate}
+      actions={
+        status === "signed_in" && principal ? (
+          <Button onClick={() => void signOut()}>Sign out</Button>
+        ) : (
+          <Tag tone={status === "loading" ? "progress" : "action"}>{status === "loading" ? "Loading" : "Signed out"}</Tag>
+        )
+      }
+      banner={
+        status === "signed_out" ? (
+          <Notice tone="action" role="alert">
+            Open this app from Portal to sign in.
+          </Notice>
+        ) : null
+      }
+    >
+      {status === "signed_out" ? null : page === "agents" ? <Agents /> : <Holds />}
+    </AppShell>
+  );
 }

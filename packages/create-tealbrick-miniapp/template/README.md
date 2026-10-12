@@ -11,14 +11,15 @@ operation id (`src/app.ts`) and plain migrations (`migrations/`).
 | Path | Content |
 |---|---|
 | `tealbrick.manifest.json` | identity, runtime (data + backup volumes), operations, scopes, skills, backups, UI paths |
-| `src/app.ts` | `defineApp`: one typed handler per operation, agent first-sight event |
+| `src/app.ts` | `defineApp`: one typed handler per operation (op ids and I/O types from `#kit`), agent first-sight event |
 | `src/items.ts` | the app's table access (plain functions over the SDK `Db`) |
 | `src/main.ts` | `startApp(app, process.env)` |
-| `src/ui/` | React UI (`<TbProvider>` + `@opt2-tealbrick/ui`), built to `dist/ui` |
+| `src/ui/` | React UI (`<TbProvider>` + `<AppShell>` from `@opt2-tealbrick/ui`), built to `dist/ui` |
 | `migrations/0001_init.sql` | baseline; forward-only, never edit a released file |
 | `skills/use-__APP_ID__/SKILL.md` | the agent skill (frontmatter `name`, `description`) |
 | `scripts/build-ui.ts` | UI build without a bundler (tsc output + vendored modules + import map) |
-| `Dockerfile` | `node:24-slim` pinned by digest, non-root, `CMD ["node", "dist/main.js"]` |
+| `gen/` (not committed) | `tb-gen` output; `node --run kit` generates the kit and compiles it to `dist/kit` (`#kit` import) |
+| `Dockerfile` | `node:24-slim` pinned by digest, pnpm build to `dist/`, non-root, `CMD ["node", "dist/main.js"]` |
 | `.woodpecker/ci.yaml` | the opt2 CI template, byte-identical copy (do not edit) |
 | `tealbrick-ci.json` | CI settings: kind `miniapp`, one image |
 
@@ -26,6 +27,7 @@ operation id (`src/app.ts`) and plain migrations (`migrations/`).
 
 ```sh
 pnpm install          # commit pnpm-lock.yaml: CI installs with --frozen-lockfile
+# typecheck, test, conformance, build and start first run `tb-gen kit` (op ids + I/O types from the manifest)
 pnpm typecheck && pnpm lint && pnpm test
 pnpm build            # server to dist/, UI to dist/ui
 pnpm conformance      # SDK conformance suite against this app

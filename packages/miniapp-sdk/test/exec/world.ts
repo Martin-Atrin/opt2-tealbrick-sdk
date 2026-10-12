@@ -30,7 +30,7 @@ export interface ExecWorld {
   cleanup(): Promise<void>;
 }
 
-export async function execWorld(opts: { helper?: boolean; backup?: boolean } = {}): Promise<ExecWorld> {
+export async function execWorld(opts: { helper?: boolean; backup?: boolean; dropPrivileges?: boolean } = {}): Promise<ExecWorld> {
   const t = tempDir("tb-exec-test-");
   const helperPort = await freePort();
   const helperTarget = await freePort();
@@ -44,6 +44,7 @@ export async function execWorld(opts: { helper?: boolean; backup?: boolean } = {
     resources: { cpu: 0.5, memoryMb: 256 },
     health: { kind: "tcp" },
     startOrder: 0,
+    ...(opts.dropPrivileges === undefined ? {} : { dropPrivileges: opts.dropPrivileges }),
     ...(opts.helper === false ? {} : { helper: { port: helperPort, paths: ["/sources"] } }),
     ...(opts.backup === false
       ? {}

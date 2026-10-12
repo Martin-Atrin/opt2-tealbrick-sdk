@@ -2,10 +2,14 @@
 // stay not_run), --live-readonly never writes, and each broken variant fails exactly the check that guards it.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
+import { OPAQUE_PREFIX } from "@opt2-tealbrick/spec/credentials";
 import { ROUTES } from "@opt2-tealbrick/spec/routes";
-import { authProbeRows, CORE_LIVE_CHECKS, envelopeOnly, gatewayOrigin, LiveClient, loadSpecTypes, ProbeBlocked, runCoreLive, runCoreTarget, stringUnion } from "../../src/index.ts";
+import { authProbeRows, CORE_LIVE_CHECKS, envelopeOnly, gatewayOrigin, LiveClient, loadSpecTypes, ProbeBlocked, runCoreLive, runCoreTarget, secretInPublicAnswer, stringUnion } from "../../src/index.ts";
 import type { CheckResult } from "../../src/report.ts";
 import { type Break, type FakeGateway, startFakeGateway } from "./fake-gateway.ts";
+
+/** a live-key-shaped fixture assembled at run time (no key-like literal in source for the secret scanner) */
+const FAKE_LIVE_KEY = ["sk", "live", "0123456789abcdef"].join("_");
 
 const errorCodes = stringUnion(loadSpecTypes(), "ErrorCode");
 const byStatus = (rs: CheckResult[], s: string) => rs.filter((r) => r.status === s).map((r) => r.id);
@@ -59,8 +63,42 @@ describe("core live checks", () => {
 
   it("full live mode (no --live-readonly) runs the device.start refusal and shape probes", async () => {
     const r = await live([], false);
-    for (const id of ["cred.p1.kit_cannot_get_owner", "R8.owner_no_key", "R8.agent_batch_limit", "R7.start_shape"]) assert.equal(r.results.find((x) => x.id === id)?.status, "pass", id);
+    for (const id of ["cred.p1.kit_cannot_get_owner", "R8.owner_no_key", "R8.agent_batch_limit", "R7.start_shape", "R1.public_rows"]) assert.equal(r.results.find((x) => x.id === id)?.status, "pass", id);
+    assert.doesNotMatch(r.results.find((x) => x.id === "R1.public_rows")?.asserted ?? "", /SECRET IN ANSWER/);
     assert.equal(r.results.find((x) => x.id === "R7.poll_pending")?.status, "fail", "the fake never answers authorization_pending");
+  });
+
+  it("device.start leaking a field that is not in DeviceStart fails R1.public_rows (R7.start_shape still passes)", async () => {
+    const r = await live(["device_start_extra_secret"], false);
+    const pr = r.results.find((x) => x.id === "R1.public_rows");
+    assert.equal(pr?.status, "fail");
+    assert.match(pr?.asserted ?? "", /device\.start → 200.*SECRET IN ANSWER/);
+    assert.equal(r.results.find((x) => x.id === "R7.start_shape")?.status, "pass");
+  });
+
+  it("secretInPublicAnswer exempts exactly the spec-defined device-flow outputs", () => {
+    const ans = (status: number, body: Record<string, unknown>) => ({ status, body, text: JSON.stringify(body) });
+    const deviceCode = `${OPAQUE_PREFIX.deviceCode}${"B".repeat(43)}`;
+    const start = { device_code: deviceCode, user_code: "BCDF-GHJK", verification_uri: "https://p.test/device", verification_uri_complete: "https://p.test/device?user_code=BCDF-GHJK", expires_in: 600, interval: 5 };
+    const owner = { scope: "owner", access_token: `${OPAQUE_PREFIX.ownerCliSession}${"A".repeat(43)}`, token_type: "Bearer", expires_in: 86400, session_id: "ses_x" };
+    const agent = { scope: "agent", workspace_id: "ws_x", bridge_id: "brg_x", mcp_url: "https://b.test/mcp", token_endpoint: "https://b.test/oauth/token", connections: [] };
+    assert.equal(secretInPublicAnswer("device.start", ans(200, start)), false);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, owner)), false);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, agent)), false);
+    // not the spec op, not a 200, not the owner shape, not the spec value shape → scanned as usual
+    assert.equal(secretInPublicAnswer("bridge_api.enrol", ans(200, start)), true);
+    assert.equal(secretInPublicAnswer("device.start", ans(400, start)), true);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, { ...owner, scope: undefined })), true);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, { access_token: owner.access_token, token_type: "Bearer" })), true);
+    assert.equal(secretInPublicAnswer("device.start", ans(200, { ...start, device_code: FAKE_LIVE_KEY })), true);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, { ...agent, access_token: owner.access_token })), true);
+    // anything beyond the exempt fields still fails
+    assert.equal(secretInPublicAnswer("device.start", ans(200, { ...start, client_secret: "x" })), true);
+    assert.equal(secretInPublicAnswer("device.start", ans(200, { ...start, note: deviceCode })), true);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, { ...owner, refresh_token: "r" })), true);
+    assert.equal(secretInPublicAnswer("device.token", ans(200, { ...owner, key: { kty: "OKP", d: "E".repeat(43) } })), true);
+    const dupText = `{"device_code":"${FAKE_LIVE_KEY}","device_code":"${deviceCode}","user_code":"BCDF-GHJK"}`;
+    assert.equal(secretInPublicAnswer("device.start", { status: 200, body: JSON.parse(dupText) as unknown, text: dupText }), true);
   });
 
   const cases: [Break, string[]][] = [
@@ -71,6 +109,7 @@ describe("core live checks", () => {
     ["stack_trace", ["R1.no_internals"]],
     ["device_token_leak", ["R7.unknown_device_code", "R7.malformed_poll", "R1.public_rows"]],
     ["status_mismatch", ["R1.unknown_path", "R1.status_mapping", "R11.webhook_bad_signature"]],
+    ["public_key_leak", ["R1.public_rows"]],
   ];
   for (const [b, ids] of cases) {
     it(`broken gateway (${b}) fails ${ids.join(", ")}`, async () => {

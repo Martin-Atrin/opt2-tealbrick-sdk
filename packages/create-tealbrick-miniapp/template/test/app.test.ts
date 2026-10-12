@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { manifestDigest, validateManifest } from "@opt2-tealbrick/manifest";
 import { type Db, defineApp, type OpContext, startApp } from "@opt2-tealbrick/miniapp-sdk";
+import { MANIFEST_DIGEST, OP } from "#kit";
 import { definition, handlers, manifest } from "../src/app.ts";
 import { COLLECTION, createItem, listItems } from "../src/items.ts";
 
@@ -33,6 +34,13 @@ function openDb(file: string): { db: Db; close(): void } {
 test("manifest validates", () => {
   const v = validateManifest(manifest);
   assert.equal(v.ok, true, v.ok ? "" : JSON.stringify(v.errors));
+});
+
+test("the generated kit matches the manifest and every operation has exactly one handler", () => {
+  assert.equal(MANIFEST_DIGEST, manifestDigest(manifest), "kit is stale: run node --run kit");
+  const ids = manifest.operations.map((o) => o.id).sort();
+  assert.deepEqual(Object.values(OP).sort(), ids);
+  assert.deepEqual(Object.keys(handlers).sort(), ids);
 });
 
 test("boots on the SDK, serves derived routes, handlers work on the migrated table", async (t) => {

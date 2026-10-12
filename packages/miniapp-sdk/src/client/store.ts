@@ -3,7 +3,7 @@
 import type { AgentId, Ulid } from "@opt2-tealbrick/spec/credentials";
 import type { Json, PersonPrincipal, Receipt, ScopeGrantRow, SessionInfo, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import { TbError } from "../server/errors.ts";
-import { callOp, setCsrf, setCsrfLoader, tbFetch } from "./fetch.ts";
+import { callOp, setCsrf, setCsrfLoader, setIdempotencyRequired, tbFetch } from "./fetch.ts";
 
 export interface SessionSnapshot {
   principal: PersonPrincipal | null;
@@ -35,8 +35,9 @@ export function loadSession(): Promise<SessionSnapshot> {
   inflight ??= (async () => {
     try {
       const res = await tbFetch("tb/v1/session");
-      const s = (await res.json()) as SessionInfo;
+      const s = (await res.json()) as SessionInfo & { idempotencyRequired?: unknown };
       setCsrf(s.csrf);
+      setIdempotencyRequired(Array.isArray(s.idempotencyRequired) ? s.idempotencyRequired.filter((o): o is string => typeof o === "string") : []);
       publish({ principal: s.principal, status: "signed_in" });
     } catch (e) {
       if (!(e instanceof TbError) || (e.code !== "session_required" && e.httpStatus !== 401)) throw e;
@@ -65,6 +66,7 @@ export async function signOut(): Promise<void> {
 /** Test hook: back to the initial state. */
 export function resetClientState(): void {
   setCsrf(null);
+  setIdempotencyRequired(null);
   inflight = null;
   snapshot = { principal: null, status: "loading" };
 }

@@ -7,6 +7,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeF
 import { builtinModules, createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { importSpecifiers } from "./import-scan.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const out = join(root, "dist", "ui");
@@ -28,14 +29,6 @@ const fail = (msg: string): never => {
 const posix = (p: string) => p.split(sep).join("/");
 const requireFrom = (file: string) => createRequire(file);
 const pkgDir = (name: string, fromFile: string) => dirname(realpathSync(requireFrom(fromFile).resolve(`${name}/package.json`)));
-
-/** Static and dynamic import specifiers of an emitted ES module. */
-function specifiers(code: string): string[] {
-  const found = new Set<string>();
-  for (const m of code.matchAll(/\b(?:import|export)\s*(?:[^;"'`]*?\bfrom\s*)?["']([^"']+)["']/g)) found.add(m[1] as string);
-  for (const m of code.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g)) found.add(m[1] as string);
-  return [...found];
-}
 
 /** Nearest package.json above `file` that has a name. */
 function owningPackage(file: string): { name: string; dir: string } {
@@ -80,7 +73,7 @@ while (queue.length > 0) {
   if (seen.has(file)) continue;
   seen.add(file);
   vendorPath(file);
-  for (const spec of specifiers(readFileSync(file, "utf8"))) {
+  for (const spec of importSpecifiers(readFileSync(file, "utf8"))) {
     if (spec.startsWith("./") || spec.startsWith("../")) {
       const target = resolve(dirname(file), spec);
       if (!existsSync(target)) fail(`${file} imports missing ${spec}`);

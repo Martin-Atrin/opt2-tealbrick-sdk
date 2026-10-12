@@ -109,7 +109,16 @@ describe("createMiniapp", () => {
     assert.equal(pkg.publishConfig, undefined);
     assert.match(pkg.packageManager, /^pnpm@\d+\.\d+\.\d+$/);
     for (const s of ["typecheck", "lint", "test", "conformance", "build", "gen"]) assert.equal(typeof pkg.scripts[s], "string", `script ${s}`);
-    assert.equal(pkg.scripts.conformance, "tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json");
+    assert.equal(pkg.scripts.conformance, "node --run kit && tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json");
+    // BSA-12: op ids and I/O types come from the generated kit, generated before every step that compiles or runs src
+    assert.equal(pkg.scripts.kit, "tb-gen kit && tsc -p gen/kit/tasks-kit --outDir dist/kit");
+    assert.deepEqual(pkg.imports, { "#kit": "./dist/kit/index.js" });
+    for (const s of ["start", "typecheck", "test", "conformance", "build"]) assert.match(pkg.scripts[s], /^node --run kit && /, `script ${s}`);
+    const app = read(dir, "src/app.ts");
+    assert.match(app, /^import \{[^}]*\bOP\b[^}]*\} from "#kit";$/m);
+    assert.match(app, /\[OP\.itemsList\]/);
+    assert.match(app, /satisfies Record<OpId, HandlerSpec>/);
+    assert.doesNotMatch(app, /\binterface \w+(Input|Output)\b/, "no hand-written I/O types");
     // generated artifacts (SDK-API §15): produced by tb-gen, never committed
     assert.equal(pkg.scripts.gen, "tb-gen all");
     assert.ok(read(dir, ".gitignore").split("\n").includes("gen/"), "gen/ is gitignored");
@@ -121,6 +130,14 @@ describe("createMiniapp", () => {
     const tb = Object.entries<string>({ ...pkg.dependencies, ...pkg.devDependencies }).filter(([n]) => n.startsWith("@opt2-tealbrick/"));
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /\/ui-v0\.1\.1\//);
+    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.6\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.3\//);
+    // BSA-07: the ONE app shell from ui, no local frame
+    const ui = read(dir, "src/ui/App.tsx");
+    assert.match(ui, /import \{[^}]*\bAppShell\b[^}]*\} from "@opt2-tealbrick\/ui";/);
+    assert.match(ui, /<AppShell\b/);
+    assert.doesNotMatch(ui, /SPEC-GAP|function Frame\b/);
 
     const ci = readJson(dir, "tealbrick-ci.json");
     assert.equal(ci.kind, "miniapp");
@@ -136,6 +153,15 @@ describe("createMiniapp", () => {
     assert.match(docker, /^USER node$/m);
     assert.match(docker, /^CMD \["node", "dist\/main\.js"\]$/m);
     assert.match(docker, /^COPY tealbrick\.manifest\.json \/opt\/tb\/tealbrick\.manifest\.json$/m);
+    // BSA-06: the ONE Dockerfile pattern (pnpm frozen lockfile, kit + tsc + UI build to dist, data under /data)
+    const [build = "", runtime = ""] = docker.split(/^FROM .*$/m).slice(1);
+    assert.match(build, /^RUN corepack enable$/m);
+    assert.match(build, /^RUN pnpm install --frozen-lockfile$/m);
+    assert.match(build, /^COPY tealbrick\.manifest\.json .*\n(?:.*\n)*RUN pnpm run build && pnpm prune --prod$/m, "manifest is in the build stage before tb-gen runs");
+    assert.match(build, /^COPY skills \.\/skills$/m, "the kit embeds the skill texts");
+    assert.match(runtime, /^ENV .*\bTB_DATA_DIR=\/data TB_BACKUP_DIR=\/data\/backup$/m);
+    assert.match(runtime, /^COPY --from=build \/app\/dist \.\/dist$/m);
+    assert.match(read(dir, ".dockerignore"), /^gen$/m);
 
     const skill = read(dir, "skills/use-tasks/SKILL.md");
     const front = /^---\n([\s\S]*?)\n---\n/.exec(skill)?.[1] ?? "";

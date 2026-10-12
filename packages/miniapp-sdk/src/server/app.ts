@@ -19,6 +19,7 @@ import { BridgeLink } from "./link.ts";
 import { createLogger, SecretRegistry } from "./log.ts";
 import { decide } from "./ops.ts";
 import { createPersonAuth } from "./person.ts";
+import { dropPrivileges } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 import { createScopeStore } from "./scopes.ts";
@@ -111,6 +112,9 @@ export async function startApp(app: App, env: Record<string, string | undefined>
   if (!cfg.standalone && (!cfg.instanceId || !cfg.bridgeUrl || !cfg.portalKeys))
     throw new TbError("env_invalid", "TB_INSTANCE_ID, TB_BRIDGE_URL and TB_PORTAL_KEYS are required unless TB_STANDALONE=1", 500);
 
+  // C53 / BSA-05: started as root → hand the volumes to uid 1000 and drop before any file, key or listener opens.
+  if (dropPrivileges(cfg)) log.info("privileges_dropped", { uid: 1000 });
+
   const sealer = createSealer(resolveKeks(cfg.dataDir, cfg.kek, cfg.kekPrevious));
   await restoreAtBoot(
     { manifest, dataDir: cfg.dataDir, backupDir: cfg.backupDir, instanceId: cfg.instanceId ?? "", sdkVersion: SDK_VERSION, log, hooks: def.backup, env, instanceKey: () => loadInstanceKey(cfg.dataDir, sealer), bridgeId: () => null },
@@ -186,7 +190,9 @@ export async function startApp(app: App, env: Record<string, string | undefined>
       }
     },
   });
-  const person = createPersonAuth({ db, product: manifest.id, launchPath: manifest.ui?.launchPath ?? "/", trust, audit, log, instanceKey, standalone: cfg.standalone });
+  const person = createPersonAuth({ db, product: manifest.id, launchPath: manifest.ui?.launchPath ?? "/", trust, audit, log, instanceKey, standalone: cfg.standalone,
+    idempotencyRequired: manifest.operations.filter((o) => o.audience === "person" && o.idempotency === "required").map((o) => o.id),
+  });
   const backup = createBackupApi({
     manifest,
     dataDir: cfg.dataDir,

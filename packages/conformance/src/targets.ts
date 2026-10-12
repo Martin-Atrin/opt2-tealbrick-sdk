@@ -10,17 +10,17 @@ import { notImplemented, Suite } from "./suite.ts";
 
 export interface ManifestTargetOptions {
   manifestPath: string;
-  /** source trees for M5; default: the installed @opt2-tealbrick/manifest package and this package */
+  /** source trees for M5; default: the installed @opt2-tealbrick/manifest package (this package's own tree is never scanned) */
   scanDirs?: string[];
   extraProductIds?: string[];
   expectDigest?: string;
 }
 
-/** Default M5 trees: the manifest package and the conformance package (both must hold no product id). */
+/** Default M5 trees: the manifest package's src and dist (platform code that must hold no product id). The conformance
+ * package's own source/install tree is not a subject: `findProductLiterals` skips it even when passed explicitly. */
 export function defaultScanDirs(): string[] {
   const manifestPkg = dirname(dirname(fileURLToPath(import.meta.resolve("@opt2-tealbrick/manifest"))));
-  const own = dirname(dirname(fileURLToPath(import.meta.url)));
-  return [join(manifestPkg, "src"), join(manifestPkg, "dist"), join(own, "src"), join(own, "dist")];
+  return [join(manifestPkg, "src"), join(manifestPkg, "dist")];
 }
 
 /** Product ids of the spec examples (always part of the M5 grep list). */

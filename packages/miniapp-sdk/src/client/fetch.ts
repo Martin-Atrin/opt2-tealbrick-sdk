@@ -6,15 +6,18 @@ import { TbError } from "../server/errors.ts";
 
 const PRODUCT_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
+const IDEM_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 interface ClientState {
   product: string | null;
   csrf: string | null;
   /** loads the session (which sets the CSRF token) when none is cached; set by the session store */
   loadCsrf: (() => Promise<unknown>) | null;
+  /** person op ids with `idempotency: "required"` from the session answer; null until a session answer arrived */
+  idempotencyRequired: ReadonlySet<string> | null;
 }
 
-const state: ClientState = { product: null, csrf: null, loadCsrf: null };
+const state: ClientState = { product: null, csrf: null, loadCsrf: null, idempotencyRequired: null };
 
 /** Sets the product whose base path `/a/<product>/` every request uses (TbProvider calls it). */
 export function setProduct(product: string): void {
@@ -24,6 +27,11 @@ export function setProduct(product: string): void {
 
 export function setCsrf(token: string | null): void {
   state.csrf = token;
+}
+
+/** Set from the session answer's `idempotencyRequired` (an older server without the field → empty list). */
+export function setIdempotencyRequired(ops: readonly string[] | null): void {
+  state.idempotencyRequired = ops === null ? null : new Set(ops);
 }
 
 export function setCsrfLoader(loader: (() => Promise<unknown>) | null): void {
@@ -87,11 +95,23 @@ export async function tbFetch(path: string, init: RequestInit = {}): Promise<Res
   throw err;
 }
 
-/** Person op via POST /a/<product>/tb/v1/ops/:op (body `{ input }`); returns the op output. */
-/** C41: `opts.idempotencyKey` (1–128 chars `[A-Za-z0-9._:-]`, SDK-API §4.4) is sent as body field `idempotencyKey`. */
+/**
+ * Person op via POST /a/<product>/tb/v1/ops/:op (body `{ input, idempotencyKey? }`); returns the op output.
+ * C41: `opts.idempotencyKey` (1–128 chars `[A-Za-z0-9._:-]`, SDK-API §4.4) is sent as body field `idempotencyKey`.
+ * C53 / BSA-12: for an op the session answer lists in `idempotencyRequired`, a call without a key gets a fresh
+ * `crypto.randomUUID()` key. That key is per call: callOp never retries, so a caller that retries the SAME logical
+ * call (after a network error, say) must pass its own key to get the server's replay instead of a second effect.
+ */
 export async function callOp<O = Json>(op: string, input: Json, opts?: { idempotencyKey?: string }): Promise<O> {
-  const key = opts?.idempotencyKey;
-  if (key !== undefined && !/^[A-Za-z0-9._:-]{1,128}$/.test(key)) throw new TbError("idempotency_key_invalid", "idempotencyKey must be 1-128 chars [A-Za-z0-9._:-]", 400);
+  let key = opts?.idempotencyKey;
+  if (key !== undefined && !IDEM_KEY_RE.test(key)) throw new TbError("idempotency_key_invalid", "idempotencyKey must be 1-128 chars [A-Za-z0-9._:-]", 400);
+  if (key === undefined) {
+    if (state.idempotencyRequired === null && state.loadCsrf) {
+      await state.loadCsrf();
+      if (state.csrf === null) throw new TbError("session_required", "sign in first (no session)", 401);
+    }
+    if (state.idempotencyRequired?.has(op)) key = globalThis.crypto.randomUUID();
+  }
   const body = key === undefined ? { input } : { input, idempotencyKey: key };
   const res = await tbFetch(`tb/v1/ops/${encodeURIComponent(op)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const r = (await res.json()) as OpResult<O>;

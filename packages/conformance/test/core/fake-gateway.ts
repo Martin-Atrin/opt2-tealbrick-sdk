@@ -20,7 +20,11 @@ export type Break =
   /** device.token answers an unknown code with an access token */
   | "device_token_leak"
   /** unknown paths answer 400 not_found; the webhook answers an off-spec code */
-  | "status_mismatch";
+  | "status_mismatch"
+  /** the enrol refusal carries a private JWK (`d`) of a key */
+  | "public_key_leak"
+  /** device.start answers the spec body plus a field that is not in DeviceStart (a refresh token) */
+  | "device_start_extra_secret";
 
 export interface Seen {
   method: string;
@@ -107,15 +111,19 @@ export async function startFakeGateway(breaks: readonly Break[] = [], routes: re
           const agents = Array.isArray(body.agents) ? body.agents : [];
           if (body.scope === "owner" && (body.client_id !== "tealbrick-cli" || agents.length > 0)) return fail(res, req, 400, "validation_failed", "owner scope: tealbrick-cli, no keys");
           if (agents.length > DEVICE_FLOW.maxAgentPairs) return fail(res, req, 400, "validation_failed", "too many keys");
-          return send(res, req, 200, {
+          const start: Record<string, unknown> = {
             device_code: `${OPAQUE_PREFIX.deviceCode}${"B".repeat(43)}`,
             user_code: "BCDF-GHJK",
             verification_uri: `${ALLOWED_ORIGIN}/device`,
+            verification_uri_complete: `${ALLOWED_ORIGIN}/device?user_code=BCDF-GHJK`,
             expires_in: DEVICE_FLOW.expiresIn,
             interval: DEVICE_FLOW.interval,
-          });
+          };
+          if (has("device_start_extra_secret")) start.refresh = `${OPAQUE_PREFIX.agentRefresh}${"C".repeat(43)}`;
+          return send(res, req, 200, start);
         }
         case "bridge_api.enrol":
+          if (has("public_key_leak")) return send(res, req, 401, { error: { code: "enrolment_code_invalid", message: "unknown enrolment code", requestId: `req_${++n}` }, key: { kty: "OKP", crv: "Ed25519", x: "D".repeat(43), d: "E".repeat(43) } });
           return fail(res, req, 401, "enrolment_code_invalid", "unknown enrolment code");
         case "stripe.webhook":
           if (has("status_mismatch")) return fail(res, req, 401, "webhook_bad", "signature mismatch");

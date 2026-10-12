@@ -22,6 +22,14 @@ const PASSPHRASE_MIN = 12;
 const TRIES_PER_MIN = 5;
 const SAFE_PATH = /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*$/;
 
+/**
+ * `GET /a/<product>/tb/v1/session` answer: SessionInfo plus `idempotencyRequired`, the person-audience operation ids
+ * whose manifest says `idempotency: "required"` — the client `callOp` adds a key itself for them (C53 / BSA-12).
+ * SPEC-GAP: additive field, not yet in types/sdk.ts `SessionInfo` (SDK-API §14).
+ */
+/** spec 0.1.7: SessionInfo carries `idempotencyRequired` itself. */
+export type SessionAnswer = SessionInfo;
+
 interface StandaloneState {
   per: PersonId;
   setupDigest: string | null;
@@ -69,6 +77,8 @@ export function createPersonAuth(opts: {
   log: Logger;
   instanceKey: Ed25519KeyPair;
   standalone: boolean;
+  /** person-audience op ids with `idempotency: "required"` (sent in the session answer) */
+  idempotencyRequired: readonly string[];
 }): PersonAuth {
   const { db, trust, audit } = opts;
   const base = `/a/${opts.product}`;
@@ -124,7 +134,7 @@ export function createPersonAuth(opts: {
       iss: String(r.iss) as PersonPrincipal["iss"],
       sessionExpiresAt: Number(r.expires_at),
     };
-    return { principal, csrf: String(r.csrf), digest };
+    return { principal, csrf: String(r.csrf), idempotencyRequired: [...opts.idempotencyRequired], digest };
   };
 
   const formField = async (req: IncomingMessage, names: string[]): Promise<Record<string, string>> => {
@@ -188,7 +198,7 @@ export function createPersonAuth(opts: {
       const rid = requestId();
       const s = lookup(req, Date.now());
       if (!s) return sendError(res, rid, new TbError("session_required", "sign in through Portal", 401));
-      sendJson(res, 200, { principal: s.principal, csrf: s.csrf } satisfies SessionInfo);
+      sendJson(res, 200, { principal: s.principal, csrf: s.csrf, idempotencyRequired: [...opts.idempotencyRequired] } satisfies SessionAnswer);
     },
     async handleLogout(req, res) {
       const rid = requestId();
@@ -241,7 +251,7 @@ export function createPersonAuth(opts: {
     requireSession(req) {
       const s = lookup(req, Date.now());
       if (!s) throw new TbError("session_required", "sign in through Portal", 401);
-      return { principal: s.principal, csrf: s.csrf };
+      return { principal: s.principal, csrf: s.csrf, idempotencyRequired: s.idempotencyRequired };
     },
     requireCsrf(req, s) {
       const token = header(req, CSRF_HEADER);

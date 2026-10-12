@@ -4,6 +4,7 @@
 .data
 node_modules
 dist
+gen
 test
 *.tgz
 .env

@@ -200,6 +200,37 @@ describe("tb-exec lifecycle", () => {
     }
   });
 
+  test("C54: started as root, tb-exec drops privileges only for a service with dropPrivileges: true", async () => {
+    for (const flag of [undefined, false, true] as const) {
+      const w = await execWorld({ helper: false, backup: false, dropPrivileges: flag });
+      const calls: string[] = [];
+      let uid = 0;
+      let gid = 0;
+      const proc = {
+        getuid: () => uid,
+        getgid: () => gid,
+        setuid: (id: number) => {
+          calls.push(`setuid:${id}`);
+          uid = id;
+        },
+        setgid: (id: number) => {
+          calls.push(`setgid:${id}`);
+          gid = id;
+        },
+        setgroups: () => {},
+        chown: () => {},
+      };
+      try {
+        const h = startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile, "exit3"], env: w.env, host: "127.0.0.1", logSink: w.sink, privilegeProc: proc });
+        assert.equal(await h.exited, 3);
+        if (flag === true) assert.deepEqual(calls, ["setgid:1000", "setuid:1000"]);
+        else assert.deepEqual(calls, [], `dropPrivileges=${String(flag)} must not drop`);
+      } finally {
+        await w.cleanup();
+      }
+    }
+  });
+
   test("the child's own exit code becomes tb-exec's exit code", async () => {
     const w = await execWorld({ helper: false, backup: false });
     try {

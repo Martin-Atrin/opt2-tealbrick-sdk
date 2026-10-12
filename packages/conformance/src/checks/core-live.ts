@@ -8,7 +8,7 @@ import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { generateKeyPair, opaqueValue } from "@opt2-tealbrick/manifest";
 import { DEVICE_FLOW, OPAQUE_PREFIX } from "@opt2-tealbrick/spec/credentials";
-import { ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
+import { type DeviceOwnerTokenResult, type DeviceStart, ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
 import type { CheckResult } from "../report.ts";
 import { bad, notRun, type Outcome, Suite, verdict } from "../suite.ts";
 import { newId } from "../tokens.ts";
@@ -265,6 +265,42 @@ const INTERNAL_HOST_RE = /\.railway\.internal\b|\.svc\.cluster\.local\b|\blocalh
 const SECRET_RE = new RegExp(
   `(?:${Object.values(OPAQUE_PREFIX).join("|")})[A-Za-z0-9_-]{16,}|"(?:access_token|refresh_token|device_code|user_code|id_token|client_secret)"\\s*:|"d"\\s*:\\s*"[A-Za-z0-9_-]{20,}"|-----BEGIN [A-Z ]*PRIVATE KEY-----|\\bsk_(?:live|test)_[A-Za-z0-9]{8,}|\\bwhsec_[A-Za-z0-9]{8,}`,
 );
+const OPAQUE_SHAPE = (prefix: string) => new RegExp(`^${prefix}[A-Za-z0-9_-]{43}$`);
+const USER_CODE_HALF = `[${DEVICE_FLOW.userCodeAlphabet}]{${DEVICE_FLOW.userCodeLength / 2}}`;
+const DEVICE_CODE_RE = OPAQUE_SHAPE(OPAQUE_PREFIX.deviceCode);
+const USER_CODE_RE = new RegExp(`^${USER_CODE_HALF}-${USER_CODE_HALF}$`);
+const OWNER_TOKEN_RE = OPAQUE_SHAPE(OPAQUE_PREFIX.ownerCliSession);
+
+/** The secret outputs the spec itself puts in public answers (types/routes.ts), each with its exact value shape. */
+const DEVICE_START_SECRETS = { device_code: DEVICE_CODE_RE, user_code: USER_CODE_RE } satisfies Partial<Record<keyof DeviceStart, RegExp>>;
+const OWNER_TOKEN_SECRETS = { access_token: OWNER_TOKEN_RE } satisfies Partial<Record<keyof DeviceOwnerTokenResult, RegExp>>;
+
+/** Spec-mandated secret fields of a 200 answer of `opId`: `DeviceStart` for device.start, `DeviceOwnerTokenResult`
+ * for device.token (`DeviceAgentTokenResult` carries none). Only top-level fields whose value has the spec shape. */
+function specSecretFields(opId: string, body: Record<string, unknown>): string[] {
+  const table: Record<string, RegExp> | null = opId === "device.start" ? DEVICE_START_SECRETS : opId === "device.token" && body.scope === "owner" ? OWNER_TOKEN_SECRETS : null;
+  if (!table) return [];
+  return Object.entries(table)
+    .filter(([k, re]) => typeof body[k] === "string" && re.test(body[k]))
+    .map(([k]) => k);
+}
+
+/**
+ * R1 secret scan of one public-row answer. The spec-defined device-flow outputs (the `device_code`/`user_code` of a
+ * 200 device.start answer, the `access_token` of a 200 owner device.token answer) are exempt — R7.start_shape asserts
+ * their shape. Everything else in the answer, including any extra field next to them, is scanned.
+ */
+export function secretInPublicAnswer(opId: string, answer: Pick<ProbeAnswer, "status" | "text" | "body">): boolean {
+  const b = answer.body;
+  const obj = answer.status === 200 && b !== null && typeof b === "object" && !Array.isArray(b) ? (b as Record<string, unknown>) : null;
+  const exempt = obj ? specSecretFields(opId, obj) : [];
+  if (!obj || exempt.length === 0) return SECRET_RE.test(answer.text);
+  const rest = Object.fromEntries(Object.entries(obj).filter(([k]) => !exempt.includes(k)));
+  // a duplicate key in the raw text would hide a value from JSON.parse: count the exempt keys in the text too
+  const dup = exempt.some((k) => answer.text.split(`"${k}"`).length > 2);
+  return dup || SECRET_RE.test(JSON.stringify(rest));
+}
+
 const BANNER_HEADERS = ["x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-runtime", "x-debug-token", "x-debug", "x-stack", "x-backend-server", "x-upstream"];
 
 /** Checks that need a signed-in test account, Core's private network, DB access or the deployment record. */
@@ -433,10 +469,9 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
     const a = await c.probe(startProbe({ scope: "agent", client_id: "kit", machine_label: "tb-conformance", harness: "tb-conformance", agents: [{ public_key: await pub() }] }, "device.start agent"));
     const b = a.body as Record<string, unknown> | null;
     if (a.status !== 200 || !b || typeof b !== "object") return bad(describe(a));
-    const alpha = `[${DEVICE_FLOW.userCodeAlphabet}]{${DEVICE_FLOW.userCodeLength / 2}}`;
     const issues: string[] = [];
-    if (typeof b.device_code !== "string" || !new RegExp(`^${OPAQUE_PREFIX.deviceCode}[A-Za-z0-9_-]{43}$`).test(b.device_code)) issues.push("device_code format");
-    if (typeof b.user_code !== "string" || !new RegExp(`^${alpha}-${alpha}$`).test(b.user_code)) issues.push("user_code format");
+    if (typeof b.device_code !== "string" || !DEVICE_CODE_RE.test(b.device_code)) issues.push("device_code format");
+    if (typeof b.user_code !== "string" || !USER_CODE_RE.test(b.user_code)) issues.push("user_code format");
     if (b.expires_in !== DEVICE_FLOW.expiresIn) issues.push(`expires_in ${String(b.expires_in)}`);
     if (b.interval !== DEVICE_FLOW.interval) issues.push(`interval ${String(b.interval)}`);
     if (typeof b.device_code === "string") pendingCode = b.device_code;
@@ -482,7 +517,7 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
   }
 
   // explicit public rows: answered without a credential, never a secret in an unauthenticated answer
-  await run("R1.public_rows", "each probed public row answers without a credential (no 401 unauthenticated, 404, 405, 5xx); no secret in any answer", async () => {
+  await run("R1.public_rows", "each probed public row answers without a credential (no 401 unauthenticated, 404, 405, 5xx); no secret in any answer beyond the spec-defined device-flow outputs", async () => {
     const pubRows = routes.filter((r) => r.exposure === "gateway" && r.auth.every((a) => a === "public" || a === "device" || a === "stripe-webhook"));
     const seen: string[] = [];
     let pass = true;
@@ -497,7 +532,7 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
         // the webhook may answer a missing signature with `unauthenticated` (R11.webhook_no_signature); other public rows never
         const demandsAuth = answer.status === 401 && env?.code === "unauthenticated" && !r.auth.some((a) => a === "stripe-webhook") && r.opId !== "clerk.webhook";
         const served = !demandsAuth && answer.status !== 404 && answer.status !== 405 && answer.status < 500 && answer.status !== 0;
-        const leak = SECRET_RE.test(answer.text);
+        const leak = secretInPublicAnswer(r.opId, answer);
         pass &&= served && !leak;
         seen.push(`${r.opId} → ${describe(answer)}${demandsAuth ? " (DEMANDS A CREDENTIAL)" : ""}${served ? "" : " (NOT SERVED)"}${leak ? " (SECRET IN ANSWER)" : ""}`);
       }

@@ -1,9 +1,11 @@
 // Manifest target: M1–M5 on the fixture, sensitivity on broken manifests, M4 copy scan, M5 literal scan.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { codeLiterals, literalNamesId } from "../src/code-literals.ts";
 import { defaultScanDirs, findProductLiterals, MANIFEST_CHECK_IDS, runManifestChecks, runManifestTarget } from "../src/index.ts";
 
 const path = new URL("./fixtures/sample.manifest.json", import.meta.url).pathname;
@@ -59,7 +61,67 @@ describe("manifest checks", () => {
     }
   });
 
-  it("runManifestTarget scans the manifest package and this package by default and passes", async () => {
+  it("BSA-10: a product with id `connect` passes M5 when only this package's own files or comments name it", async () => {
+    const own = fileURLToPath(new URL("..", import.meta.url));
+    // this package's own source names `connect` in comments (src/checks/core.ts) — the default scan must not include it
+    assert.ok(!defaultScanDirs().some((d) => d.startsWith(own)));
+    const dir = mkdtempSync(join(tmpdir(), "tbconf-m5c-"));
+    try {
+      const mp = join(dir, "tealbrick.manifest.json");
+      writeFileSync(mp, JSON.stringify({ ...manifest, id: "connect" }));
+      const src = join(dir, "platform");
+      mkdirSync(src);
+      writeFileSync(
+        join(src, "a.ts"),
+        [
+          "// the connect product used to be special-cased here",
+          '/* if (id === "connect") { … } */',
+          "/** @example `connect` */",
+          "const net = { connect: () => 1 }; net.connect(); // identifier, not a literal",
+          'const url = "https://x.test/a//b"; // "connect" in a comment after a string with //',
+          "const re = /\\/\\*/; const t = `x${1 / 2}y`; // regex holding /* and a division in a template",
+          'const s = "/* not a comment */"; // connect',
+        ].join("\n"),
+      );
+      writeFileSync(join(src, "b.js"), "export const x = 1; /* 'connect' */\n");
+      const t = await runManifestTarget({ manifestPath: mp });
+      assert.equal(t.checks.find((c) => c.id === "M5")?.status, "pass", JSON.stringify(t.checks.find((c) => c.id === "M5")));
+      // explicitly passing this package's own trees is still a no-op
+      const r = await runManifestChecks({ ...manifest, id: "connect" }, { scanDirs: [src, join(own, "src"), own] });
+      assert.equal(byId(r.results, "M5"), "pass", JSON.stringify(r.results.find((c) => c.id === "M5")));
+      // sensitivity: a real string literal in code still fails, in every literal form
+      for (const [name, code] of [
+        ["c.ts", 'if (product === "connect") route();\n'],
+        ["d.ts", "const p = '/api/connect/items';\n"],
+        ["e.js", "const p = `${base}/connect`;\n"],
+        ["f.ts", "// connect\nconst a = 1 / 2; const b = ['connect'];\n"],
+      ]) {
+        const one = join(dir, `one-${name}`);
+        mkdirSync(one);
+        writeFileSync(join(one, name), code);
+        assert.deepEqual(findProductLiterals([one], ["connect"]), [`${join(one, name)}: "connect"`], name);
+        assert.equal(byId((await runManifestChecks({ ...manifest, id: "connect" }, { scanDirs: [src, one] })).results, "M5"), "fail", name);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("codeLiterals drops comments and keeps string, template and regex literals", () => {
+    const src = [
+      "// line comment 'a'",
+      "/* block 'b' */ const x = 'c' + \"d\\\"e\";",
+      "const t = `f${g(`h${'i'}`)}j`;",
+      "const r = x / 2 / 3; const re = /k[/]l/gi; return /m/;",
+      'const u = "n//o"; const v = "p/*q*/";',
+    ].join("\n");
+    assert.deepEqual(codeLiterals(src), ["c", 'd\\"e', "f", "h", "i", "", "j", "k[/]l", "m", "n//o", "p/*q*/"]);
+    assert.equal(literalNamesId("connect", "connect"), true);
+    assert.equal(literalNamesId("/v1/connect/x", "connect"), true);
+    assert.equal(literalNamesId("connector", "connect"), false);
+  });
+
+  it("runManifestTarget scans the manifest package by default and passes", async () => {
     const r = await runManifestTarget({ manifestPath: path });
     assert.equal(r.target, "manifest");
     assert.equal(r.ok, true, JSON.stringify(r.checks.filter((c) => c.status !== "pass" && c.status !== "not_applicable")));

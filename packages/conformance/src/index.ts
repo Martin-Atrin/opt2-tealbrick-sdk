@@ -8,7 +8,7 @@ export { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/b
 export { APP_CHECK_IDS, BRIDGE_CHECKS, CHECK_IDS, CORE_CHECKS, MANIFEST_CHECK_IDS, RELAY_CHECKS } from "./checks/catalog.ts";
 export { type CoreStaticInput, runCoreStatic } from "./checks/core.ts";
 export { authProbeRows, CORE_LIVE_CHECKS, CORE_STATIC_CHECKS } from "./checks/core-ids.ts";
-export { API_BASE, envelopeOnly, isInternalDoc, LiveClient, type LiveClientOptions, type ProbeAnswer, ProbeBlocked, type ProbeRequest, runCoreLive, type Safety } from "./checks/core-live.ts";
+export { API_BASE, envelopeOnly, isInternalDoc, LiveClient, type LiveClientOptions, type ProbeAnswer, ProbeBlocked, type ProbeRequest, runCoreLive, type Safety, secretInPublicAnswer } from "./checks/core-live.ts";
 export { type FieldInfo, fieldsOf, loadSpecTypes, parseDeclarations, stringUnion, type TypeIndex } from "./checks/core-types.ts";
 export { findProductLiterals, type ManifestCheckOptions, runManifestChecks } from "./checks/manifest.ts";
 export { FakeApp, type FakeAppWorld } from "./fake-app.ts";

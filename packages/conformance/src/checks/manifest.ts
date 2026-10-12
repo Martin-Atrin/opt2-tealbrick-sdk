@@ -1,12 +1,15 @@
 // Manifest checks M1–M5 (CONFORMANCE §4.1). M1/M2 run the ONE validator (`validateManifest`) and re-assert the key
 // cross-field rules independently, then prove the validator enforces them with mutated copies (sensitivity). M3
-// recomputes the digest several ways. M4 scans for hand-written generator outputs beside the manifest. M5 greps source
-// trees for product ids taken from manifests.
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+// recomputes the digest several ways. M4 scans for hand-written generator outputs beside the manifest. M5 looks for
+// product ids taken from manifests as literals in source trees: in JS/TS files only code literals count (comments are
+// stripped by `codeLiterals`); other files are matched on their raw text. This package's own tree is never scanned.
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, extname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { digest, manifestDigest, mcpToolName, toolNameFits, validateManifest } from "@opt2-tealbrick/manifest";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
+import { codeLiterals, literalNamesId } from "../code-literals.ts";
 import type { CheckResult } from "../report.ts";
 import { bad, na, notRun, ok, Suite, verdict } from "../suite.ts";
 
@@ -54,8 +57,24 @@ function probeOp(over: Record<string, unknown>): Record<string, unknown> {
 
 const SOURCE_EXT = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".go", ".py", ".rs"]);
 const SKIP_DIRS = new Set(["node_modules", ".git", "test", "tests", "fixtures", "examples", "__tests__", "coverage"]);
+/** JS/TS files: M5 matches code literals only (no comments). */
+const CODE_EXT = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"]);
+/** This package's root (src/checks/ or dist/checks/ → ../../): the checker's own source and install tree. */
+const OWN_ROOT = realpathSync(fileURLToPath(new URL("../../", import.meta.url))).replace(/[\\/]+$/, "");
+
+/** True for this package's own tree (source, dist or an install of it): the checker never scans itself. */
+export function isOwnTree(dir: string): boolean {
+  let real: string;
+  try {
+    real = realpathSync(dir);
+  } catch {
+    return false;
+  }
+  return real === OWN_ROOT || real.startsWith(OWN_ROOT + sep);
+}
 
 function* sourceFiles(dir: string): Generator<string> {
+  if (isOwnTree(dir)) return;
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -76,14 +95,19 @@ function* sourceFiles(dir: string): Generator<string> {
   }
 }
 
-/** M5: product ids appearing as string literals (or path segments) in source trees. */
+/**
+ * M5: product ids appearing as literals (the whole literal, or a `/`-delimited path segment of it) in source trees.
+ * JS/TS files: string, template and regex literals of the code only — a comment naming a product is not a hit.
+ * Other files (.json, .go, .py, .rs): quote- or slash-delimited on the raw text. This package's tree is skipped.
+ */
 export function findProductLiterals(dirs: readonly string[], productIds: readonly string[]): string[] {
   const hits: string[] = [];
   const res = productIds.map((id) => ({ id, re: new RegExp(`["'\`/]${id.replace(/[-]/g, "\\-")}["'\`/]`) }));
   for (const d of dirs) {
     for (const f of sourceFiles(d)) {
       const text = readFileSync(f, "utf8");
-      for (const { id, re } of res) if (re.test(text)) hits.push(`${f}: "${id}"`);
+      const literals = CODE_EXT.has(extname(f)) ? codeLiterals(text) : null;
+      for (const { id, re } of res) if (literals ? literals.some((l) => literalNamesId(l, id)) : re.test(text)) hits.push(`${f}: "${id}"`);
     }
   }
   return hits;

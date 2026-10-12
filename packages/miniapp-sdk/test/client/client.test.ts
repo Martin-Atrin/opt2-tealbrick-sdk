@@ -123,6 +123,37 @@ describe("callOp", () => {
     assert.equal(calls.length, before);
   });
 
+  test("C53: ops listed in idempotencyRequired get a fresh UUID key per call; other ops none; caller key wins", async () => {
+    setProduct("jotter");
+    handler = (c) => (c.url.endsWith("/session") ? json(200, { principal, csrf: "t", idempotencyRequired: ["item_create"] }) : json(200, { status: "ok", output: {} }));
+    const bodies = async (op: string, opts?: { idempotencyKey?: string }) => {
+      await callOp(op, { title: "a" }, opts);
+      return JSON.parse(calls.at(-1)?.body ?? "") as { input: unknown; idempotencyKey?: string };
+    };
+    const first = await bodies("item_create");
+    const second = await bodies("item_create");
+    assert.match(first.idempotencyKey ?? "", /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.notEqual(first.idempotencyKey, second.idempotencyKey, "a new call is a new logical call");
+    assert.equal(calls.filter((c) => c.url.endsWith("/session")).length, 1, "the session answer is loaded once");
+    assert.equal("idempotencyKey" in (await bodies("item_rename")), false);
+    assert.equal((await bodies("item_create", { idempotencyKey: "caller-key-1" })).idempotencyKey, "caller-key-1");
+  });
+
+  test("C53: older server without idempotencyRequired → no auto key; signed out → session_required after one GET", async () => {
+    setProduct("jotter");
+    handler = (c) => (c.url.endsWith("/session") ? json(200, { principal, csrf: "t" }) : json(200, { status: "ok", output: {} }));
+    await callOp("item_create", {});
+    assert.deepEqual(JSON.parse(calls.at(-1)?.body ?? ""), { input: {} });
+    resetClientState();
+    calls = [];
+    handler = () => json(401, { error: { code: "session_required", message: "sign in", requestId: "r" } });
+    await assert.rejects(callOp("item_create", {}), (e: unknown) => e instanceof TbError && e.code === "session_required");
+    assert.deepEqual(
+      calls.map((c) => c.method),
+      ["GET"],
+    );
+  });
+
   test("a refusal envelope throws its code; a non-ok result throws op_not_completed", async () => {
     setProduct("jotter");
     handler = (c) => (c.url.endsWith("/session") ? json(200, { principal, csrf: "t" }) : json(403, { error: { code: "csrf_invalid", message: "bad", requestId: "r" } }));
