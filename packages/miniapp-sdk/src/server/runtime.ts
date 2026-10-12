@@ -5,6 +5,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { AuditLog, BackupApi, CompanionResult, Db, HealthStatus, Json, Logger, OperationView, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
 import type { BridgeClient } from "./bridge-client.ts";
+import type { AttentionCode } from "./claim-guard.ts";
 import type { ContextExtras, SdkAppDefinition } from "./context.ts";
 import type { SdkConfig } from "./env.ts";
 import type { KeysInternals } from "./keys.ts";
@@ -43,7 +44,10 @@ export interface Runtime {
   readonly bridge: BridgeClient | null;
   /** jti replay set for call proofs (CREDENTIALS §10: memory is enough) */
   readonly replay: ReplayGuard;
-  readonly state: { claimed: boolean; failed: boolean; restoring: boolean; stopping: boolean };
+  /** `attention` (v0.1.12): why the instance needs the owner (health detail; wire readiness `degraded`) */
+  readonly state: { claimed: boolean; failed: boolean; restoring: boolean; stopping: boolean; attention: AttentionCode | null };
+  /** test harness only (startApp `harness.mountinfoPath`): mountinfo file for the first-claim mount check */
+  readonly mountinfoPath: string | undefined;
   health(): HealthStatus;
   /** C31 context members for agent/app calls (person calls override `workspace`) */
   extras(): ContextExtras;

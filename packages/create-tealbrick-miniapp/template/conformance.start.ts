@@ -1,8 +1,9 @@
 // Conformance harness (CONFORMANCE §2, app target): `tb-conformance app --start conformance.start.ts` boots the app with
 // the env the suite gives it (fake bridge, enrolment code, TB_KEK, data dir) and drives it like the bridge does. The SDK
 // listens on manifest `runtime.port` (SDK-API §13); `backupNow` lets the suite run the backup/restore round-trip (A7).
-// `--test-roots` (C63): the suite passes TEST Portal Root Keys in TBCONF_PORTAL_ROOT_KEYS; only this harness reads it and
-// hands them to startApp, so the key-set checks (A13) run against test roots. Production never reads that variable.
+// Test roots (C63; the suite default since spec 0.1.12, `--test-roots` kept for older suites): the suite passes TEST
+// Portal Root Keys in TBCONF_PORTAL_ROOT_KEYS; only this harness reads it and hands them to startApp. Required: the SDK
+// refuses every slice whose key-set statement is not signed by a root it pins. Production never reads that variable.
 import { startApp } from "@opt2-tealbrick/miniapp-sdk";
 import { app, manifest } from "./src/app.ts";
 

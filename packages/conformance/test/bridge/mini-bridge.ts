@@ -14,6 +14,7 @@ import {
   keySetFromPortalKeys,
   mcpToolName,
   opaqueDigest,
+  portalRootKeys,
   signAgentSession,
   signAssertion,
   signCallProof,
@@ -52,8 +53,8 @@ export interface MiniFlags {
   ignoreKeySet?: boolean;
   /** accepts a re-enrolment whose EnrolResponse carries no valid portalKeySet (drops its pin) */
   acceptStrippedReenrol?: boolean;
-  /** NOT a fault: a spec-0.1.12 build (first enrolment needs a statement, C63a) */
-  keysetRequired?: boolean;
+  /** a spec-0.1.11 build: accepts a first enrolment without a statement (fails B20.kss_enrol_missing) */
+  keysetTransitional?: boolean;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -92,8 +93,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
   state.usedJtis = usedJtis;
   const keySessions = new Set<string>();
   // v0.1.11: roots come from the harness-only TBCONF_PORTAL_ROOT_KEYS (a product bridge takes them through its
-  // programmatic start option); BSD-07 allow-list from the owner-set TB_OWN_INFRA_ORIGINS
-  const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : [];
+  // programmatic start option), else the build-pinned dev roots; BSD-07 allow-list from the owner-set TB_OWN_INFRA_ORIGINS
+  const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : portalRootKeys("dev");
   const allowList = (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   // enrolment (first start) or re-enrolment (new TB_ENROL_CODE): a new key; S1 changes only if the response passes
   // the key-set rule (CREDENTIALS §9.5: a pinned bridge needs a valid statement; strict builds need one at first enrolment)
@@ -107,7 +108,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       })
     ).json()) as EnrolResponse;
     const lax = flags.ignoreKeySet || (flags.acceptStrippedReenrol && !!state.enrol);
-    const t = lax ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(enrol as { portalKeySet?: string }, state.pinned ?? null, roots, { required: flags.keysetRequired === true });
+    const t = lax ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(enrol as { portalKeySet?: string }, state.pinned ?? null, roots, { required: flags.keysetTransitional !== true });
     if (!t.ok) {
       if (!state.enrol) throw new Error(`enrolment refused: ${t.code}`);
       // re-enrolment refused: keep S1 (old key, identity, pin)

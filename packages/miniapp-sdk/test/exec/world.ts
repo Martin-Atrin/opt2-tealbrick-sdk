@@ -89,6 +89,8 @@ export async function execWorld(opts: { helper?: boolean; backup?: boolean; drop
       TB_BRIDGE_URL: bridge.url,
       TB_KEK: "a".repeat(64),
       TB_DATA_DIR: join(t.dir, "data"),
+      // temp dirs are not volumes: skip the first-claim mount check (tests only; Linux CI has /proc/self/mountinfo)
+      TB_DATA_EPHEMERAL: "1",
       TB_LOG_LEVEL: "debug",
     },
     logs,

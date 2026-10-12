@@ -1207,10 +1207,10 @@ export async function addressChecks(c: BridgeCtx): Promise<void> {
 // ── B20 key-set statements at the bridge (CREDENTIALS §9.5, BRIDGE §4–5) ─────
 export async function keySetChecks(c: BridgeCtx): Promise<void> {
   if (!c.on("keyset")) return;
-  const STRICT_NA = "0.1.11 transition: fallback until spec 0.1.12 (run with --keyset-required for the strict check)";
+  const STRICT_NA = "--keyset-transitional: 0.1.11 transition rules (strict since spec 0.1.12; drop the flag for the strict check)";
   if (!c.w.keysetRequired) c.s.record("B20.kss_enrol_missing", "strict first enrolment", "first enrolment without a statement refused", na(STRICT_NA));
   if (!c.w.testRoots) {
-    const why = "the bridge pins its build's Portal Root Keys; run with --test-roots and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option (CONFORMANCE §7)";
+    const why = "--no-test-roots: the bridge pins its build's Portal Root Keys; run with test roots (the default) and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option (CONFORMANCE §7)";
     for (const x of BRIDGE_GROUPS.keyset ?? []) if (!c.s.has(x.id)) c.s.record(x.id, x.title, "bridge verifies configs against the newest root-signed statement", notRun(why));
     return;
   }

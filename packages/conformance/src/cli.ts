@@ -13,6 +13,11 @@
 //     app's; --cmd: a separate process with
 //     the suite env (TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_KEYS_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) merged
 //   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"]
+// Key-set statements (spec 0.1.12, CREDENTIALS §9.5): app and bridge runs are strict and use TEST Portal Root Keys by
+// default: the fake bridge / Portal publish statements signed by a test root and pass its public JWKs in the
+// harness-only TBCONF_PORTAL_ROOT_KEYS. A --start module must hand them to startApp(app, env, { portalRootKeys }) (or
+// the bridge's programmatic start option); a --cmd command must do the same or the run needs --no-test-roots (then a
+// strict build cannot boot against the fakes: it accepts only statements signed by its pinned roots).
 // Output: markdown (default) or JSON (--json); --report <base> also writes <base>.json and <base>.md. Exit code 0 only
 // when every check passes (CONFORMANCE §6).
 import type { ChildProcess } from "node:child_process";
@@ -32,13 +37,18 @@ import { runManifestTarget } from "./targets.ts";
 
 const USAGE = `usage:
   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file>
-                     [--inputs <file.json>] [--deploy-template <file.json>] [--test-roots] [--timeout <ms>] [--json] [--report <base>]
-      --test-roots: the start module passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys }) (A13 key-set rule; else A13 not_run)
-      --keyset-required: strict spec-0.1.12 checks (A13.kss_first_missing / B20.kss_enrol_missing; needs --test-roots; else not_applicable)
+                     [--inputs <file.json>] [--deploy-template <file.json>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
+      test roots (default): the suite signs key-set statements with a TEST root and passes its public JWKs in env.TBCONF_PORTAL_ROOT_KEYS;
+        the start module must pass them to startApp(app, env, { portalRootKeys }) (see create-tealbrick-miniapp conformance.start.ts);
+        a --cmd / --url app must honour TBCONF_PORTAL_ROOT_KEYS the same way, or run with --no-test-roots
+      --no-test-roots: no test roots (A13 not_run); a spec-0.1.12 app then refuses every fake-bridge slice and the run fails at boot
+      --test-roots, --keyset-required: accepted, no-op (both are the default)
+      --keyset-transitional: run the 0.1.11 transition rules instead (strict checks not_applicable) — only for builds released before spec 0.1.12
   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>] [--json] [--report <base>]
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
-  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--test-roots] [--timeout <ms>] [--json] [--report <base>]
-      --test-roots: the start module passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option (B20 key-set rule; else B20 not_run)
+  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
+      test roots (default): the start module (or --cmd command) passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option
+      --no-test-roots: B20 not_run; a spec-0.1.12 bridge then refuses the fake Portal's enrolment and the run fails at boot
   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"] [--timeout <ms>] [--json] [--report <base>]
   every target: [--allow-not-run]  exit 0 when nothing failed and the only non-passes are not_run (default: not_run fails, CONFORMANCE §6)`;
 
@@ -122,7 +132,9 @@ export async function main(argv: string[]): Promise<number> {
       "login-cmd": { type: "string" },
       "echo-logs": { type: "boolean", default: false },
       "test-roots": { type: "boolean", default: false },
+      "no-test-roots": { type: "boolean", default: false },
       "keyset-required": { type: "boolean", default: false },
+      "keyset-transitional": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       "allow-not-run": { type: "boolean", default: false },
       report: { type: "string" },
@@ -134,6 +146,9 @@ export async function main(argv: string[]): Promise<number> {
     process.stderr.write(`${USAGE}\n`);
     return values.help ? 0 : 2;
   }
+  if (values["test-roots"] && values["no-test-roots"]) throw new Error("use one of --test-roots (the default) and --no-test-roots");
+  const testRoots = !values["no-test-roots"];
+  const keysetRequired = !values["keyset-transitional"];
   let report: Report;
   switch (target) {
     case "manifest": {
@@ -169,8 +184,8 @@ export async function main(argv: string[]): Promise<number> {
               }),
         ...(values.inputs ? { inputs: readJson(values.inputs) as Record<string, never> } : {}),
         ...(values["deploy-template"] ? { deployTemplate: readJson(values["deploy-template"]) } : {}),
-        ...(values["test-roots"] ? { testRoots: true } : {}),
-        ...(values["keyset-required"] ? { keysetRequired: true } : {}),
+        testRoots,
+        keysetRequired,
         timeoutMs,
       });
       break;
@@ -210,8 +225,8 @@ export async function main(argv: string[]): Promise<number> {
         ...(pauseLatencyMs !== undefined ? { pauseLatencyMs } : {}),
         ...(values.groups ? { groups: values.groups.split(",").map((g) => g.trim()).filter(Boolean) } : {}),
         echoLogs: values["echo-logs"],
-        ...(values["test-roots"] ? { testRoots: true } : {}),
-        ...(values["keyset-required"] ? { keysetRequired: true } : {}),
+        testRoots,
+        keysetRequired,
       });
       const k = report.counts;
       process.stderr.write(`tb-conformance bridge: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_applicable} not_applicable → ${resultLabel(report)}\n`);

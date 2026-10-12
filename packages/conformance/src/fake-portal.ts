@@ -77,6 +77,8 @@ export class FakePortal {
   configExtra: Partial<Omit<WorkspaceConfig, "iat" | "exp" | "jti">> & { portalKeySet?: string } = {};
   /** v0.1.11: key-set statement returned in the enrolment response (`portalKeySet`); null = omitted (transition) */
   enrolKeySet: string | null = null;
+  /** v0.1.12 (conformance 0.1.8): the world's current statement after a key change (test roots on), else null */
+  keySetSource: (() => Promise<string>) | null = null;
   /** public origin of the bridge under test (config `bridge.publicUrl`, device-flow `mcp_url` / `token_endpoint`) */
   bridgePublicUrl = "https://bridge.conformance.test";
   /** every request with headers and raw body, recorded after it was read (bridge target B9 scan) */
@@ -396,6 +398,9 @@ export class FakePortalControl {
     if (p.configExtra.portalKeys && p.configExtra.portalKeys.length > 0) {
       p.configExtra = { ...p.configExtra, portalKeys: p.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })) };
     }
+    // With test roots the trusted keys come ONLY from the statement (CREDENTIALS §9.5): re-sign it (seq + 1) over the
+    // rotated list, or the activate revision is signed by a kid the pinned statement does not list (Lead · Bridge, 0.1.8).
+    if (p.keySetSource && p.configExtra.portalKeySet) p.configExtra = { ...p.configExtra, portalKeySet: await p.keySetSource() };
     return p.mintRevision();
   }
   /** Portal down (B4): connections are dropped without an answer. */

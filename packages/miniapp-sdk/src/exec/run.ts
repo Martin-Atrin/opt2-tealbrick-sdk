@@ -7,6 +7,7 @@ import { conditionHolds, settingsFromEnv } from "@opt2-tealbrick/manifest";
 import type { AppStatus } from "@opt2-tealbrick/spec/bridge";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
+import { identityRefused, logMountAtBoot, reclaimCode } from "../server/claim-guard.ts";
 import { TbError } from "../server/errors.ts";
 import { createLogger, type LogSink, SecretRegistry } from "../server/log.ts";
 import { dropPrivileges, type PrivilegeProc } from "../server/privilege.ts";
@@ -15,7 +16,7 @@ import { parseArgs } from "./args.ts";
 import { ServiceBridge } from "./bridge.ts";
 import { HelperProcess, Upstream } from "./child.ts";
 import { childEnv, type ExecConfig, loadExecConfig, SDK_VERSION } from "./config.ts";
-import { type ClaimRecord, claimOrLoad, loadServiceKey, retryable } from "./identity.ts";
+import { type ClaimRecord, claimOrLoad, claimWith, loadServiceKey, retryable } from "./identity.ts";
 import { startControlServer, startHelperProxy } from "./servers.ts";
 import { signalExitCode, sleep } from "./util.ts";
 import { appAssertionVerifier } from "./verify.ts";
@@ -33,6 +34,8 @@ export interface TbExecOptions {
   /** default 7077; tests override */
   controlPort?: number;
   logSink?: LogSink;
+  /** tests only: mountinfo file for the first-claim mount check of TB_DATA_DIR (default /proc/self/mountinfo) */
+  mountinfoPath?: string;
 }
 
 export interface TbExecHandle {
@@ -147,10 +150,13 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     // children (the upstream and helper inherit uid/gid 1000).
     // C54: companions drop only when the manifest opts in (upstream images such as Postgres switch users themselves).
     if (shouldDropForService(cfg.service) && dropPrivileges(cfg.env, o.privilegeProc)) log.info("privileges_dropped", { uid: 1000 });
+    // v0.1.12 (spine S1): one line with the TB_DATA_DIR mount state; the first claim waits for a mounted volume
+    const gate = o.mountinfoPath ? { mountinfoPath: o.mountinfoPath } : {};
+    logMountAtBoot(cfg.env.dataDir, { ephemeral: cfg.env.dataEphemeral, ...gate, log });
     const key = await loadServiceKey(cfg);
     const bridge = new ServiceBridge({ baseUrl: cfg.bridgeUrl, instanceId: cfg.instanceId, service: cfg.service.id, key });
-    const claimed = await claimOrLoad(cfg, key, bridge, log, startup.signal);
-    const rec = { ...claimed, serviceKeys: keysInForce(cfg.manifest, cfg.service.id, claimed.serviceKeys, o.env, log) };
+    const inForce = (c: ClaimRecord): ClaimRecord => ({ ...c, serviceKeys: keysInForce(cfg.manifest, cfg.service.id, c.serviceKeys, o.env, log) });
+    let rec = inForce(await claimOrLoad(cfg, key, bridge, log, startup.signal, gate));
     let keys = await fetchKeys(rec, bridge, secrets, log, startup.signal);
     // Required keys block the upstream (Knowledge S2): it waits in needs_keys and keys are re-pulled with backoff.
     const required = new Set((cfg.manifest.settings?.keys ?? []).filter((k) => k.required && k.usedBy.includes(cfg.service.id)).map((k) => k.name));
@@ -158,7 +164,9 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     if (keys.missing.length > 0) log.warn("needs_keys", { missing: keys.missing, blocking: blocking(keys) });
     if (startup.signal.aborted) throw new TbError("stopped", "stopped before start", 500);
 
-    const verify = appAssertionVerifier(rec);
+    // the app key accepted on the control / helper ports follows the claim record (a reclaim may bring a new one)
+    let appVerify = appAssertionVerifier(rec);
+    const verify: typeof appVerify = (req, body) => appVerify(req, body);
     const host = o.host ?? "0.0.0.0";
     const servers: Server[] = [];
     const up = new Upstream(args.command, log);
@@ -199,6 +207,33 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     // Status long-poll: echo the bridge's slice revision, act on a new keysRev (restart only when values changed).
     const polling = new AbortController();
     let sliceRevision = 0;
+    // v0.1.12: identity refused by the bridge → needs_attention `identity_refused` (logged once per episode); a NEW
+    // TB_ENROL_CODE (digest ≠ the record's) claims again once, replacing the record; an unchanged code keeps refusing.
+    const tried = new Set<string>();
+    let refused = false;
+    const onRefused = async (): Promise<boolean> => {
+      if (!refused) {
+        refused = true;
+        log.warn("identity_refused", { hint: "the bridge refuses the stored service identity; a new enrolment code (Portal Retry) lets the service claim again" });
+      }
+      const code = reclaimCode(cfg.env.enrolCode, rec.codeDigest, tried);
+      if (!code) return false;
+      log.info("reclaim", { reason: "identity_refused" });
+      try {
+        rec = inForce(await claimWith(cfg, code, key, bridge, log, polling.signal, gate));
+      } catch (e) {
+        log.warn("reclaim failed", { code: e instanceof TbError ? e.code : "error" });
+        return false;
+      }
+      refused = false;
+      appVerify = appAssertionVerifier(rec);
+      sliceRevision = 0;
+      const next = await fetchKeys(rec, bridge, secrets, log, polling.signal);
+      const restart = next.fingerprint !== keys.fingerprint;
+      keys = next;
+      if (!polling.signal.aborted) await applyKeys(restart);
+      return true;
+    };
     const loop = (async () => {
       let delay = 1000;
       while (!polling.signal.aborted) {
@@ -214,6 +249,10 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
         try {
           const r = await bridge.status(body, polling.signal);
           delay = 1000;
+          if (refused) {
+            refused = false;
+            log.info("identity accepted again");
+          }
           if (!r) continue;
           const changed = r.sliceRevision !== sliceRevision || r.keysRev !== keys.rev;
           sliceRevision = r.sliceRevision;
@@ -227,7 +266,12 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
           if (!changed) await sleep(1000, polling.signal); // a bridge answering 200 without a change must not spin
         } catch (e) {
           if (polling.signal.aborted) break;
-          log.warn("status retry", { code: e instanceof TbError ? e.code : "status_failed", inMs: delay });
+          if (identityRefused(e)) {
+            if (await onRefused()) {
+              delay = 1000;
+              continue;
+            }
+          } else log.warn("status retry", { code: e instanceof TbError ? e.code : "status_failed", inMs: delay });
           await sleep(delay, polling.signal);
           delay = Math.min(delay * 2, 30_000);
         }

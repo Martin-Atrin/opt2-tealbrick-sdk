@@ -4,7 +4,7 @@ import { after, before, describe, test } from "node:test";
 import type { Json, OpContext, RunningApp } from "@opt2-tealbrick/spec/sdk";
 import { decideHold, defineApp, getKey, onKeysChanged, SESSION_COOKIE, startApp, TbError } from "../src/server/index.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
-import { callProof, FakeBridge, freePort, grant, migrationsDir, slice, tempDir, ticket, until, type World, world } from "./helpers.ts";
+import { callProof, FakeBridge, freePort, grant, migrationsDir, slice, tempDir, testRoots, ticket, until, type World, world } from "./helpers.ts";
 
 const PRODUCT = "jotter";
 
@@ -86,8 +86,9 @@ async function boot(): Promise<Booted> {
     TB_BRIDGE_URL: bridgeUrl,
     TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }),
     TB_DATA_DIR: t.dir,
+    TB_DATA_EPHEMERAL: "1",
     TB_LOG_LEVEL: "error",
-  });
+  }, testRoots(w));
   await until(async () => running.status() === "ok");
   return {
     w,
@@ -442,6 +443,47 @@ describe("app-alone mode", () => {
     } finally {
       await running.stop();
       t.cleanup();
+    }
+  });
+});
+
+describe("key-set statement rule (spec 0.1.12, CREDENTIALS §9.5)", () => {
+  async function bootWith(sliceOver: { portalKeySet?: null }, harness: "test-roots" | "build-roots") {
+    const w = await world();
+    const t = tempDir();
+    const port = await freePort();
+    const bridge = new FakeBridge(w);
+    const bridgeUrl = await bridge.start(await slice(w, PRODUCT, sliceOver));
+    const env = { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: t.dir, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" };
+    const running = await startApp(testApp(port, migrationsDir(t.dir), {}), env, harness === "test-roots" ? testRoots(w) : undefined);
+    return {
+      bridge,
+      running,
+      async cleanup() {
+        await running.stop();
+        await bridge.stop();
+        t.cleanup();
+      },
+    };
+  }
+
+  test("a statement-less first slice is refused (keyset_missing): claimed, but never installed", async () => {
+    const b = await bootWith({ portalKeySet: null }, "test-roots");
+    try {
+      await until(async () => b.bridge.claims >= 1 && b.bridge.statuses.length >= 1);
+      assert.equal(b.running.status(), "slice_stale", "no slice installed although TB_PORTAL_KEYS signed it");
+    } finally {
+      await b.cleanup();
+    }
+  });
+
+  test("default build roots: a test-root statement does not verify, so a fake-bridge slice is never accepted", async () => {
+    const b = await bootWith({}, "build-roots");
+    try {
+      await until(async () => b.bridge.claims >= 1 && b.bridge.statuses.length >= 1);
+      assert.equal(b.running.status(), "slice_stale");
+    } finally {
+      await b.cleanup();
     }
   });
 });

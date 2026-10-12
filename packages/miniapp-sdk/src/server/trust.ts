@@ -17,7 +17,7 @@ import {
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
 import { type BridgeId, type Ed25519PublicJwk, type InstanceId, type InstanceRef, LIFETIME_S, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
-import { metaGet, metaSet, type RawDb } from "./store.ts";
+import { metaDelete, metaGet, metaSet, type RawDb } from "./store.ts";
 
 interface StoredSlice {
   token: string;
@@ -38,7 +38,7 @@ export const PORTAL_ROOT_CHANNEL: PortalRootChannel = "dev";
  * Spec 0.1.11 transition: false (fallback to the pre-v0.1.11 rule while nothing is pinned). Spec 0.1.12 (cut when Core
  * emits `portalKeySet`) sets it true: a first slice without a valid statement is refused. A build constant, never env.
  */
-export const KEYSET_REQUIRED: boolean = false;
+export const KEYSET_REQUIRED: boolean = true; // spec 0.1.12: fallback removed (Core emits portalKeySet since 2026-10-12T10:19:19Z)
 
 export interface SliceChange {
   added: SliceAgent[];
@@ -55,6 +55,8 @@ export class TrustState {
   #bootstrap: KeySet | null;
   #alone: { ws: WorkspaceId; ownKey: Ed25519PublicJwk } | null;
   #stored: StoredSlice | null;
+  /** v0.1.12 reclaim: the pinned statement kept after {@link TrustState.dropSlice} (rollback protection survives) */
+  #pin: PinnedKeySet | null;
   #bridge: BridgeId | null = null;
   #roots: Ed25519PublicJwk[];
   #warn: (msg: string, fields: Record<string, string>) => void;
@@ -83,6 +85,7 @@ export class TrustState {
     this.#bootstrap = opts.bootstrap;
     this.#alone = opts.alone ?? null;
     this.#stored = metaGet<StoredSlice>(db, "slice");
+    this.#pin = metaGet<PinnedKeySet>(db, "kss_pin");
     this.#roots = opts.roots ?? portalRootKeys(PORTAL_ROOT_CHANNEL);
     this.#warn = opts.warn ?? (() => undefined);
     this.#required = opts.required ?? KEYSET_REQUIRED;
@@ -90,7 +93,19 @@ export class TrustState {
 
   /** The pinned key-set statement's `seq`, or null (transition path / nothing pinned yet). */
   get keySetSeq(): number | null {
-    return this.#stored?.kss?.seq ?? null;
+    return (this.#stored?.kss ?? this.#pin)?.seq ?? null;
+  }
+
+  /**
+   * v0.1.12 reclaim (SDK-API §13 note): a new claim replaced the refused identity, so the old identity's slice (bridge
+   * id, agents, grants, rev) is dropped; the pinned key-set statement is kept (no key-set rollback through a reclaim).
+   */
+  dropSlice(): void {
+    const kss = this.#stored?.kss ?? this.#pin;
+    this.#stored = null;
+    this.#pin = kss ?? null;
+    metaDelete(this.#db, "slice");
+    if (kss) metaSet(this.#db, "kss_pin", kss);
   }
 
   get slice(): InstanceSlice | null {
@@ -166,7 +181,7 @@ export class TrustState {
   install(token: string, nowMs: number): { ok: true; changed: SliceChange | null } | Refusal {
     const bridge = this.bridgeId;
     if (!bridge) return { ok: false, code: "slice_invalid", reason: "bridge unknown before claim" };
-    const pinned = this.#stored?.kss ?? null;
+    const pinned = this.#stored?.kss ?? this.#pin ?? null;
     let issuers = this.issuers();
     let signers = issuers;
     let kss: PinnedKeySet | undefined = pinned ?? undefined;

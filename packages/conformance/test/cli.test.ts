@@ -32,9 +32,10 @@ describe("tb-conformance CLI", () => {
     assert.equal(run([]).status, 2);
     assert.equal(run(["app", "--manifest", manifest]).status, 2);
     assert.equal(run(["app", "--manifest", manifest, "--url", "http://127.0.0.1:1"]).status, 2, "--url needs --env-out");
+    assert.equal(run(["app", "--start", startModule, "--manifest", manifest, "--test-roots", "--no-test-roots"]).status, 2, "--test-roots (the default) and --no-test-roots exclude each other");
   });
 
-  it("app --start <module> runs every check (restart + backup round-trip included) and exits 0", () => {
+  it("app --start <module> runs every check (restart + backup round-trip included) and exits 0 (--test-roots: accepted no-op, the default)", () => {
     const r = run(["app", "--start", startModule, "--manifest", manifest, "--timeout", "8000", "--test-roots", "--json"]);
     const report = JSON.parse(r.stdout) as { ok: boolean; checks: { id: string; status: string }[] };
     const bad = report.checks.filter((c) => c.status !== "pass" && c.status !== "not_applicable").map((c) => `${c.id}:${c.status}`);
@@ -43,14 +44,14 @@ describe("tb-conformance CLI", () => {
     assert.equal(run(["app", "--start", manifest, "--manifest", manifest]).status, 2, "a module without start() is a usage error");
   });
 
-  it("app --cmd boots the app with the conformance env, writes --report files and exits by result", async () => {
+  it("app --cmd boots the app with the conformance env (TBCONF_PORTAL_ROOT_KEYS included by default), writes --report files and exits by result", async () => {
     const port = await freePort();
     const dir = mkdtempSync(join(tmpdir(), "tbconf-cli-"));
     try {
       const tpl = join(dir, "template.json");
       writeFileSync(tpl, JSON.stringify({ services: [{ name: "app" }] }));
       const base = join(dir, "report");
-      const r = run(["app", "--cmd", `"${process.execPath}" "${serve}" ${port}`, "--url", `http://127.0.0.1:${port}`, "--manifest", manifest, "--deploy-template", tpl, "--timeout", "8000", "--test-roots", "--report", base]);
+      const r = run(["app", "--cmd", `"${process.execPath}" "${serve}" ${port}`, "--url", `http://127.0.0.1:${port}`, "--manifest", manifest, "--deploy-template", tpl, "--timeout", "8000", "--report", base]);
       const report = JSON.parse(readFileSync(`${base}.json`, "utf8")) as { ok: boolean; checks: { id: string; status: string }[] };
       const bad = report.checks.filter((c) => c.status !== "pass" && c.status !== "not_applicable").map((c) => `${c.id}:${c.status}`);
       // --cmd has no backupNow hook → the backup round-trip is the one check that cannot run (not_run fails the run)

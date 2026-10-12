@@ -11,6 +11,7 @@ import { createAppSecrets } from "./app-secrets.ts";
 import { createAuditLog } from "./audit.ts";
 import { createBackupApi, restoreAtBoot } from "./backup.ts";
 import { BridgeClient } from "./bridge-client.ts";
+import { logMountAtBoot } from "./claim-guard.ts";
 import type { SdkAppDefinition } from "./context.ts";
 import { readEnv } from "./env.ts";
 import { TbError } from "./errors.ts";
@@ -99,13 +100,13 @@ function listen(server: Server, port: number): Promise<void> {
  * `harness` is for test harnesses only, never read from env and never set by Portal: `privilegeProc` (not part of
  * types/sdk.ts) replaces the real process facade of the privilege drop so a root test runner is not dropped to uid 1000
  * by an app it starts in-process; `portalRootKeys` (types/sdk.ts v0.1.11 `StartHooks`, C63) replaces the build-pinned
- * Portal Root Keys so a conformance start module can sign key-set statements with a test root pair. Production never
- * passes it.
+ * Portal Root Keys so a conformance start module can sign key-set statements with a test root pair; `mountinfoPath`
+ * (v0.1.12) replaces /proc/self/mountinfo for the first-claim mount check of TB_DATA_DIR. Production never passes it.
  */
 export async function startApp(
   app: App,
   env: Record<string, string | undefined>,
-  harness?: { privilegeProc?: PrivilegeProc; portalRootKeys?: Ed25519PublicJwk[] },
+  harness?: { privilegeProc?: PrivilegeProc; portalRootKeys?: Ed25519PublicJwk[]; mountinfoPath?: string },
 ): Promise<RunningApp> {
   const def = definitions.get(app);
   if (!def) throw new TbError("app_invalid", "startApp needs the value returned by defineApp", 500);
@@ -125,6 +126,8 @@ export async function startApp(
 
   // C53 / BSA-05: started as root → hand the volumes to uid 1000 and drop before any file, key or listener opens.
   if (dropPrivileges(cfg, harness?.privilegeProc)) log.info("privileges_dropped", { uid: 1000 });
+  // v0.1.12 (spine S1): one line with the TB_DATA_DIR mount state; the claim path gates the first claim on it
+  logMountAtBoot(cfg.dataDir, { ephemeral: cfg.dataEphemeral, ...(harness?.mountinfoPath ? { mountinfoPath: harness.mountinfoPath } : {}), log });
 
   const sealer = createSealer(resolveKeks(cfg.dataDir, cfg.kek, cfg.kekPrevious));
   await restoreAtBoot(
@@ -177,7 +180,7 @@ export async function startApp(
   });
 
   const ops = new Map(withStandardOps(manifest).map((o) => [o.id, o]));
-  const state = { claimed: false, failed: false, restoring: false, stopping: false };
+  const state: Runtime["state"] = { claimed: false, failed: false, restoring: false, stopping: false, attention: null };
   let link: BridgeLink | null = null;
   const bridge = cfg.standalone || !cfg.bridgeUrl ? null : new BridgeClient({ baseUrl: cfg.bridgeUrl, instanceId, key: instanceKey, bridgeId: () => trust.bridgeId });
   const receipts = new Receipts(db);
@@ -250,11 +253,13 @@ export async function startApp(
     bridge,
     replay: memoryReplayGuard(),
     state,
+    mountinfoPath: harness?.mountinfoPath,
     health(): HealthStatus {
       if (state.failed) return "failed";
       if (state.restoring) return "restoring";
       if (!cfg.standalone) {
-        if (!state.claimed) return "needs_claim";
+        // data_dir_not_mounted (no claim yet) and identity_refused (claim refused) both need a (new) claim
+        if (!state.claimed || state.attention) return "needs_claim";
         if (trust.stale(Date.now())) return "slice_stale";
       }
       return keys.needsKeys() ? "needs_keys" : "ok";

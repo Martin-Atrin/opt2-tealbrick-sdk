@@ -1,7 +1,7 @@
 // tb-exec end-to-end against a fake bridge: claim, keys → env, restart on keysRev, helper auth, control port, signals.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { type Ed25519KeyPair, generateKeyPair, manifestDigest, signInstanceAssertion, validateManifest } from "@opt2-tealbrick/manifest";
@@ -9,6 +9,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { DEFAULT_MANIFEST_PATH, parseArgs } from "../../src/exec/args.ts";
 import { childEnv } from "../../src/exec/config.ts";
 import { startTbExec, type TbExecHandle } from "../../src/exec/run.ts";
+import { enrolCodeDigest } from "../../src/server/claim-guard.ts";
 import { freePort, nowS } from "../helpers.ts";
 import { type ExecWorld, execWorld, HELPER, KEY_VALUE, SERVICE, UPSTREAM, until } from "./world.ts";
 
@@ -337,6 +338,67 @@ describe("tb-exec waits for required keys (Knowledge S2)", () => {
       const code = await h.exited;
       assert.equal(code, 143);
       assert.equal(w.starts().length, 0);
+    } finally {
+      await w.cleanup();
+    }
+  });
+});
+
+describe("tb-exec claim guard (v0.1.12, spine S1)", () => {
+  const start = (w: ExecWorld, env: Record<string, string>, mountinfoPath?: string) =>
+    startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env, host: "127.0.0.1", logSink: w.sink, ...(mountinfoPath ? { mountinfoPath } : {}) });
+
+  test("TB_DATA_DIR on the container root: the code is not redeemed, the upstream does not start; stop ends tb-exec", { timeout: 15_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    try {
+      const file = join(w.dir, "mountinfo");
+      writeFileSync(file, "611 540 0:63 / / rw,relatime - overlay overlay rw\n");
+      const { TB_DATA_EPHEMERAL: _skip, ...env } = w.env;
+      const h = start(w, env, file);
+      await until(() => w.logs.some((l) => l.includes('"msg":"data_dir_not_mounted"')), 5000);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(w.bridge.claims.length, 0);
+      assert.equal(w.starts().length, 0);
+      const boot = w.logs.map((l) => JSON.parse(l)).find((l) => l.msg === "data_dir_mount");
+      assert.equal(boot?.mounted, false);
+      assert.equal(boot?.mountPoint, "/");
+      assert.equal(boot?.fsType, "overlay");
+      h.signal("SIGTERM");
+      assert.equal(await h.exited, 143);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("refused identity: a NEW code → one fresh claim and the upstream starts; the same code → no claim", { timeout: 30_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    try {
+      let h = start(w, w.env);
+      await until(() => w.starts().length === 1, 10_000);
+      h.signal("SIGTERM");
+      await h.exited;
+
+      w.bridge.forget();
+      w.bridge.newCode("tbe_reissued");
+      h = start(w, { ...w.env, TB_ENROL_CODE: "tbe_reissued" });
+      await until(() => w.starts().length === 2, 15_000);
+      assert.deepEqual(w.bridge.claims.map((c) => c.code), [w.env.TB_ENROL_CODE, "tbe_reissued"]);
+      const rec = JSON.parse(readFileSync(join(w.env.TB_DATA_DIR as string, "tb", "claim.json"), "utf8"));
+      assert.equal(rec.codeDigest, enrolCodeDigest("tbe_reissued"));
+      assert.ok(!JSON.stringify(rec).includes("tbe_reissued"), "only the digest is stored");
+      h.signal("SIGTERM");
+      await h.exited;
+
+      w.bridge.forget();
+      const from = w.logs.length;
+      h = start(w, { ...w.env, TB_ENROL_CODE: "tbe_reissued" });
+      await until(() => w.logs.slice(from).some((l) => l.includes('"msg":"identity_refused"')), 10_000);
+      await new Promise((r) => setTimeout(r, 2500));
+      assert.equal(w.bridge.claims.length, 2, "an unchanged code never claims again");
+      assert.equal(w.logs.slice(from).filter((l) => l.includes('"msg":"identity_refused"')).length, 1, "logged once, no storm");
+      assert.equal(w.starts().length, 2, "upstream waits for its required key");
+      h.signal("SIGTERM");
+      await h.exited;
     } finally {
       await w.cleanup();
     }

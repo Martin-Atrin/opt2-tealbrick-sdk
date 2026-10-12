@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import type { Health } from "@opt2-tealbrick/spec/sdk";
 import { handleBridgeOp, handleHook } from "./bridge-routes.ts";
+import type { AttentionCode } from "./claim-guard.ts";
 import type { SdkPublicContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { escapeHtml, readRaw, requestId, sendError, sendHtml, sendJson } from "./http.ts";
@@ -31,8 +32,14 @@ const MIME: Record<string, string> = {
   ".map": "application/json",
 };
 
-export async function health(rt: Runtime): Promise<Health> {
-  return { status: rt.health(), sdk: rt.sdkVersion, version: rt.manifest.version, manifestDigest: rt.digest, keys: await rt.keys.status() };
+/**
+ * SPEC-GAP: types/sdk.ts `HealthStatus` and `AppStatus.readiness` are closed unions without a needs_attention state.
+ * v0.1.12 keeps `status` in the union (`needs_claim`), the wire readiness `degraded`, and adds the detail `attention`
+ * (`data_dir_not_mounted` | `identity_refused`) only while one applies.
+ */
+export async function health(rt: Runtime): Promise<Health & { attention?: AttentionCode }> {
+  const h: Health = { status: rt.health(), sdk: rt.sdkVersion, version: rt.manifest.version, manifestDigest: rt.digest, keys: await rt.keys.status() };
+  return rt.state.attention ? { ...h, attention: rt.state.attention } : h;
 }
 
 /** Content-hashed asset directory written by the template's build-ui (`assets-<hex>/…`): immutable for a year. */

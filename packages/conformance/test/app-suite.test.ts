@@ -13,7 +13,7 @@ const manifest = JSON.parse(readFileSync(path, "utf8")) as Manifest;
 const template = { services: [{ name: "app", domains: [] }, { name: "bridge", domains: ["bridge.example.org"] }] };
 
 function run(faults: MiniAppFaults = {}, extra: Partial<Parameters<typeof runApp>[0]> = {}): Promise<Report> {
-  return runApp({ manifest, manifestPath: path, start: (env) => startMiniApp(manifest, env, faults), deployTemplate: template, timeoutMs: 8000, testRoots: true, ...extra });
+  return runApp({ manifest, manifestPath: path, start: (env) => startMiniApp(manifest, env, faults), deployTemplate: template, timeoutMs: 8000, ...extra });
 }
 const failing = (r: Report) => r.checks.filter((c) => c.status === "fail" || c.status === "not_run" || c.status === "not_implemented").map((c) => c.id);
 
@@ -48,26 +48,56 @@ describe("app target", () => {
     ["answers a hook with a wrong shape", { badHookShape: true }, ["A2.hook_valid"]],
     ["ignores portalKeySet (pre-v0.1.11 trust rule)", { ignoreKeySet: true }, ["A13.portal_keys_ignored", "A13.kss_unknown_root", "A13.kss_rollback", "A13.kss_missing", "A13.kss_compromise"]],
     ["loses its instance key on restart", { newKeyOnRestart: true }, ["A1.key_persisted", "A7.restart"], 2000],
+    ["keeps a refused identity although the enrolment code changed", { noReclaim: true }, ["A1.reclaim_on_new_code"]],
   ];
-  it("without --test-roots the A13 key-set checks report not_run (the app pins its build roots)", async () => {
-    const r = await run({}, { testRoots: false });
+  it("--no-test-roots: a strict app refuses every fake-bridge slice, the run fails at boot with the pinned-roots note", async () => {
+    const r = await run({}, { testRoots: false, bootTimeoutMs: 3000 });
+    assert.equal(r.ok, false);
+    assert.equal(exitCode(r), 1);
+    assert.match(r.notes.join(" "), /boot failed/);
+    assert.ok(
+      r.notes.includes("app build pins Portal Root Keys: run with test roots (start module must pass env.TBCONF_PORTAL_ROOT_KEYS to startApp — see create-tealbrick-miniapp conformance.start.ts) (--no-test-roots given)"),
+      r.notes.join("\n"),
+    );
+  });
+
+  it("test roots offered but not pinned (a start module that drops TBCONF_PORTAL_ROOT_KEYS): boot fails with the same note", async () => {
+    const r = await runApp({ manifest, manifestPath: path, start: (env) => startMiniApp(manifest, { ...env, TBCONF_PORTAL_ROOT_KEYS: "" }), timeoutMs: 8000, bootTimeoutMs: 3000 });
+    assert.equal(r.ok, false);
+    assert.match(r.notes.join(" "), /app build pins Portal Root Keys: run with test roots .*the app did not pin them/);
+  });
+
+  it("--no-test-roots with a 0.1.11 app (--keyset-transitional): it boots and the A13 key-set checks report not_run", async () => {
+    const r = await run({ keysetTransitional: true }, { testRoots: false, keysetRequired: false });
     const a13 = r.checks.filter((c) => c.id.startsWith("A13.") && c.id !== "A13.kss_first_missing");
     assert.equal(a13.length, 7);
     for (const c of a13) assert.equal(c.status, "not_run", `${c.id}: ${c.asserted}`);
+    assert.match(a13[0]?.asserted ?? "", /--no-test-roots: the app pins its build's Portal Root Keys/);
     const strict = r.checks.find((c) => c.id === "A13.kss_first_missing");
     assert.equal(strict?.status, "not_applicable");
-    assert.match(strict?.asserted ?? "", /0\.1\.11 transition: fallback until spec 0\.1\.12/);
+    assert.match(strict?.asserted ?? "", /--keyset-transitional: 0\.1\.11 transition rules/);
     assert.deepEqual(failing(r).filter((id) => !id.startsWith("A13.")), []);
   });
 
-  it("strict (--keyset-required): a spec-0.1.12 app refuses a first slice without a statement; a 0.1.11 app fails A13.kss_first_missing", async () => {
-    const good = await run({ keysetRequired: true }, { keysetRequired: true });
-    const g = good.checks.find((c) => c.id === "A13.kss_first_missing");
-    assert.equal(g?.status, "pass", g?.asserted);
-    assert.deepEqual(failing(good), [], renderMarkdown(good));
-    const lax = await run({}, { keysetRequired: true });
+  it("strict by default (a spec-0.1.12 app passes it in the first test): a 0.1.11 app fails A13.kss_first_missing", async () => {
+    const lax = await run({ keysetTransitional: true });
     const l = lax.checks.find((c) => c.id === "A13.kss_first_missing");
     assert.equal(l?.status, "fail", l?.asserted);
+  });
+
+  it("an app whose agent ops are ALL read-only passes: the hold chain and its dependants report not_applicable (Fleet)", async () => {
+    const ro = structuredClone(manifest) as Manifest;
+    ro.operations = ro.operations.map((o) => {
+      if (o.audience !== "agent") return o;
+      const { holdFamily: _h, ...rest } = o as typeof o & { holdFamily?: string };
+      return { ...rest, effect: "read", crud: ["read"], idempotency: "none" } as typeof o;
+    });
+    const r = await runApp({ manifest: ro, manifestPath: path, start: (env) => startMiniApp(ro, env), deployTemplate: template, timeoutMs: 8000 });
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ["A3.hold", "A4.hold_status", "A4.decide_person_only", "A4.holds_list", "A4.receipt_digest", "A10", "P1.held_release_paused", "A3.no_standing_approval"]) {
+      assert.equal(r.checks.find((c) => c.id === id)?.status, "not_applicable", id);
+    }
+    for (const id of ["P1.workspace", "P1.agent", "P1.instance", "A7.restart", "A1.key_persisted", "A7.backup_roundtrip"]) assert.equal(r.checks.find((c) => c.id === id)?.status, "pass", id);
   });
 
   for (const [name, faults, expected, timeoutMs] of cases) {

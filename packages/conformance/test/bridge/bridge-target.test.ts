@@ -10,8 +10,9 @@ import { BRIDGE_CHECKS, CHECK_IDS, type Report, runBridgeTarget } from "../../sr
 import { type MiniFlags, type MiniState, startMiniBridge } from "./mini-bridge.ts";
 
 const status = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.status;
-const run = (flags: MiniFlags, groups: string[], state: MiniState = {}, testRoots = false, keysetRequired = false) =>
-  runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, testRoots, keysetRequired });
+/** `keyset`: runBridgeTarget's key-set options (default: test roots + strict, as the CLI) */
+const run = (flags: MiniFlags, groups: string[], state: MiniState = {}, keyset: { testRoots?: boolean; keysetRequired?: boolean; bootTimeoutMs?: number } = {}) =>
+  runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, ...keyset });
 const ADDRESS_IDS = ["B21.own_infra_allowed", "B21.internal_url_external", "B21.own_infra_flag_required", "B21.neighbour_url_refused"];
 const KEYSET_IDS = ["B20.kss_enrolled", "B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise", "B20.kss_reenrol_missing"];
 
@@ -40,31 +41,46 @@ describe("bridge target", () => {
     for (const id of ADDRESS_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
   });
 
-  it("key-set statements (C62/C63): with test roots a correct bridge passes every keyset check; without them keyset is not_run", async () => {
-    const r = await run({}, ["keyset"], {}, true);
-    for (const id of KEYSET_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
-    const strictNa = r.checks.find((c) => c.id === "B20.kss_enrol_missing");
-    assert.equal(strictNa?.status, "not_applicable");
-    assert.match(strictNa?.asserted ?? "", /0\.1\.11 transition: fallback until spec 0\.1\.12/);
-    const n = await run({}, ["keyset"]);
-    for (const id of KEYSET_IDS) assert.equal(status(n, id), "not_run", id);
-    assert.match(n.checks.find((c) => c.id === "B20.kss_enrolled")?.asserted ?? "", /pins its build's Portal Root Keys/);
+  it("key-set statements (spec 0.1.12): by default (test roots, strict) a correct bridge passes every keyset check", async () => {
+    const r = await run({}, ["keyset"]);
+    for (const id of [...KEYSET_IDS, "B20.kss_enrol_missing"]) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`); // gitleaks:allow (check id, not a secret)
   });
 
-  it("strict (--keyset-required): a spec-0.1.12 bridge refuses a first enrolment without a statement; a 0.1.11 bridge fails", async () => {
-    const good = await run({ keysetRequired: true }, ["keyset"], {}, true, true);
-    for (const id of [...KEYSET_IDS, "B20.kss_enrol_missing"]) assert.equal(status(good, id), "pass", `${id}: ${good.checks.find((c) => c.id === id)?.asserted}`); // gitleaks:allow (check id, not a secret)
-    const lax = await run({}, ["keyset"], {}, true, true);
+  it("one pass with test roots (conformance 0.1.8, Lead · Bridge): Portal key rotation re-signs the statement", async () => {
+    // the mini bridge has no standalone mode; the B14 fixture fix is proven by the real bridge's one-pass run
+    const r = await run({}, ["config"]);
+    const failed = r.checks.filter((c) => c.id.startsWith("C5.") && c.status === "fail").map((c) => `${c.id}: ${c.asserted}`);
+    assert.deepEqual(failed, []);
+    assert.equal(status(r, "C5.portal_key_rotation"), "pass", r.checks.find((c) => c.id === "C5.portal_key_rotation")?.asserted);
+  });
+
+  it("--no-test-roots: a strict bridge refuses the fake Portal's enrolment (boot fails with the pinned-roots hint); a 0.1.11 bridge runs with keyset not_run", async () => {
+    const strict = await run({}, ["keyset"], {}, { testRoots: false, bootTimeoutMs: 3000 });
+    assert.equal(strict.ok, false);
+    assert.equal(status(strict, "B20.kss_enrolled"), "fail");
+    assert.match(strict.notes.join(" "), /bridge build pins Portal Root Keys: run with test roots .*TBCONF_PORTAL_ROOT_KEYS.*--no-test-roots given/);
+    const old = await run({ keysetTransitional: true }, ["keyset"], {}, { testRoots: false, keysetRequired: false });
+    for (const id of KEYSET_IDS) assert.equal(status(old, id), "not_run", id);
+    assert.match(old.checks.find((c) => c.id === "B20.kss_enrolled")?.asserted ?? "", /--no-test-roots: the bridge pins its build's Portal Root Keys/);
+  });
+
+  it("strict by default: a 0.1.11 bridge (first enrolment without a statement accepted) fails B20.kss_enrol_missing; --keyset-transitional makes it not_applicable", async () => {
+    const lax = await run({ keysetTransitional: true }, ["keyset"]);
     assert.equal(status(lax, "B20.kss_enrol_missing"), "fail", lax.checks.find((c) => c.id === "B20.kss_enrol_missing")?.asserted);
+    const tr = await run({ keysetTransitional: true }, ["keyset"], {}, { keysetRequired: false });
+    for (const id of KEYSET_IDS) assert.equal(status(tr, id), "pass", `${id}: ${tr.checks.find((c) => c.id === id)?.asserted}`);
+    const na = tr.checks.find((c) => c.id === "B20.kss_enrol_missing");
+    assert.equal(na?.status, "not_applicable");
+    assert.match(na?.asserted ?? "", /--keyset-transitional: 0\.1\.11 transition rules/);
   });
 
   it("fails a bridge that accepts a re-enrolment without a valid statement (C63a)", async () => {
-    const r = await run({ acceptStrippedReenrol: true }, ["keyset"], {}, true);
+    const r = await run({ acceptStrippedReenrol: true }, ["keyset"]);
     assert.equal(status(r, "B20.kss_reenrol_missing"), "fail", r.checks.find((c) => c.id === "B20.kss_reenrol_missing")?.asserted);
   });
 
   it("fails a bridge that ignores portalKeySet (pre-v0.1.11 rule)", async () => {
-    const r = await run({ ignoreKeySet: true }, ["keyset"], {}, true);
+    const r = await run({ ignoreKeySet: true }, ["keyset"]);
     for (const id of ["B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise"]) assert.equal(status(r, id), "fail", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
   });
 

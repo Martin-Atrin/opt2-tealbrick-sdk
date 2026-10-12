@@ -4,7 +4,7 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, manifestDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, manifestDigest, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Hook, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -36,7 +36,7 @@ export interface AppTargetContext {
   /** deploy template JSON for A9 */
   deployTemplate?: unknown;
   timeoutMs: number;
-  /** v0.1.11: the app pins the fake bridge's TEST root pair (runApp `testRoots`); A13 runs only then */
+  /** v0.1.11: the app pins the fake bridge's TEST root pair (runApp `testRoots`, default on); A13 runs only then */
   testRoots?: boolean;
   /** C63a: strict spec-0.1.12 check A13.kss_first_missing */
   keysetRequired?: boolean;
@@ -47,7 +47,8 @@ const GRANT_INVALID = ["grant_invalid"] as const;
 const AUTH_CODES = new Set(["call_proof_invalid", "invalid_token", "unauthenticated", "grant_invalid", "grant_expired", "grant_revoked"]);
 const PERSON_AT_AGENT = ["call_proof_invalid", "grant_invalid", "unauthenticated", "invalid_token"];
 const CAPPABLE = new Set(["write", "outward", "destructive"]);
-const ALLOWED_ENV = new Set(["TB_INSTANCE_ID", "TB_ENROL_CODE", "TB_BRIDGE_URL", "TB_PORTAL_KEYS", "TB_KEK", "TB_DATA_DIR", "TB_BACKUP_DIR", "TB_LOG_LEVEL", "TB_RESTORE_FROM"]);
+// TB_DATA_EPHEMERAL (SDK-API §13 v0.1.12, tests / conformance only): the runner's temp data dirs are not volumes
+const ALLOWED_ENV = new Set(["TB_INSTANCE_ID", "TB_ENROL_CODE", "TB_BRIDGE_URL", "TB_PORTAL_KEYS", "TB_KEK", "TB_DATA_DIR", "TB_DATA_EPHEMERAL", "TB_BACKUP_DIR", "TB_LOG_LEVEL", "TB_RESTORE_FROM"]);
 const SECRET_ENV = new Set(["TB_ENROL_CODE", "TB_KEK"]);
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -258,6 +259,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const byRank = (ops: Operation[]) => [...ops].sort((x, y) => rank(x) - rank(y));
   const holdOp = byRank(agentOps.filter(holdable))[0];
   const idemOp = byRank(agentOps.filter((o) => holdable(o) && o.idempotency !== "none"))[0];
+  // Fleet (2026-10-12): an app whose agent ops are all read-only has no hold chain to test → not_applicable, not fail
+  const NO_HOLDABLE = "no holdable agent op (all agent ops are read-only, no holdFamily)";
+  const noHold = (why: string) => (holdOp ? bad(why) : na(NO_HOLDABLE));
   const idemKey = (op: Operation | undefined) => (op && op.idempotency !== "none" ? `conf-${ulid()}` : undefined);
 
   // ── A8 default scope grants ──
@@ -519,7 +523,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
 
   // ── A4 holds / receipts ──
   await s.run("A4.hold_status", "agents poll their own holds only", "tb.hold_status: owner agent → {status: held}; another agent → refused/not found", async () => {
-    if (!hold) return bad("no hold was created (A3.hold)");
+    if (!hold) return noHold("no hold was created (A3.hold)");
     const id = holdIdOf(hold.answer);
     const own = await c().callOp("tb.hold_status", { holdId: id });
     const out = isObj(own.body) && isObj(own.body.output) ? own.body.output : {};
@@ -528,19 +532,19 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     return verdict(isOk(own) && out.status === "held" && foreign.status >= 400 && !foreignOut, `own: ${show(own)} ${String(out.status)}; other agent: ${show(foreign)}`);
   });
   await s.run("A4.decide_person_only", "approvals only through person-audience ops", "tb.holds_decide on the agent route → refused; via the person session → ok", async () => {
-    if (!hold) return bad("no hold");
+    if (!hold) return noHold("no hold");
     const viaAgent = await c().callOp("tb.holds_decide", { holdId: holdIdOf(hold.answer), decision: "approve" }, { crud: ["update"] });
     return verdict(viaAgent.status >= 400 && viaAgent.status < 500, `agent route: ${show(viaAgent)}`);
   });
   await s.run("A4.holds_list", "one table: holds are receipt rows", "person tb.holds_list contains the hold with status held", async () => {
-    if (!hold || !sess) return bad("no hold/session");
+    if (!hold || !sess) return noHold("no hold/session");
     const r = await c().personOp(sess, "tb.holds_list", {});
     const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     const row = items.find((x) => isObj(x) && x.id === holdIdOf((hold as { answer: OpAnswer }).answer));
     return verdict(isObj(row) && row.status === "held", row ? `row status ${String((row as Record<string, unknown>).status)}` : `${show(r)}, ${items.length} items, hold missing`);
   });
   await s.run("A4.receipt_digest", "receipt stores input digest, never raw input", "receipt row: inputDigest = sha256(JCS input); the canonical input is not in the receipt list", async () => {
-    if (!hold || !sess) return bad("no hold/session");
+    if (!hold || !sess) return noHold("no hold/session");
     const r = await c().personOp(sess, "tb.receipts_list", {});
     const items = isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : [];
     const h = hold as { input: Json; answer: OpAnswer };
@@ -643,7 +647,7 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   let retry: OpAnswer | null = null;
   const decide = async (id: string, decision: "approve" | "deny") => (sess ? c().personOp(sess, "tb.holds_decide", { holdId: id, decision }) : null);
   await s.run("A10", "approved hold runs only on the same input", "after approval: different input → new hold; same input (+ key) → runs (not held), hold row → run|failed", async () => {
-    if (!hold || !sess) return bad("no hold/session");
+    if (!hold || !sess) return noHold("no hold/session");
     const h = hold as { op: Operation; input: Json; answer: OpAnswer; key?: string };
     const id = holdIdOf(h.answer);
     const d = await decide(id, "approve");
@@ -668,9 +672,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const ran = retry.status !== 202 && !AUTH_CODES.has(retry.code ?? "") && (status === "run" || status === "failed");
     return verdict(otherOk && ran, `other input: ${other ? show(other) : "none"}; same input: ${show(retry)}; hold row ${status}`);
   });
-  if (!s.has("P1.held_release_paused")) s.record("P1.held_release_paused", "held action released while paused is refused (A)", "approved hold retried under the workspace kill switch → refused paused", bad("A10 did not reach the paused retry"));
+  if (!s.has("P1.held_release_paused")) s.record("P1.held_release_paused", "held action released while paused is refused (A)", "approved hold retried under the workspace kill switch → refused paused", noHold("A10 did not reach the paused retry"));
   await s.run("A3.no_standing_approval", "no always-allow record after an approval (C8)", "the same call again after the approved retry → held again (new holdId)", async () => {
-    if (!hold || !retry) return bad("A10 did not complete");
+    if (!hold || !retry) return noHold("A10 did not complete");
     const h = hold as { op: Operation; input: Json; answer: OpAnswer };
     const again = track(await c().callOp(h.op.id, h.input, { ...holdOpts(h.op), idempotencyKey: idemKey(h.op) }));
     return verdict(isHeld(again) && holdIdOf(again) !== holdIdOf(h.answer), show(again));
@@ -705,7 +709,8 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // ── P1 pause cells for the app (A refuses ≤ 60 s after B) ──
   // Probed with a manifest op: `tb.hold_status` (valid grant suffices, I4) is not required to run authorize() step 0.
   const pauseOp = holdOp ?? agentOps[0];
-  const pauseCall = (agent = agentA.id) => c().callOp(pauseOp.id, inputFor(pauseOp, agent), { agent, ...holdOpts(pauseOp), idempotencyKey: idemKey(pauseOp) });
+  // hold options only for a holdable op: a read op with `caps: {read: …}` is an invalid grant (Fleet, 2026-10-12)
+  const pauseCall = (agent = agentA.id) => c().callOp(pauseOp.id, inputFor(pauseOp, agent), { agent, ...(holdable(pauseOp) ? holdOpts(pauseOp) : {}), idempotencyKey: idemKey(pauseOp) });
   if (pauseOp) {
     await s.run("P1.workspace", "workspace kill switch → app refuses agent grants", "slice pause.workspace → op call refused paused", async () => {
       const rev = await b.control.pauseWorkspace(true);
@@ -799,24 +804,26 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const extraHold = holdOp ? await c().callOp(holdOp.id, inputFor(holdOp), { ...holdOpts(holdOp), idempotencyKey: idemKey(holdOp) }) : null;
   await s.run("A7.restart", "migrations repeatable; state survives a restart; no re-claim", "restart on the same data dir: no new claim, same instance key kid, holds still readable", async () => {
     if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");
-    if (!extraHold || !isHeld(extraHold)) return bad("no hold to persist");
+    // without a holdable op the persisted facts are the claim record and the instance key (no new claim, same kid)
+    if (holdOp && (!extraHold || !isHeld(extraHold))) return bad("no hold to persist");
     const claims = b.claims.length;
     const kid = b.statuses.at(-1)?.assertion.kid;
     const n = b.statuses.length;
     await ctx.restart();
     const st = await b.control.waitForStatus((x) => b.statuses.indexOf(x) >= n, T);
-    const hsAns = await c().callOp("tb.hold_status", { holdId: holdIdOf(extraHold) });
-    const status = isObj(hsAns.body) && isObj(hsAns.body.output) ? hsAns.body.output.status : null;
+    const hsAns = extraHold && isHeld(extraHold) ? await c().callOp("tb.hold_status", { holdId: holdIdOf(extraHold) }) : null;
+    const status = hsAns === null ? "n/a (no holdable op)" : isObj(hsAns.body) && isObj(hsAns.body.output) ? hsAns.body.output.status : null;
     s.record("A1.key_persisted", "instance key kept sealed on the volume", "after restart the status push is signed by the same instance key, with no new claim", {
       pass: st.assertion.kid === kid && b.claims.length === claims,
       asserted: `kid ${st.assertion.kid === kid ? "unchanged" : "CHANGED"}; claims ${claims} → ${b.claims.length}`,
     });
-    return verdict(b.claims.length === claims && status === "held", `claims ${claims} → ${b.claims.length}; hold after restart: ${String(status)}`);
+    const statePass = hsAns === null ? st.assertion.kid === kid : status === "held";
+    return verdict(b.claims.length === claims && statePass, `claims ${claims} → ${b.claims.length}; ${hsAns === null ? `instance key kid ${st.assertion.kid === kid ? "unchanged" : "CHANGED"} (no holdable op)` : `hold after restart: ${String(status)}`}`);
   });
   if (!s.has("A1.key_persisted")) s.record("A1.key_persisted", "instance key kept sealed on the volume", "after restart the same key, no new claim", ctx.restart ? bad("restart did not complete") : notRun("needs a restartable app"));
   await s.run("A7.backup_roundtrip", "backup to TB_BACKUP_DIR + restore round-trip", "archive tb-backup-*.tar.gz with meta {format tealbrick.backup/1, parts sha256}; TB_RESTORE_FROM restores the state at backup time", async () => {
     if (!ctx.backupNow || !ctx.restart) return notRun("needs start() returning backupNow (programmatic harness) and a restartable app");
-    if (!holdOp || !extraHold || !isHeld(extraHold)) return bad("no hold to back up");
+    if (holdOp && (!extraHold || !isHeld(extraHold))) return bad("no hold to back up");
     const dir = ctx.env.TB_BACKUP_DIR;
     const before = new Set(readdirSync(dir));
     await ctx.backupNow();
@@ -833,6 +840,13 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       return !e || e.data.length !== p.bytes || createHash("sha256").update(e.data).digest("hex") !== p.sha256.replace(/^sha256:/, "");
     });
     if (partBad.length || meta.manifestDigest !== manifestDigest(m) || meta.instance !== b.ids.ins) return bad(`parts bad ${partBad.length}; digest ${meta.manifestDigest === manifestDigest(m) ? "ok" : "mismatch"}; instance ${meta.instance === b.ids.ins ? "ok" : "mismatch"}`);
+    if (!holdOp || !extraHold) {
+      // no holdable op: archive shape checked above; the restore must boot with the same instance (status push)
+      const n0 = b.statuses.length;
+      await ctx.restart({ TB_RESTORE_FROM: file });
+      const st0 = await b.control.waitForStatus((x) => b.statuses.indexOf(x) >= n0, T);
+      return verdict(st0.assertion.kid === b.statuses[n0 - 1]?.assertion.kid, `archive ${file} (${meta.parts?.length ?? 0} parts); restored and booted, instance key ${st0.assertion.kid === b.statuses[n0 - 1]?.assertion.kid ? "unchanged" : "CHANGED"} (no holdable op to probe state)`);
+    }
     const after = await c().callOp(holdOp.id, inputFor(holdOp), { ...holdOpts(holdOp), idempotencyKey: idemKey(holdOp) });
     const n = b.statuses.length;
     await ctx.restart({ TB_RESTORE_FROM: file });
@@ -842,6 +856,28 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const keptOk = isObj(kept.body) && isObj(kept.body.output) && kept.body.output.status === "held";
     const goneOk = gone !== null && gone.status === 404;
     return verdict(keptOk && goneOk, `archive ${file} (${meta.parts?.length ?? 0} parts); hold before backup: ${show(kept)}; hold after backup: ${gone ? show(gone) : "not created"}`);
+  });
+
+  // ── A1 reclaim (SDK-API §13 v0.1.12, spine S1): a refused identity is replaced only with a NEW enrolment code ──
+  await s.run("A1.reclaim_on_new_code", "refused identity + new enrolment code → a fresh claim; same code → none", "bridge forgets the instance key: restart with the claimed code → no claim within 3 s; restart with a new code → one claim with it, then a status push accepted again", async () => {
+    if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");
+    const restore = b.control.forgetInstanceKey();
+    try {
+      const n = b.claims.length;
+      await ctx.restart();
+      await new Promise((r) => setTimeout(r, 3000));
+      const sameCode = b.claims.length - n;
+      const code = b.control.issueEnrolCode();
+      const want = opaqueDigest(code);
+      await ctx.restart({ TB_ENROL_CODE: code });
+      const end = Date.now() + T;
+      while (Date.now() < end && !b.claims.slice(n).some((x) => x.codeDigest === want)) await new Promise((r) => setTimeout(r, 100));
+      const claim = b.claims.slice(n).find((x) => x.codeDigest === want);
+      const pushed = claim ? await b.control.waitForStatus((x) => x.at >= claim.at, T).then(() => true, () => false) : false;
+      return verdict(sameCode === 0 && claim !== undefined && pushed, `same code: ${sameCode} claim(s); new code: ${claim ? "claimed" : "NO claim"}; status after reclaim ${pushed ? "accepted" : "missing"}`);
+    } finally {
+      restore();
+    }
   });
 
   // ── C7 lifetimes, C8 no shared secret ──
@@ -945,9 +981,9 @@ export const A13_IDS = {
   "A13.kss_missing": "slice without portalKeySet after a pin → refused (no downgrade)",
   "A13.kss_rotation": "normal rotation (announce / activate / retire statements) applied",
   "A13.kss_compromise": "compromise rotation: slices and grants by the dropped kid refused at once",
-  "A13.kss_first_missing": "strict (--keyset-required): first slice without portalKeySet refused (spec 0.1.12)",
+  "A13.kss_first_missing": "strict (default since spec 0.1.12): first slice without portalKeySet refused",
 } as const;
-const STRICT_NA = "0.1.11 transition: fallback until spec 0.1.12 (run with --keyset-required for the strict check)";
+const STRICT_NA = "--keyset-transitional: 0.1.11 transition rules (strict since spec 0.1.12; drop the flag for the strict check)";
 
 async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<void> {
   const b = ctx.bridge;
@@ -955,7 +991,7 @@ async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<
   const T = ctx.timeoutMs;
   if (!ctx.keysetRequired) s.record("A13.kss_first_missing", A13_IDS["A13.kss_first_missing"], "first slice without a statement refused", na(STRICT_NA));
   if (!ctx.testRoots) {
-    const why = "the app pins its build's Portal Root Keys; run with --test-roots and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys })";
+    const why = "--no-test-roots: the app pins its build's Portal Root Keys; run with test roots (the default) and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys })";
     for (const [id, title] of Object.entries(A13_IDS)) if (!s.has(id)) s.record(id, title, "app verifies slices against the newest root-signed statement", notRun(why));
     return;
   }

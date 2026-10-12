@@ -43,14 +43,19 @@ export interface RunBridgeOptions {
   /**
    * v0.1.11 (C62/C63): the bridge's start module honours `TBCONF_PORTAL_ROOT_KEYS` (JSON public JWKs; a harness-only
    * name the bridge itself never reads) by passing it to the bridge's programmatic start option for its pinned roots.
-   * Without it the B20 key-set group reports not_run: a bridge pins its build's roots, which no test can sign for.
+   * Default true (spec 0.1.12); `false` (CLI `--no-test-roots`): the B20 key-set group reports not_run, and a strict
+   * bridge (it pins its build's roots, which no test can sign for) cannot enrol at the fake Portal.
    */
   testRoots?: boolean;
-  /** C63a: run the strict spec-0.1.12 checks (B20.kss_enrol_missing); else they are not_applicable */
+  /** C63a strict checks (spec 0.1.12, B20.kss_enrol_missing), default true; `false` (`--keyset-transitional`): not_applicable */
   keysetRequired?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Boot-failure hint when the bridge enrolled but applied no config (a spec-0.1.12 bridge pins its Portal Root Keys). */
+export const PINNED_BRIDGE_ROOTS_HINT =
+  "bridge build pins Portal Root Keys: run with test roots (start module must pass env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option, CONFORMANCE §7)";
 
 export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -154,7 +159,8 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
   const notes: string[] = [];
   const logs = { text: "" };
   const start = opts.start ?? processHarness(opts.cmd as string, logs, opts.echoLogs);
-  const world = await BridgeWorld.create({ ...(opts.manifests ? { manifests: opts.manifests } : {}), testRoots: opts.testRoots === true, keysetRequired: opts.keysetRequired === true });
+  const testRoots = opts.testRoots !== false;
+  const world = await BridgeWorld.create({ ...(opts.manifests ? { manifests: opts.manifests } : {}), testRoots, keysetRequired: opts.keysetRequired !== false });
   if (world.peer) world.peer.catalog = () => peerCatalog();
   const dataDir = mkdtempSync(join(tmpdir(), "tb-conformance-bridge-"));
   const [pub, int] = [await freePort(), await freePort()];
@@ -174,7 +180,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
     TB_INTERNAL_PORT: String(int),
     // BSD-07 (BRIDGE §5.7): the fake apps run on this host = own infrastructure; the owner-set allow-list names them
     TB_OWN_INFRA_ORIGINS: world.ownInfraOrigins().join(","),
-    ...(opts.testRoots ? { TBCONF_PORTAL_ROOT_KEYS: JSON.stringify(world.testRootJwks()) } : {}),
+    ...(testRoots ? { TBCONF_PORTAL_ROOT_KEYS: JSON.stringify(world.testRootJwks()) } : {}),
   };
   world.env = env;
   world.portal.bridgePublicUrl = env.TB_PUBLIC_URL as string;
@@ -193,6 +199,8 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
       const why = `boot failed: ${e instanceof Error ? e.message : String(e)}`;
       for (const g of BRIDGE_GROUP_ORDER) for (const c of BRIDGE_GROUPS[g] ?? []) s.record(c.id, c.title, "the bridge boots, enrols and applies the first config", bad(why));
       notes.push(why);
+      // enrolled at the fake Portal but no config acknowledged: the bridge refused the EnrolResponse (key-set rule)
+      if (world.portal.bridgeKey !== null && world.portal.acks.length === 0) notes.push(testRoots ? `${PINNED_BRIDGE_ROOTS_HINT} (test roots were offered; the bridge did not pin them)` : `${PINNED_BRIDGE_ROOTS_HINT} (--no-test-roots given)`);
       return buildReport({ target: "bridge", subject, startedAt, checks: s.results, notes });
     }
     const harness: BridgeHarness = {

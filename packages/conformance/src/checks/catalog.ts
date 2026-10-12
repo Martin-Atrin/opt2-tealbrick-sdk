@@ -31,6 +31,7 @@ export const APP_CHECK_IDS = [
   "A1.manifest_served",
   "A1.health",
   "A1.key_persisted",
+  "A1.reclaim_on_new_code",
   "M4.openapi",
   "A6",
   "A6.principal",

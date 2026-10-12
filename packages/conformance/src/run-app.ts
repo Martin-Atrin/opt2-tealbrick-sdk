@@ -55,16 +55,25 @@ export interface RunAppOptions {
   /**
    * v0.1.11 (C62/C63): the harness wires the TEST Portal Root Keys: the app env gets `TBCONF_PORTAL_ROOT_KEYS` (JSON
    * array of public JWKs; not a TB_* name, read only by the start module, which passes it to
-   * `startApp(app, env, { portalRootKeys })`). Without it the A13 key-set checks report not_run (an app pins its build's
-   * roots and cannot verify statements signed by a test root).
+   * `startApp(app, env, { portalRootKeys })`). Default true (spec 0.1.12: a strict app accepts no slice whose statement
+   * is not signed by a root it pins); `false` (CLI `--no-test-roots`): the A13 key-set checks report not_run and a
+   * strict app cannot boot against the fake bridge (the boot failure says so).
    */
   testRoots?: boolean;
-  /** C63a strict check (spec 0.1.12): the fake bridge emits `portalKeySet` from the first slice and A13.kss_first_missing runs */
+  /**
+   * C63a strict rule (spec 0.1.12), default true: the fake bridge emits `portalKeySet` from the first slice and
+   * A13.kss_first_missing runs. `false` (CLI `--keyset-transitional`): the 0.1.11 transition rules, for builds released
+   * before spec 0.1.12 only.
+   */
   keysetRequired?: boolean;
 }
 
 /** Harness-only env name carrying the test root JWKs (never read by the SDK or the bridge; CONFORMANCE §7). */
 export const TEST_ROOTS_ENV = "TBCONF_PORTAL_ROOT_KEYS";
+
+/** Boot-failure hint when the app claimed but installed no slice (a spec-0.1.12 app pins its Portal Root Keys). */
+export const PINNED_ROOTS_HINT =
+  "app build pins Portal Root Keys: run with test roots (start module must pass env.TBCONF_PORTAL_ROOT_KEYS to startApp — see create-tealbrick-miniapp conformance.start.ts)";
 
 export function loadManifest(opts: { manifest?: unknown; manifestPath?: string }): unknown {
   if (opts.manifest !== undefined) return opts.manifest;
@@ -72,7 +81,7 @@ export function loadManifest(opts: { manifest?: unknown; manifestPath?: string }
   return JSON.parse(readFileSync(opts.manifestPath, "utf8"));
 }
 
-/** The env an app under test boots with (SDK-API §13); the only secrets are TB_ENROL_CODE and TB_KEK (C8). */
+/** The env an app under test boots with (SDK-API §13); the only secrets are TB_ENROL_CODE and TB_KEK (C8). TB_DATA_EPHEMERAL=1 always (tests / conformance only). */
 export function appEnv(bridge: FakeBridge, dataDir: string, extra: Record<string, string> = {}): Record<string, string> {
   const backup = join(dataDir, "backup");
   mkdirSync(backup, { recursive: true });
@@ -85,6 +94,8 @@ export function appEnv(bridge: FakeBridge, dataDir: string, extra: Record<string
     TB_DATA_DIR: dataDir,
     TB_BACKUP_DIR: backup,
     TB_LOG_LEVEL: "warn",
+    // SDK-API §13 v0.1.12: temp data dirs are not volumes; without this a Linux runner would never let the app claim
+    TB_DATA_EPHEMERAL: "1",
     ...extra,
   };
 }
@@ -107,12 +118,14 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   }
   if (!opts.start && !opts.url) throw new TypeError("runApp: start or url required");
 
+  const testRoots = opts.testRoots !== false;
+  const keysetRequired = opts.keysetRequired !== false;
   const bridge = await createFakeBridge({ manifest: manifest as Manifest, ...(opts.agents ? { agents: opts.agents } : {}) });
   // strict run: an app that requires a statement must get one in its very first slice (claim answer)
-  if (opts.keysetRequired && opts.testRoots) await bridge.control.publishKeySet();
+  if (keysetRequired && testRoots) await bridge.control.publishKeySet();
   const ownDir = opts.dataDir === undefined;
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "tb-conformance-"));
-  const env = appEnv(bridge, dataDir, { ...(opts.testRoots ? { [TEST_ROOTS_ENV]: JSON.stringify(bridge.testRootJwks()) } : {}), ...opts.env });
+  const env = appEnv(bridge, dataDir, { ...(testRoots ? { [TEST_ROOTS_ENV]: JSON.stringify(bridge.testRootJwks()) } : {}), ...opts.env });
   const timeoutMs = opts.timeoutMs ?? 20_000;
   let app: AppStartResult | null = null;
   let client: AppClient | null = null;
@@ -135,7 +148,12 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
     } catch (e) {
       const why = `boot failed: ${e instanceof Error ? e.message : String(e)} (claims ${bridge.claims.length}, status pushes ${bridge.statuses.length}, refusals ${bridge.violations.map((v) => v.code).join(",") || "none"})`;
       for (const id of APP_CHECK_IDS) s.record(id, "app check", "app claims and installs its first slice", bad(why));
-      return buildReport({ target: "app", subject: subjectOf(url), startedAt, checks: s.results, sdk: { majors: bridge.sdkMajors, reported: null }, notes: [why] });
+      const bootNotes = [why];
+      // claimed but no slice installed: the app refused the fake bridge's slice (key-set rule, CREDENTIALS §9.5)
+      if (bridge.claims.length > 0 && !bridge.statuses.some((x) => x.status.sliceRevision >= 1)) {
+        bootNotes.push(testRoots ? `${PINNED_ROOTS_HINT} (test roots were offered in ${TEST_ROOTS_ENV}; the app did not pin them)` : `${PINNED_ROOTS_HINT} (--no-test-roots given)`);
+      }
+      return buildReport({ target: "app", subject: subjectOf(url), startedAt, checks: s.results, sdk: { majors: bridge.sdkMajors, reported: null }, notes: bootNotes });
     }
     const start = opts.start;
     scan = await runAppChecks(s, {
@@ -154,8 +172,8 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
         : {}),
       ...(app?.backupNow ? { backupNow: () => (app as AppStartResult).backupNow?.() ?? Promise.resolve() } : {}),
       inputs: opts.inputs ?? {},
-      testRoots: opts.testRoots === true,
-      keysetRequired: opts.keysetRequired === true,
+      testRoots,
+      keysetRequired,
       ...(opts.deployTemplate !== undefined ? { deployTemplate: opts.deployTemplate } : {}),
       timeoutMs,
     });

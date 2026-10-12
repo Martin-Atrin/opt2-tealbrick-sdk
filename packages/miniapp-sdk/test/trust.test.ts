@@ -139,9 +139,9 @@ test("compromise rotation: the dropped kid's slices and grants are refused at on
   }
 });
 
-test("transition: no portalKeySet and nothing pinned → pre-v0.1.11 rule with ONE warning; later statement pins", async () => {
+test("0.1.11 transition rule (required: false override): no portalKeySet and nothing pinned → pre-v0.1.11 rule with ONE warning; later statement pins", async () => {
   const [root, a, evil] = await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair()]);
-  const s = await setup({ roots: [root], bootstrap: a });
+  const s = await setup({ roots: [root], bootstrap: a, required: false });
   try {
     assert.equal(code(s.trust.install(await slice(1, a), Date.now())), "ok");
     assert.equal(code(s.trust.install(await slice(2, a), Date.now())), "ok");
@@ -169,13 +169,28 @@ test("transition: a build without pinned roots ignores portalKeySet (legacy path
   }
 });
 
-test("spec 0.1.12 (KEYSET_REQUIRED): a first slice without a statement is refused; 0.1.11 builds keep the fallback", async () => {
-  assert.equal(KEYSET_REQUIRED, false, "0.1.11 transition build");
+test("spec 0.1.12 (KEYSET_REQUIRED): a first slice without a statement is refused by default", async () => {
+  assert.equal(KEYSET_REQUIRED, true, "0.1.12 build: the transition fallback is removed");
   const [root, a] = await Promise.all([generateKeyPair(), generateKeyPair()]);
-  const s = await setup({ roots: [root], bootstrap: a, required: true });
+  const s = await setup({ roots: [root], bootstrap: a });
+  try {
+    assert.equal(code(s.trust.install(await slice(1, a), Date.now())), "keyset_missing", "bootstrap-signed, statement-less first slice");
+    assert.deepEqual(s.warnings, [], "no transition warning: the legacy path is gone");
+    assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(root, 1, [[a, "active"]]) }), Date.now())), "ok");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("spec 0.1.12 default build: the build-pinned dev roots apply and a statement-less first slice is refused", async () => {
+  const a = await generateKeyPair();
+  const s = await setup({ bootstrap: a });
   try {
     assert.equal(code(s.trust.install(await slice(1, a), Date.now())), "keyset_missing");
-    assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(root, 1, [[a, "active"]]) }), Date.now())), "ok");
+    // a statement signed by a non-pinned (test) root is no way around it
+    const testRoot = await generateKeyPair();
+    assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(testRoot, 1, [[a, "active"]]) }), Date.now())), "keyset_invalid");
+    assert.equal(s.trust.slice, null);
   } finally {
     s.cleanup();
   }

@@ -8,7 +8,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { defineApp, type SdkOpContext, type StartContext, startApp, TbError } from "../src/server/index.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
-import { callProof, FakeBridge, freePort, grant, migrationsDir, slice, tempDir, until, world } from "./helpers.ts";
+import { callProof, FakeBridge, freePort, grant, migrationsDir, slice, tempDir, testRoots, until, world } from "./helpers.ts";
 
 test("onStart runs after claim; ctx.secrets seals values; helper calls carry an instance assertion", async () => {
   const w = await world();
@@ -67,9 +67,10 @@ test("onStart runs after claim; ctx.secrets seals values; helper calls carry an 
     TB_BRIDGE_URL: bridgeUrl,
     TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }),
     TB_DATA_DIR: t.dir,
+    TB_DATA_EPHEMERAL: "1",
     TB_LOG_LEVEL: "error",
     JOTTER_IDX_URL: `http://127.0.0.1:7700`,
-  });
+  }, testRoots(w));
   try {
     const ctx = await until(async () => started);
     assert.equal(typeof ctx.scopes.instances.create, "function");

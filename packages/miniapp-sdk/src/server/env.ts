@@ -14,6 +14,7 @@ export const SDK_ENV_NAMES = [
   "TB_KEK",
   "TB_KEK_PREVIOUS",
   "TB_DATA_DIR",
+  "TB_DATA_EPHEMERAL",
   "TB_BACKUP_DIR",
   "TB_STANDALONE",
   "TB_STANDALONE_RESET",
@@ -29,6 +30,8 @@ export interface SdkConfig {
   kek: string | null;
   kekPrevious: string | null;
   dataDir: string;
+  /** v0.1.12: TB_DATA_EPHEMERAL=1 (tests / conformance only) skips the first-claim mount check of TB_DATA_DIR */
+  dataEphemeral: boolean;
   /** C28: defaults to <TB_DATA_DIR>/backup */
   backupDir: string;
   standalone: boolean;
@@ -81,6 +84,7 @@ export function readEnv(env: Record<string, string | undefined>): SdkConfig {
     kek: nonEmpty(env.TB_KEK),
     kekPrevious: nonEmpty(env.TB_KEK_PREVIOUS),
     dataDir,
+    dataEphemeral: env.TB_DATA_EPHEMERAL === "1",
     backupDir: nonEmpty(env.TB_BACKUP_DIR) ?? join(dataDir, "backup"),
     standalone: env.TB_STANDALONE === "1",
     standaloneReset: env.TB_STANDALONE_RESET === "1",

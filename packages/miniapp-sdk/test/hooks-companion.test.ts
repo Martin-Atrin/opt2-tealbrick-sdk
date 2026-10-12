@@ -8,7 +8,7 @@ import type { HookPhase, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { HookRequest, Json, OpContext, RunningApp } from "@opt2-tealbrick/spec/sdk";
 import { defineApp, startApp } from "../src/server/index.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
-import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, until, type World, world } from "./helpers.ts";
+import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, until, type World, world } from "./helpers.ts";
 
 const PRODUCT = "jotter";
 const PEER = "peer-app";
@@ -76,8 +76,9 @@ async function boot(): Promise<Booted> {
     TB_BRIDGE_URL: bridgeUrl,
     TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }),
     TB_DATA_DIR: t.dir,
+    TB_DATA_EPHEMERAL: "1",
     TB_LOG_LEVEL: "error",
-  });
+  }, testRoots(w));
   await until(async () => running.status() === "ok");
   return {
     w,

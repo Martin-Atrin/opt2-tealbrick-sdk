@@ -18,6 +18,7 @@ import {
   keySetFromPortalKeys,
   manifestDigest,
   memoryReplayGuard,
+  portalRootKeys,
   seal,
   sealAad,
   signInstanceAssertion,
@@ -58,8 +59,10 @@ export interface MiniAppFaults {
   badHookShape?: boolean;
   /** ignores portalKeySet: keeps the pre-v0.1.11 rule (portalKeys replace the trusted set; CREDENTIALS §9.5) */
   ignoreKeySet?: boolean;
-  /** NOT a fault: a spec-0.1.12 build (statement required for the first slice, C63a) */
-  keysetRequired?: boolean;
+  /** a spec-0.1.11 build: falls back to the pre-v0.1.11 rule while nothing is pinned (fails A13.kss_first_missing) */
+  keysetTransitional?: boolean;
+  /** keeps a refused identity even when TB_ENROL_CODE changed (fails A1.reclaim_on_new_code, SDK-API §13 v0.1.12) */
+  noReclaim?: boolean;
 }
 
 interface Receipt {
@@ -85,6 +88,8 @@ interface Receipt {
 
 interface State {
   claimed: boolean;
+  /** v0.1.12: sha256 of the enrolment code the claim was made with */
+  codeDigest?: string;
   bridgeId: string | null;
   slice: string | null;
   /** v0.1.11: pinned key-set statement + its keys */
@@ -183,12 +188,12 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     }
   };
 
-  // v0.1.11 key-set rule (CREDENTIALS §9.5): roots from the harness-only TBCONF_PORTAL_ROOT_KEYS (a test app; the SDK
-  // gets them through startApp's harness option)
-  const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : [];
+  // key-set rule (CREDENTIALS §9.5, strict since spec 0.1.12): roots from the harness-only TBCONF_PORTAL_ROOT_KEYS (a
+  // test app; the SDK gets them through startApp's harness option), else the build-pinned dev roots like the SDK
+  const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : portalRootKeys("dev");
   /** false when the slice was refused */
   function installSlice(token: string): boolean {
-    const t = faults.ignoreKeySet ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(peek(token), st.kss ? { seq: st.kss.seq, kss: st.kss.kss } : null, roots, { required: faults.keysetRequired === true });
+    const t = faults.ignoreKeySet ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(peek(token), st.kss ? { seq: st.kss.seq, kss: st.kss.kss } : null, roots, { required: faults.keysetTransitional !== true });
     if (!t.ok) return false;
     const issuers = !t.legacy ? t.signers : slice ? keySetFromPortalKeys(slice.portalKeys) : keySetFrom(JSON.parse(env.TB_PORTAL_KEYS) as never, "tb:portal");
     const r = verifySlice(token, { now: nowS(), self: `tb:ins:${ins}`, ws: (slice?.ws ?? peek(token).ws) as WorkspaceId, bridge: st.bridgeId as BridgeId, issuers });
@@ -203,10 +208,10 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     return true;
   }
 
-  async function bridge(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal, extra: Record<string, string> = {}): Promise<{ status: number; body: unknown }> {
+  async function bridge(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal, extra: Record<string, string> = {}, assert = true): Promise<{ status: number; body: unknown }> {
     const bytes = body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(body));
     const headers: Record<string, string> = { "content-type": "application/json", ...extra };
-    if (st.bridgeId) headers["TB-Assert"] = await signInstanceAssertion({ key, ins, bridge: st.bridgeId as BridgeId, method, pathAndQuery: path, body: bytes, now: nowS() });
+    if (st.bridgeId && assert) headers["TB-Assert"] = await signInstanceAssertion({ key, ins, bridge: st.bridgeId as BridgeId, method, pathAndQuery: path, body: bytes, now: nowS() });
     const res = await fetch(bridgeUrl + path, { method, headers, body: bytes, signal });
     const text = await res.text();
     return { status: res.status, body: text ? JSON.parse(text) : null };
@@ -220,15 +225,22 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     }
   }
 
-  // claim (once)
-  if (!st.claimed) {
-    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0` });
+  // claim (once; again only after a refused identity with a NEW enrolment code, SDK-API §13 v0.1.12)
+  async function claim(reclaim: boolean): Promise<void> {
+    const r = await bridge("POST", "/tb/v1/claim", { code: env.TB_ENROL_CODE, instancePublicKey: key.publicJwk, manifestDigest: mDigest, version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0` }, undefined, {}, false);
     if (r.status !== 200 || !isObj(r.body) || r.body.ins !== ins) throw new Error(`claim failed: ${r.status}`);
     st.claimed = true;
+    st.codeDigest = sha(env.TB_ENROL_CODE ?? "");
     st.bridgeId = String((r.body.bridge as Record<string, unknown>).id);
+    if (reclaim) {
+      st.slice = null;
+      slice = null;
+    }
     save();
     if (typeof r.body.slice === "string") installSlice(r.body.slice);
   }
+  if (!st.claimed) await claim(false);
+  let reclaimTried = false;
 
   // status push + long-poll
   const stop = new AbortController();
@@ -244,6 +256,12 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
           stop.signal,
         );
         first = false;
+        if (r.status === 401 && !faults.noReclaim && !reclaimTried && env.TB_ENROL_CODE && sha(env.TB_ENROL_CODE) !== st.codeDigest) {
+          reclaimTried = true;
+          await claim(true).catch(() => undefined);
+          continue;
+        }
+        if (r.status === 401) await new Promise((res) => setTimeout(res, 300));
         if (r.status === 200 && isObj(r.body)) {
           if (typeof r.body.slice === "string" && !installSlice(r.body.slice)) await new Promise((res) => setTimeout(res, 300));
           if (typeof r.body.keysRev === "number" && r.body.keysRev !== keysRev) {

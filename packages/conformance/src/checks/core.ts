@@ -18,7 +18,7 @@ export interface CoreStaticInput {
 const AUTH_CLASSES = ["browser", "owner-cli", "bridge", "device", "public", "stripe-webhook"] as const;
 const PERSON = new Set(["browser", "owner-cli"]);
 /** PORTAL-API §1.1 "Explicit public rows": nothing else is reachable without a credential. */
-const EXPLICIT_PUBLIC = ["device.start", "device.token", "bridge_api.enrol", "stripe.webhook", "clerk.webhook"] as const;
+const EXPLICIT_PUBLIC = ["device.start", "device.token", "bridge_api.enrol", "stripe.webhook", "clerk.webhook", "portal.signing_keys"] as const;
 /** RFC 8628 polling codes carried as `error.code` (CORE §8, C15). */
 const DEVICE_POLL_CODES = ["authorization_pending", "slow_down", "access_denied", "expired_token"] as const;
 

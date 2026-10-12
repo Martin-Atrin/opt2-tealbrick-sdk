@@ -18,6 +18,10 @@ export interface FakeBridge {
   setKey(name: string, value: string | null): void;
   /** test switch: names answered 403 key_not_declared (Core declaration bug, Knowledge S2); changes do NOT bump keysRev */
   undeclared: Set<string>;
+  /** v0.1.12 tests: Core dropped the service key (assertions → 401 unauthenticated until a new claim) */
+  forget(): void;
+  /** v0.1.12 tests: Core re-issued the one-time code (the old one is gone) */
+  newCode(code: string): void;
   close(): Promise<void>;
 }
 
@@ -46,6 +50,7 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
   const keys = new Map(Object.entries(o.keys));
   const replay = memoryReplayGuard();
   let usedCode = false;
+  let code = o.code;
   let servicePub: Ed25519PublicJwk | null = null;
   const sliceRevision = 1;
   const waiters = new Set<() => void>();
@@ -61,6 +66,13 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
     refused: [],
     keysRev: 7,
     undeclared: new Set<string>(),
+    forget() {
+      servicePub = null;
+    },
+    newCode(c) {
+      code = c;
+      usedCode = false;
+    },
     setKey(name, value) {
       if (value === null) keys.delete(name);
       else keys.set(name, value);
@@ -95,7 +107,7 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
     if (req.method === "POST" && url === "/tb/v1/claim") {
       const c = JSON.parse(raw.toString("utf8")) as ClaimRequest;
       fb.claims.push(c);
-      if (c.code !== o.code || usedCode) return refuse(res, 403, "code_invalid");
+      if (c.code !== code || usedCode) return refuse(res, 403, "code_invalid");
       usedCode = true;
       servicePub = c.instancePublicKey;
       const answer: ClaimResponse = {

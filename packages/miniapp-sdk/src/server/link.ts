@@ -13,6 +13,7 @@ import type { BridgeId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spe
 import type { CompanionResult, HealthStatus, Json, Logger } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeClient } from "./bridge-client.ts";
 import { errorFrom } from "./bridge-client.ts";
+import { enrolCodeDigest, identityRefused, reclaimCode, waitForMountedDataDir } from "./claim-guard.ts";
 import { TbError } from "./errors.ts";
 import { peekClaims } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
@@ -22,6 +23,8 @@ export interface ClaimRecord {
   ins: InstanceId;
   bridge: { id: BridgeId; publicKey: Ed25519PublicJwk; internalUrl: string };
   claimedAt: number;
+  /** v0.1.12: sha256 digest of the enrolment code this record was claimed with (never the code); absent before 0.1.12 */
+  codeDigest?: `sha256:${string}`;
 }
 
 const BACKOFF_MIN_MS = 1000;
@@ -55,6 +58,8 @@ export class BridgeLink {
   #poll: AbortController | null = null;
   #dirty = false;
   #running: Promise<void> | null = null;
+  /** digests of enrolment codes already tried for a reclaim in this process (one attempt per code) */
+  readonly #tried = new Set<string>();
 
   constructor(rt: Runtime, client: BridgeClient) {
     this.#rt = rt;
@@ -108,13 +113,30 @@ export class BridgeLink {
     return installed;
   }
 
-  async #claim(): Promise<boolean> {
+  /** The claim gate (v0.1.12): never redeem the one-time code while TB_DATA_DIR is not on a mounted volume. */
+  async #mounted(): Promise<boolean> {
+    const rt = this.#rt;
+    return waitForMountedDataDir(rt.cfg.dataDir, {
+      ephemeral: rt.cfg.dataEphemeral,
+      ...(rt.mountinfoPath ? { mountinfoPath: rt.mountinfoPath } : {}),
+      log: this.#log,
+      signal: this.#stop.signal,
+      onBlocked: (blocked) => {
+        if (blocked) rt.state.attention = "data_dir_not_mounted";
+        else if (rt.state.attention === "data_dir_not_mounted") rt.state.attention = null;
+      },
+    });
+  }
+
+  /** ONE claim path: the first claim (`code` = TB_ENROL_CODE) and a reclaim after a refused identity. */
+  async #claim(reclaim = false): Promise<boolean> {
     const rt = this.#rt;
     const code = rt.cfg.enrolCode;
     if (!code) {
       this.#log.error("TB_ENROL_CODE missing and no claim record: issue a new enrolment code in Portal");
       return false;
     }
+    if (!(await this.#mounted())) return false;
     const r = await this.#client.claim(
       { code, instancePublicKey: rt.instanceKey.publicJwk, manifestDigest: rt.digest, version: rt.manifest.version, sdkVersion: rt.sdkVersion },
       this.#stop.signal,
@@ -125,14 +147,40 @@ export class BridgeLink {
       rt.state.failed = true;
       throw new TbError("instance_mismatch", "claim response names another instance than TB_INSTANCE_ID", 500);
     }
-    const record: ClaimRecord = { ins: body.ins, bridge: body.bridge, claimedAt: Date.now() };
+    const record: ClaimRecord = { ins: body.ins, bridge: body.bridge, claimedAt: Date.now(), codeDigest: enrolCodeDigest(code) };
+    // reclaim: the new record replaces the refused one, and the old identity's slice goes with it (sealed app data,
+    // the instance key and the pinned key-set statement stay)
+    if (reclaim) rt.trust.dropSlice();
     metaSet(rt.db, "claim", record);
     rt.trust.setBridge(body.bridge.id);
     rt.state.claimed = true;
-    await rt.audit.record({ actor: "system", action: "claim.complete", target: rt.instanceId, detail: { bridge: body.bridge.id } });
+    if (rt.state.attention === "identity_refused") rt.state.attention = null;
+    await rt.audit.record({ actor: "system", action: "claim.complete", target: rt.instanceId, detail: { bridge: body.bridge.id, ...(reclaim ? { reclaim: true } : {}) } });
     if (typeof body.slice === "string") await installSlice(rt, body.slice);
     rt.onClaimed();
     return true;
+  }
+
+  /**
+   * The bridge refused the stored identity (401 `unauthenticated`): needs_attention `identity_refused` (logged once per
+   * episode). With a NEW TB_ENROL_CODE (digest ≠ the record's) claim again once; otherwise keep refusing with backoff.
+   * Returns true when a reclaim succeeded.
+   */
+  async #onRefused(): Promise<boolean> {
+    const rt = this.#rt;
+    if (rt.state.attention !== "identity_refused") {
+      rt.state.attention = "identity_refused";
+      this.#log.warn("identity_refused", { hint: "the bridge refuses the stored instance identity; a new enrolment code (Portal Retry) lets the app claim again" });
+    }
+    if (!reclaimCode(rt.cfg.enrolCode, BridgeLink.record(rt)?.codeDigest, this.#tried)) return false;
+    this.#log.info("reclaim", { reason: "identity_refused" });
+    try {
+      return await this.#claim(true);
+    } catch (e) {
+      if (rt.state.attention === null) rt.state.attention = "identity_refused";
+      this.#log.warn("reclaim failed", { code: e instanceof TbError ? e.code : "error" });
+      return false;
+    }
   }
 
   async #loop(): Promise<void> {
@@ -159,6 +207,10 @@ export class BridgeLink {
           AbortSignal.any([this.#stop.signal, this.#poll.signal]),
         );
         let refused = false;
+        if ((r.status === 200 || r.status === 204) && rt.state.attention === "identity_refused") {
+          rt.state.attention = null;
+          this.#log.info("identity accepted again");
+        }
         if (r.status === 200) refused = !(await this.#apply(r.body as AppStatusResponse));
         else if (r.status !== 204) throw errorFrom(r, "status_failed");
         backoff = BACKOFF_MIN_MS;
@@ -169,7 +221,12 @@ export class BridgeLink {
       } catch (e) {
         if (this.#stop.signal.aborted) break;
         if (this.#poll?.signal.aborted) continue; // kicked: report again at once
-        this.#log.warn("bridge exchange failed", { code: e instanceof TbError ? e.code : "error" });
+        if (rt.state.claimed && identityRefused(e)) {
+          if (await this.#onRefused()) {
+            backoff = BACKOFF_MIN_MS;
+            continue;
+          }
+        } else this.#log.warn("bridge exchange failed", { code: e instanceof TbError ? e.code : "error" });
         if (rt.state.failed) break;
         await sleep(backoff + Math.floor(Math.random() * 250), this.#stop.signal);
         backoff = Math.min(BACKOFF_MAX_MS, backoff * 2);

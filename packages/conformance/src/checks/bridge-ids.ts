@@ -199,7 +199,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B20.kss_missing": "config without portalKeySet after a pin dropped",
     "B20.kss_compromise": "compromise rotation: config signed by the dropped kid refused, fresh key applied",
     "B20.kss_reenrol_missing": "re-enrolment of a pinned bridge without a valid portalKeySet refused; old key + pin kept (C63a)",
-    "B20.kss_enrol_missing": "strict (--keyset-required): first enrolment without portalKeySet refused (spec 0.1.12)",
+    "B20.kss_enrol_missing": "strict (default since spec 0.1.12): first enrolment without portalKeySet refused",
   }),
   "pause.workspace": ids({
     "P1.workspace.mcp": "kill switch: tools/call refused paused",

@@ -143,7 +143,7 @@ export class FakeBridge {
    * their channel's roots and never read that name.
    */
   readonly testRoot: Ed25519KeyPair;
-  /** key-set statement state: slices carry `portalKeySet` once `on` (the app starts on the transition path) */
+  /** key-set statement state: slices carry `portalKeySet` once `on` (runApp turns it on before the first slice unless --keyset-transitional / --no-test-roots) */
   keySet = { on: false, seq: 0, kss: null as string | null };
   /** one-shot override of the next slice (A13 negatives): `portalKeySet` (null = omitted), signer, extra portalKeys */
   sliceOverride: { portalKeySet?: string | null; signer?: Ed25519KeyPair; extraPortalKeys?: PortalKeyEntry[] } | null = null;
@@ -574,6 +574,18 @@ export class FakeBridgeControl {
   }
   issueEnrolCode(svc?: string): string {
     return this.#b.issueEnrolCode(this.#b.ids.ins, svc);
+  }
+  /**
+   * v0.1.12 (A1.reclaim_on_new_code): Core dropped the instance key from config — every instance assertion of that
+   * identity is refused 401 `unauthenticated` until a new claim binds a key. Returns a restore function.
+   */
+  forgetInstanceKey(svc?: string): () => void {
+    const slot = svc ? `${this.#b.ids.ins}/${svc}` : this.#b.ids.ins;
+    const jwk = this.#b.instanceKeys.get(slot);
+    this.#b.instanceKeys.delete(slot);
+    return () => {
+      if (jwk && !this.#b.instanceKeys.has(slot)) this.#b.instanceKeys.set(slot, jwk);
+    };
   }
   pauseWorkspace(on: boolean): Promise<number> {
     this.#b.pause.workspace = on;

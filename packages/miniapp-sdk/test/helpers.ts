@@ -5,9 +5,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, generateKeyPair, signCallProof, signGrant, signSlice, signTicket, ulid } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, generateKeyPair, signCallProof, signGrant, signKeySetStatement, signSlice, signTicket, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
-import type { AgentId, BridgeId, InstanceId, PersonId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { AgentId, BridgeId, Ed25519PublicJwk, InstanceId, PersonId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 
@@ -38,6 +38,10 @@ export function migrationsDir(root: string, files: Record<string, string> = { "0
 }
 
 export interface World {
+  /** TEST Portal Root Key pair (spec 0.1.12: the SDK refuses a first slice without a root-signed key-set statement) */
+  root: Ed25519KeyPair;
+  /** key-set statement (seq 1) signed by `root`, listing `portal` as the active key; carried by every helper slice */
+  portalKeySet: string;
   portal: Ed25519KeyPair;
   bridgeKey: Ed25519KeyPair;
   ws: WorkspaceId;
@@ -49,8 +53,12 @@ export interface World {
 }
 
 export async function world(): Promise<World> {
+  const [root, portal] = await Promise.all([generateKeyPair(), generateKeyPair()]);
+  const portalKeySet = await signKeySetStatement({ iss: "tb:portal-root", aud: "tb:portal-keys", seq: 1, iat: nowS(), keys: [{ jwk: portal.publicJwk, status: "active" }] }, root);
   return {
-    portal: await generateKeyPair(),
+    root,
+    portalKeySet,
+    portal,
     bridgeKey: await generateKeyPair(),
     ws: `ws_${ulid()}`,
     brg: `brg_${ulid()}`,
@@ -61,7 +69,17 @@ export async function world(): Promise<World> {
   };
 }
 
-export async function slice(w: World, product: string, over: Partial<Pick<InstanceSlice, "pause" | "agents" | "grants" | "personNbf">> = {}): Promise<string> {
+/** startApp harness that pins the world's TEST root instead of the build's Portal Root Keys (StartHooks.portalRootKeys). */
+export function testRoots(w: World): { portalRootKeys: Ed25519PublicJwk[] } {
+  return { portalRootKeys: [w.root.publicJwk] };
+}
+
+/** `portalKeySet: null` omits the statement (negative tests: a strict SDK refuses it with `keyset_missing`). */
+export async function slice(
+  w: World,
+  product: string,
+  over: Partial<Pick<InstanceSlice, "pause" | "agents" | "grants" | "personNbf">> & { portalKeySet?: string | null } = {},
+): Promise<string> {
   w.rev += 1;
   const self = `tb:ins:${w.ins}` as const;
   return signSlice(
@@ -85,6 +103,7 @@ export async function slice(w: World, product: string, over: Partial<Pick<Instan
         { id: w.agents.a, name: "Agent A", mode: "free", status: "active" },
         { id: w.agents.b, name: "Agent B", mode: "free", status: "active" },
       ],
+      ...(over.portalKeySet === null ? {} : { portalKeySet: over.portalKeySet ?? w.portalKeySet }),
     },
     w.portal,
   );
@@ -138,6 +157,12 @@ export class FakeBridge {
   server: Server | null = null;
   port = 0;
   claims = 0;
+  /** enrolment codes of every claim, in order */
+  claimCodes: string[] = [];
+  /** v0.1.12 tests: true → a reused code is refused 403 code_invalid (one-time codes) */
+  oneTimeCodes = false;
+  /** v0.1.12 tests: true → instance-assertion routes answer 401 unauthenticated (stored identity unknown); a claim clears it */
+  refuseIdentity = false;
   instanceKey: import("@opt2-tealbrick/spec/credentials").Ed25519PublicJwk | null = null;
   statuses: Record<string, unknown>[] = [];
   /** companion calls seen at POST /tb/v1/call */
@@ -179,6 +204,13 @@ export class FakeBridge {
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
     const url = new URL(req.url ?? "/", "http://x");
     if (url.pathname === "/tb/v1/claim") {
+      const code = String(body?.code ?? "");
+      if (this.oneTimeCodes && this.claimCodes.includes(code)) {
+        res.writeHead(403, { "content-type": "application/json" });
+        return void res.end(JSON.stringify({ error: { code: "code_invalid", message: "enrolment code used", requestId: "req_test" } }));
+      }
+      this.claimCodes.push(code);
+      this.refuseIdentity = false;
       this.claims += 1;
       this.instanceKey = body?.instancePublicKey ?? null;
       res.writeHead(200, { "content-type": "application/json" });
@@ -199,6 +231,10 @@ export class FakeBridge {
       if (!req.headers["tb-assert"]) {
         res.writeHead(401);
         return void res.end();
+      }
+      if (this.refuseIdentity) {
+        res.writeHead(401, { "content-type": "application/json" });
+        return void res.end(JSON.stringify({ error: { code: "unauthenticated", message: "instance assertion missing or key unknown", requestId: "req_test" } }));
       }
       this.statuses.push(body);
       if (body?.sliceRevision !== this.#rev) return this.#answer(res);

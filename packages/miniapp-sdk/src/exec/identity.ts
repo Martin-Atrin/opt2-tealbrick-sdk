@@ -6,6 +6,7 @@ import { assertPublicJwk, type Ed25519KeyPair } from "@opt2-tealbrick/manifest";
 import type { ClaimResponse } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Logger } from "@opt2-tealbrick/spec/sdk";
+import { enrolCodeDigest, waitForMountedDataDir } from "../server/claim-guard.ts";
 import { TbError } from "../server/errors.ts";
 import { createSealer, loadInstanceKey, resolveKeks } from "../server/secrets.ts";
 import type { ServiceBridge } from "./bridge.ts";
@@ -19,6 +20,13 @@ export interface ClaimRecord {
   /** the app instance key this service accepts on its control port and helper port */
   app: { publicKey: Ed25519PublicJwk };
   serviceKeys: { name: string; env: string }[];
+  /** v0.1.12: sha256 digest of the enrolment code this record was claimed with (never the code); absent before 0.1.12 */
+  codeDigest?: `sha256:${string}`;
+}
+
+export interface ClaimGate {
+  /** test harness only: mountinfo file for the first-claim mount check (default /proc/self/mountinfo) */
+  mountinfoPath?: string;
 }
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -74,21 +82,32 @@ export function retryable(e: unknown): boolean {
 }
 
 /** Stored claim, or claim now (`POST /tb/v1/claim` with `service`), retrying while the bridge is unreachable. */
-export async function claimOrLoad(cfg: ExecConfig, key: Ed25519KeyPair, bridge: ServiceBridge, log: Logger, signal: AbortSignal): Promise<ClaimRecord> {
+export async function claimOrLoad(cfg: ExecConfig, key: Ed25519KeyPair, bridge: ServiceBridge, log: Logger, signal: AbortSignal, gate: ClaimGate = {}): Promise<ClaimRecord> {
   const stored = readClaimRecord(cfg);
   if (stored) {
     bridge.setBridge(stored.bridge.id);
     return stored;
   }
   if (!cfg.env.enrolCode) throw new TbError("env_invalid", "TB_ENROL_CODE is required for the first claim", 500);
+  return claimWith(cfg, cfg.env.enrolCode, key, bridge, log, signal, gate);
+}
+
+/**
+ * ONE claim path (first claim, and the v0.1.12 reclaim after a refused identity with a new code): waits until
+ * TB_DATA_DIR is on a mounted volume (never redeems the one-time code before), then claims and writes the record
+ * (replacing a refused one). Throws `stopped` when `signal` aborts.
+ */
+export async function claimWith(cfg: ExecConfig, code: string, key: Ed25519KeyPair, bridge: ServiceBridge, log: Logger, signal: AbortSignal, gate: ClaimGate = {}): Promise<ClaimRecord> {
+  const mounted = await waitForMountedDataDir(cfg.env.dataDir, { ephemeral: cfg.env.dataEphemeral, ...(gate.mountinfoPath ? { mountinfoPath: gate.mountinfoPath } : {}), log, signal });
+  if (!mounted) throw new TbError("stopped", "stopped before the claim", 500);
   let delay = 1000;
   for (;;) {
     try {
       const r = await bridge.claim(
-        { code: cfg.env.enrolCode, instancePublicKey: key.publicJwk, manifestDigest: cfg.manifestDigest, version: cfg.manifest.version, sdkVersion: SDK_VERSION, service: cfg.service.id },
+        { code, instancePublicKey: key.publicJwk, manifestDigest: cfg.manifestDigest, version: cfg.manifest.version, sdkVersion: SDK_VERSION, service: cfg.service.id },
         signal,
       );
-      const rec = recordFromClaim(cfg, r);
+      const rec = { ...recordFromClaim(cfg, r), codeDigest: enrolCodeDigest(code) };
       writeClaimRecord(cfg.env.dataDir, rec);
       bridge.setBridge(rec.bridge.id);
       log.info("claim completed", { svc: rec.svc, keys: rec.serviceKeys.length });

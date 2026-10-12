@@ -225,7 +225,10 @@ export class BridgeWorld {
     (w as { root: Ed25519KeyPair }).root = await generateKeyPair();
     w.testRoots = o.testRoots === true;
     w.keysetRequired = o.keysetRequired === true;
-    if (w.testRoots) await w.ensureKeySet();
+    if (w.testRoots) {
+      await w.ensureKeySet();
+      w.portal.keySetSource = () => w.ensureKeySet();
+    }
     const manifests = o.manifests ?? exampleManifests();
     if (manifests.length === 0) throw new Error("bridge target: no example manifests");
     const adapter = w.#adapter();
@@ -430,7 +433,9 @@ export class BridgeWorld {
         this.companionGrants.set(caller.ins, await this.mint.grant({ sub: `tb:ins:${caller.ins}`, aud: `tb:ins:${target.ins}`, crud: comp.crud, mode: "bound", wf: comp.operations, held: ["money"] }));
       }
     const portalKeys = o.standalone ? [] : p.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
-    const portalKeySet = this.testRoots && !o.standalone && !this.standalone ? await this.ensureKeySet() : undefined;
+    // §9.5 Standalone: the FINAL Portal-signed document (the one that carries `standalone`) is verified under the KSS rule,
+    // so it carries the current statement; only the later bridge-issued documents drop it (Lead · Bridge request, 0.1.8)
+    const portalKeySet = this.testRoots && !this.standalone ? await this.ensureKeySet() : undefined;
     if (o.standalone && !this.standalone) {
       const ownerKey = await generateKeyPair();
       this.standalone = { issuer: brg, kid: thumbprint(jwk), ownerKeys: [ownerKey.publicJwk], ownerKey, owner: this.person };
