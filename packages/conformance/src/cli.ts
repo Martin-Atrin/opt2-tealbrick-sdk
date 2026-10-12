@@ -10,7 +10,7 @@
 //   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups a,b] [--pause-latency <ms>]
 //     --start: default export `start(env) → Promise<{ publicUrl, internalUrl, stop }>`, run in a child process like the
 //     app's; --cmd: a separate process with
-//     the suite env (TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) merged
+//     the suite env (TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_KEYS_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) merged
 //   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"]
 // Output: markdown (default) or JSON (--json); --report <base> also writes <base>.json and <base>.md. Exit code 0 only
 // when every check passes (CONFORMANCE §6).

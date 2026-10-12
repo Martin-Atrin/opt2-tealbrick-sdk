@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/conformance",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "Teal Brick opt2 conformance suite: checks + fake Portal + fake bridge generated from @opt2-tealbrick/spec.",
   "license": "MIT",
@@ -25,7 +25,7 @@
     "gen:check": "node scripts/gen-sdk-exports.ts --check"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.8/opt2-tealbrick-spec-0.1.8.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.10/opt2-tealbrick-spec-0.1.10.tgz",
     "@opt2-tealbrick/manifest": "workspace:*"
   },
   "devDependencies": {

@@ -51,6 +51,10 @@ export interface MiniAppFaults {
   ignorePersonNbf?: boolean;
   newKeyOnRestart?: boolean;
   noProofReplayGuard?: boolean;
+  /** companion call: no slice re-read + retry on grant_stale (SDK-API §9) */
+  noCompanionRetry?: boolean;
+  /** before hook answers an extra key (phase shape, BRIDGE §8.2) */
+  badHookShape?: boolean;
 }
 
 interface Receipt {
@@ -183,9 +187,9 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     save();
   }
 
-  async function bridge(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; body: unknown }> {
+  async function bridge(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal, extra: Record<string, string> = {}): Promise<{ status: number; body: unknown }> {
     const bytes = body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(body));
-    const headers: Record<string, string> = { "content-type": "application/json" };
+    const headers: Record<string, string> = { "content-type": "application/json", ...extra };
     if (st.bridgeId) headers["TB-Assert"] = await signInstanceAssertion({ key, ins, bridge: st.bridgeId as BridgeId, method, pathAndQuery: path, body: bytes, now: nowS() });
     const res = await fetch(bridgeUrl + path, { method, headers, body: bytes, signal });
     const text = await res.text();
@@ -237,6 +241,27 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       }
     }
   })();
+
+  /** Companion call (SDK-API §9): the slice grant whose `wf` = the declared operations; grant_stale → re-read once, retry. */
+  async function callCompanion(parentCall: string | null): Promise<Json> {
+    const c = manifest.companions?.[0];
+    if (!c) return null;
+    const want = [...c.operations].sort().join(",");
+    for (let attempt = 0; ; attempt++) {
+      const grant = (slice?.grants ?? []).find((g) => [...((peek(g).wf as string[]) ?? [])].sort().join(",") === want);
+      if (!grant) throw new E(403, "no_grant");
+      const env = { target: c.product, op: c.operations[0], input: {}, ...(parentCall ? { parentCall } : {}) };
+      const r = await bridge("POST", "/tb/v1/call", env, undefined, { "TB-Grant": grant });
+      if (r.status === 200 || r.status === 202) return r.body as Json;
+      const code = String(((r.body as { error?: { code?: string } } | null)?.error?.code) ?? "app_error");
+      if (attempt === 0 && code === "grant_stale" && !faults.noCompanionRetry) {
+        const s0 = await bridge("POST", "/tb/v1/status?wait=0", { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: 0, keysRev, pendingHolds: pending() });
+        if (s0.status === 200 && isObj(s0.body) && typeof s0.body.slice === "string") installSlice(s0.body.slice);
+        continue;
+      }
+      throw new E(r.status, code);
+    }
+  }
 
   // ── HTTP ──
   const read = async (req: IncomingMessage) => {
@@ -348,7 +373,9 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       save();
       return json(res, 202, { status: "held", holdId: h.id, expiresAt: new Date(h.expiresAt ?? 0).toISOString() });
     }
-    const output: Json = { ok: true, op: op.id };
+    // read ops also read the companion product (app→app through the bridge)
+    const companion = op.crud.includes("read") ? await callCompanion(callId) : null;
+    const output: Json = { ok: true, op: op.id, ...(companion ? { companion } : {}) };
     let receiptId: string | undefined;
     if (approved) {
       approved.status = "run";
@@ -446,7 +473,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const p = verifyHookProof(String(req.headers["tb-call"] ?? ""), t, { hook: hook.id, phase: hook.phase, contextDigest: digest(b.context), ...(b.call.input !== undefined ? { inputDigest: digest(b.call.input) } : {}) }, replay);
         if (!p.ok) throw new E(401, "call_proof_invalid");
         if (b.phase !== hook.phase) throw new E(400, "input_invalid");
-        return json(res, 200, hook.phase === "before" ? { allow: true } : hook.phase === "context" ? { add: { [`${product}.seen`]: true } } : {});
+        return json(res, 200, hook.phase === "before" ? { allow: true, ...(faults.badHookShape ? { tb_extra: 1 } : {}) } : hook.phase === "context" ? { add: { [`${product}.seen`]: true } } : {});
       }
       if (req.method === "POST" && path.startsWith("/tb/v1/bridge/")) {
         const t = trust();

@@ -44,6 +44,8 @@ describe("app target", () => {
     ["stores raw input in receipts", { storesRawInput: true }, ["A4.receipt_digest"]],
     ["ignores personNbf", { ignorePersonNbf: true }, ["A6.person_nbf"]],
     ["has no proof replay set", { noProofReplayGuard: true }, ["C6.call_proof_replay"]],
+    ["does not re-read its slice on a stale companion grant", { noCompanionRetry: true }, ["A12.companion_refresh_retry"]],
+    ["answers a hook with a wrong shape", { badHookShape: true }, ["A2.hook_valid"]],
     ["loses its instance key on restart", { newKeyOnRestart: true }, ["A1.key_persisted", "A7.restart"], 2000],
   ];
   for (const [name, faults, expected, timeoutMs] of cases) {

@@ -136,6 +136,12 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B11.keys_rev": "status answer carries the new keysRev",
     "B11.status_presence": "status report carries presence booleans only",
   }),
+  keys_origin: ids({
+    "B11.main_origin_keys_404": "main origin answers 404 for /keys (C59)",
+    "B11.keys_origin_only": "keys origin serves only /keys, /healthz, /readyz (C59)",
+    "B11.keys_origin_csp": "key page carries CSP form-action 'self' (C59)",
+    "B11.keys_origin_unset_503": "TB_KEYS_PUBLIC_URL unset → /keys 503 key page not configured (C59)",
+  }),
   oauth: ids({
     "B12.metadata": "RFC 9728 + RFC 8414 metadata",
     "B12.www_authenticate": "401 names the resource metadata",

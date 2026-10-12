@@ -1,6 +1,6 @@
 // Bridge target runner (CONFORMANCE §2 "Bridge (deployed form)"): builds the world (fake Portal, fake apps from the
 // example manifests, agents), starts the bridge under test with the BRIDGE §4.1 env (TB_PORTAL_URL, TB_ENROL_CODE,
-// TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) either through `start(env)` (in-process; the CLI's
+// TB_KEK, TB_PUBLIC_URL, TB_KEYS_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) either through `start(env)` (in-process; the CLI's
 // `--start` wraps it in a child process with forkStart) or as a separate
 // process (`cmd`), waits for enrolment and the first applied config, runs every check group and returns the §6 report.
 import { type ChildProcess, spawn } from "node:child_process";
@@ -13,7 +13,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { type BridgeStart, type BridgeStartResult, BridgeWorld } from "./bridge-world.ts";
 import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dynamicChecks, enrolChecks, enrolRequests, hookChecks, mcpChecks, peerCatalog, surfaceChecks } from "./checks/bridge.ts";
 import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
-import { configChecks, keyChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
+import { configChecks, keyChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
 import { spawnCommand } from "./command.ts";
 import { request } from "./http.ts";
@@ -73,7 +73,10 @@ async function waitHttp(url: string, ms: number, alive: () => boolean = () => tr
 /** `cmd` as a separate process (own process group); stdout/stderr captured for the log scan (B11). */
 export function processHarness(cmd: string, logs: { text: string }, echo = false): BridgeStart {
   return async (env) => {
-    const child: ChildProcess = spawnCommand(cmd, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const merged: NodeJS.ProcessEnv = { ...process.env, ...env };
+    // a name the suite removed for this start (B11.keys_origin_unset_503) must not leak in from the parent env
+    if (!("TB_KEYS_PUBLIC_URL" in env)) delete merged.TB_KEYS_PUBLIC_URL;
+    const child: ChildProcess = spawnCommand(cmd, { env: merged, stdio: ["ignore", "pipe", "pipe"], detached: true });
     const take = (d: Buffer) => {
       logs.text += d.toString("utf8");
       if (echo) process.stderr.write(d);
@@ -122,6 +125,7 @@ const RUNNERS: [string[], Group][] = [
   [["companion"], companionChecks],
   [["claim"], claimChecks],
   [["keys"], keyChecks],
+  [["keys_origin"], keysOriginChecks],
   [["oauth"], oauthChecks],
   [["config"], configChecks],
   [["pause.workspace", "pause.agent", "pause.connection", "pause.instance", "revoke"], pauseChecks],
@@ -151,6 +155,10 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
     // advertised public origin: https as in every deployment (TLS terminated in front of PORT; CREDENTIALS §10 `ret`
     // must be https); the suite connects to the plain listener on 127.0.0.1:PORT
     TB_PUBLIC_URL: `https://127.0.0.1:${pub}`,
+    // key page on its own origin (BRIDGE §3.1 v0.1.10, C59): a second host name of the same listener, https like the
+    // main origin (the Secure cookie rule follows it); the suite reaches it as http://localhost:PORT so `Host` carries
+    // the keys host name. A harness's publicUrl must therefore not use the host name localhost.
+    TB_KEYS_PUBLIC_URL: `https://localhost:${pub}`,
     TB_DATA_DIR: dataDir,
     PORT: String(pub),
     TB_INTERNAL_PORT: String(int),
@@ -179,9 +187,14 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
       get env() {
         return env;
       },
-      restart: async (extra: Record<string, string> = {}) => {
+      restart: async (extra: Record<string, string | null> = {}) => {
         await running?.stop();
-        env = { ...env, ...extra };
+        const next: Record<string, string> = { ...env };
+        for (const [k, v] of Object.entries(extra)) {
+          if (v === null) delete next[k];
+          else next[k] = v;
+        }
+        env = next;
         world.env = env;
         running = await start(env);
         world.bridge = running;

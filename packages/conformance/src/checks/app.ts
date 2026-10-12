@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { digest, manifestDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
-import type { CrudAction, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction, Hook, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { AppClient, CallOptions, OpAnswer, PersonSession } from "../app-client.ts";
 import { tamperValue } from "../app-client.ts";
@@ -376,26 +376,58 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     await s.run(id, title, "refused call_proof_invalid", async () => refusedWith(await c().callBridgeOp("scope_summary", {}, { tamper }), PROOF_CODES));
   }
 
-  // ── hooks (B6 app side): only when the manifest declares hooks ──
-  const hook = m.hooks?.[0];
-  const hookCall = (): Record<string, Json> => ({
-    id: newId("call"),
-    ws: b.ids.ws,
-    caller: { type: "agent", id: agentA.id, mode: "free" },
-    target: { instance: newId("ins"), product: "tb-conformance-target", op: "probe_op", crud: ["read"], effect: "read" },
-  });
-  await s.run("A2.hook_valid", "hook call with a valid hook proof", "200 with the phase shape (before {allow}, context {add} keys `<product>.`, after {output?|redactions?})", async () => {
-    if (!hook) return na("manifest declares no hooks");
-    const a = await c().callHook(hook.id, hook.phase, { call: hookCall(), context: {} });
-    if (a.status !== 200 || !isObj(a.body)) return bad(show(a));
-    const body = a.body;
-    const shape =
-      hook.phase === "before"
-        ? typeof body.allow === "boolean"
-        : hook.phase === "context"
-          ? isObj(body.add) && Object.keys(body.add).every((k) => k.startsWith(`${product}.`))
-          : !("allow" in body);
-    return verdict(shape, `${a.status} ${JSON.stringify(Object.keys(body))}`);
+  // ── hooks (B6 app side): EVERY declared hook, called like the bridge calls it for a matching operation ──
+  // The target is taken from the hook's own `match` (product, operation, effect), the call carries an input (so the
+  // proof binds `in`) and the context an unknown namespaced field (CORE §8: context is extensible).
+  const hooks = m.hooks ?? [];
+  const HOOK_INPUT: Json = { probe: "tb-conformance" };
+  const hookReq = (h: Hook): { call: Record<string, Json>; context: Record<string, Json>; output?: Json } => {
+    const effect = h.match.effects?.[0] ?? "write";
+    return {
+      call: {
+        id: newId("call"),
+        ws: b.ids.ws,
+        caller: { type: "agent", id: agentA.id, mode: "free" },
+        target: {
+          instance: newId("ins"),
+          product: h.match.products.find((x) => x !== "*") ?? "tb-conformance-target",
+          op: h.match.operations?.[0] ?? "probe_op",
+          crud: effect === "read" ? ["read"] : ["create"],
+          effect,
+        },
+        input: HOOK_INPUT,
+      },
+      context: { "tb-conformance.probe": true },
+      ...(h.phase === "after" ? { output: { probe: "tb-conformance" } } : {}),
+    };
+  };
+  /** The phase's response shape (BRIDGE §8.2, spec bridge.ts HookResponseByPhase) or the first violation. */
+  const hookShapeProblem = (h: Hook, body: unknown): string | null => {
+    if (!isObj(body)) return "not an object";
+    const keys = Object.keys(body);
+    const allowed = h.phase === "before" ? ["allow", "reason"] : h.phase === "context" ? ["add"] : ["output", "redactions"];
+    const extra = keys.filter((k) => !allowed.includes(k));
+    if (extra.length) return `unexpected keys ${extra.join(",")}`;
+    if (h.phase === "before") return typeof body.allow !== "boolean" ? "allow not boolean" : body.reason !== undefined && typeof body.reason !== "string" ? "reason not a string" : null;
+    if (h.phase === "context") {
+      if (!isObj(body.add)) return "add not an object";
+      const off = Object.keys(body.add).filter((k) => !k.startsWith(`${product}.`));
+      return off.length ? `context keys without "${product}.": ${off.join(",")}` : null;
+    }
+    const r = body.redactions;
+    return r !== undefined && !(Array.isArray(r) && r.every((x) => typeof x === "string" && (x === "" || x.startsWith("/")))) ? "redactions not JSON pointers" : null;
+  };
+  await s.run("A2.hook_valid", "every declared hook answers a valid hook call", "each hook: 200 with its phase shape (before {allow, reason?}, context {add} keys `<product>.`, after {output?, redactions?: JSON pointers})", async () => {
+    if (hooks.length === 0) return na("manifest declares no hooks");
+    const seen: string[] = [];
+    let pass = true;
+    for (const h of hooks) {
+      const a = await c().callHook(h.id, h.phase, hookReq(h));
+      const problem = a.status !== 200 ? show(a) : hookShapeProblem(h, a.body);
+      pass &&= problem === null;
+      seen.push(`${h.id} (${h.phase}, order ${h.order}): ${problem ?? `200 ${JSON.stringify(Object.keys(a.body as object))}`}`);
+    }
+    return verdict(pass, seen.join("; "));
   });
   // SPEC-GAP: SDK-API §3.2 names `call_proof_invalid` for /tb/v1/ops only; the same code is expected on hook and bridge-op routes.
   for (const [id, title, tamper] of [
@@ -403,12 +435,33 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     ["A2.hook_wrong_phase", "hook proof for another phase", "phase"],
     ["A2.hook_op_proof", "op proof presented at a hook route", "op_proof"],
     ["A2.hook_tampered_context", "hook context changed after signing", "context"],
+    ["A2.hook_tampered_input", "hook call input changed after signing (proof `in`)", "input"],
+    ["C5.hook_proof_unannounced_kid", "hook proof signed by a key not in slice bridge.keys", "proof_key"],
   ] as const) {
-    await s.run(id, title, "refused call_proof_invalid", async () => {
-      if (!hook) return na("manifest declares no hooks");
-      return refusedWith(await c().callHook(hook.id, hook.phase, { call: hookCall(), context: {} }, { tamper }), PROOF_CODES);
+    await s.run(id, title, "refused call_proof_invalid at every declared hook", async () => {
+      if (hooks.length === 0) return na("manifest declares no hooks");
+      const seen: string[] = [];
+      for (const h of hooks) {
+        const o = refusedWith(await c().callHook(h.id, h.phase, hookReq(h), { tamper }), PROOF_CODES);
+        seen.push(`${h.id}: ${o.asserted}`);
+        if (!o.pass) return bad(seen.join("; "));
+      }
+      return ok(seen.join("; "));
     });
   }
+  await s.run("C6.hook_proof_replay", "hook proof one-time (replay set)", "the same hook request sent twice → second refused call_proof_invalid", async () => {
+    const h = hooks[0];
+    if (!h) return na("manifest declares no hooks");
+    const first = await c().callHook(h.id, h.phase, hookReq(h));
+    if (first.status !== 200) return bad(`first call ${show(first)}`);
+    return refusedWith(await c().resend(first), PROOF_CODES);
+  });
+  await s.run("A2.hook_unknown", "undeclared hook id", "a valid hook proof for an undeclared hook id → 404 unknown_hook", async () => {
+    const h = hooks[0];
+    if (!h) return na("manifest declares no hooks");
+    const a = await c().callHook("tb_conformance_undeclared", h.phase, hookReq(h));
+    return verdict(a.status === 404 && a.code === "unknown_hook", show(a));
+  });
 
   // ── A3 authorize() ──
   await s.run("A3.audience", "person-audience ops unreachable on the agent route", "a person op at /tb/v1/ops → refused audience_not_agent", async () => {
@@ -511,6 +564,75 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const op = byRank(agentOps.filter((o) => o.idempotency === "required"))[0];
     if (!op) return na("no op with idempotency required");
     return refusedWith(await c().callOp(op.id, inputFor(op), holdOpts(op)), ["idempotency_key_required"]);
+  });
+
+  // ── A12 companion calls (SDK-API §9 "Companion call", BRIDGE §8.3): only when the manifest declares companions ──
+  // SPEC-GAP: CONFORMANCE §4.5 has no app-side companion check (A1–A11); A12 asserts the SDK-API §9 rules on the calls
+  // the app makes while the checks above run its agent ops (or, if none did, one call per reachable agent op).
+  const companions = m.companions ?? [];
+  let companionOp: { op: Operation; input: Json } | null = null;
+  const findCompanionOp = async (): Promise<void> => {
+    if (companionOp || companions.length === 0) return;
+    for (const op of byRank(agentOps.filter((o) => o.effect !== "money"))) {
+      const before = b.companionCalls.length;
+      const input = inputFor(op);
+      const a = track(await c().callOp(op.id, input, { idempotencyKey: idemKey(op) }));
+      if (b.companionCalls.length > before && isOk(a)) {
+        companionOp = { op, input };
+        return;
+      }
+    }
+  };
+  await s.run("A12.companion_inbound", "a companion app calls this app (inbound app→app)", "op call with a bound companion grant (sub tb:ins:<other app>, wf = [op]) and its proof → runs (200 ok / 202 held; a scoped op may answer scope_denied), never an auth refusal", async () => {
+    const op = [...agentOps].filter((o) => o.effect !== "money").sort((x, y) => Number(!!x.scopeType) - Number(!!y.scopeType) || Number(x.effect === "read") - Number(y.effect === "read"))[0];
+    if (!op) return na("no agent operation");
+    const peer = newId("ins") as `ins_${string}`;
+    const a = track(await c().callOp(op.id, inputFor(op), { caller: peer, idempotencyKey: idemKey(op) }));
+    const pass = isOk(a) || isHeld(a) || (!!op.scopeType && a.code === "scope_denied");
+    return verdict(pass, `${op.id} from tb:ins:${peer.slice(0, 12)}…: ${show(a)}`);
+  });
+  await s.run("A12.companion_call", "app→app call through the bridge with the companion grant", "POST /tb/v1/call: TB-Assert valid, TB-Grant = the slice's companion grant (sub self, aud target, mode bound, wf = declared ops), target/op declared in companions[], parentCall = the running call's id; the op answers ok", async () => {
+    if (companions.length === 0) return na("manifest declares no companions");
+    await findCompanionOp();
+    if (b.companionCalls.length === 0) return na("no agent op made a companion call with the generated inputs (companion use from person ops or jobs is not observable here); supply an inputs fixture");
+    const parents = new Set(okAnswers.map((a) => a.callId).filter((x): x is string => !!x));
+    const problems: string[] = [];
+    for (const k of b.companionCalls) {
+      const decl = companions.find((x) => x.product === k.envelope.target);
+      const g = peek(k.grant) as { sub?: string; aud?: string; mode?: string; wf?: string[] } | null;
+      const where = `${k.envelope.target}.${k.envelope.op}`;
+      if (!decl?.operations.includes(k.envelope.op)) problems.push(`${where} not declared`);
+      if (k.caller !== b.ids.ins) problems.push(`${where} asserted by ${k.caller}`);
+      if (g?.sub !== `tb:ins:${b.ids.ins}` || g?.aud !== `tb:ins:${b.ids.peers[k.envelope.target]}` || g?.mode !== "bound") problems.push(`${where} grant sub/aud/mode ${g?.sub}/${g?.aud}/${g?.mode}`);
+      if (decl && [...(g?.wf ?? [])].sort().join(",") !== [...decl.operations].sort().join(",")) problems.push(`${where} grant wf ${String(g?.wf)}`);
+      if (!k.envelope.parentCall || !parents.has(k.envelope.parentCall)) problems.push(`${where} parentCall ${String(k.envelope.parentCall)} is not a call the app answered ok`);
+    }
+    const first = b.companionCalls[0];
+    return verdict(
+      problems.length === 0,
+      problems.length ? problems.slice(0, 4).join("; ") : `${b.companionCalls.length} calls, e.g. ${first.envelope.target}.${first.envelope.op} (parentCall ${first.envelope.parentCall}, idempotencyKey ${first.envelope.idempotencyKey ? "sent" : "none"}); grants and envelopes ok`,
+    );
+  });
+  await s.run("A12.companion_refresh_retry", "companion grant_stale → re-read the slice once and retry", "bridge refuses once with grant_stale → the SDK retries once and the op answers ok; refused twice → the op fails after exactly 2 attempts (no loop)", async () => {
+    if (companions.length === 0) return na("manifest declares no companions");
+    await findCompanionOp();
+    if (!companionOp) return na("no agent op made a companion call with the generated inputs; supply an inputs fixture");
+    const { op, input } = companionOp as { op: Operation; input: Json };
+    const attempts = () => b.companionCalls.length + b.companionRefusals.length;
+    // SPEC-GAP: SDK-API §9 names `grant_stale`, BRIDGE §8.4 does not list it (it lists grant_expired, which the SDK treats the same).
+    b.control.refuseNextCompanionCalls([{ status: 403, code: "grant_stale" }]);
+    let n0 = attempts();
+    const once = track(await c().callOp(op.id, input, { idempotencyKey: idemKey(op) }));
+    const onceAttempts = attempts() - n0;
+    b.control.refuseNextCompanionCalls([
+      { status: 403, code: "grant_stale" },
+      { status: 403, code: "grant_stale" },
+    ]);
+    n0 = attempts();
+    const twice = await c().callOp(op.id, input, { idempotencyKey: idemKey(op) });
+    const twiceAttempts = attempts() - n0;
+    b.companionRefuseQueue.length = 0;
+    return verdict(isOk(once) && onceAttempts === 2 && !isOk(twice) && twiceAttempts === 2, `${op.id}: refused once → ${show(once)} after ${onceAttempts} attempts; refused twice → ${show(twice)} after ${twiceAttempts} attempts`);
   });
 
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──

@@ -148,7 +148,7 @@ export async function enrolChecks(c: BridgeCtx): Promise<void> {
   });
   await c.run("C8.env", "bridge runs with no secret env but its enrolment code and TB_KEK", "the bridge enrolled and served with env secrets limited to TB_ENROL_CODE and TB_KEK", () => {
     const names = Object.keys(c.h.env).sort();
-    const allowed = new Set(["TB_PORTAL_URL", "TB_ENROL_CODE", "TB_KEK", "TB_PUBLIC_URL", "TB_DATA_DIR", "PORT", "TB_INTERNAL_PORT", "TB_LOG_LEVEL"]);
+    const allowed = new Set(["TB_PORTAL_URL", "TB_ENROL_CODE", "TB_KEK", "TB_PUBLIC_URL", "TB_KEYS_PUBLIC_URL", "TB_DATA_DIR", "PORT", "TB_INTERNAL_PORT", "TB_LOG_LEVEL"]);
     const extra = names.filter((n) => !allowed.has(n));
     return verdict(extra.length === 0 && c.w.portal.acks.length > 0, `env names: ${names.join(", ")}${extra.length ? `; unexpected ${extra.join(",")}` : ""}`);
   });

@@ -54,12 +54,26 @@ export interface CallOptions {
   grantKey?: Ed25519KeyPair;
 }
 
+export interface SentRequest {
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+}
+
 export interface OpAnswer extends HttpAnswer {
   code: string | null;
   grant: string;
   proof: string;
   callId: string | null;
-  sent: { path: string; headers: Record<string, string>; body: string };
+  sent: SentRequest;
+}
+
+/** One named deviation from a correct hook call (negative cases); `input` changes `call.input` after signing. */
+export type HookTamper = "no_proof" | "proof_key" | "phase" | "context" | "input" | "op_proof";
+
+export interface HookAnswer extends HttpAnswer {
+  code: string | null;
+  sent: SentRequest;
 }
 
 export interface PersonSession {
@@ -203,8 +217,8 @@ export class AppClient {
     return { ...a, code: errorCode(a.body), grant, proof: proof ?? "", callId: proof ? String(peek(proof)?.call ?? "") : null, sent: { path, headers, body } };
   }
 
-  /** Re-sends an earlier op request byte for byte (proof replay, C6). */
-  async resend(prev: OpAnswer): Promise<OpAnswer> {
+  /** Re-sends an earlier op or hook request byte for byte (proof replay, C6). */
+  async resend<T extends HttpAnswer & { code: string | null; sent: SentRequest }>(prev: T): Promise<T> {
     const a = await this.#send("POST", prev.sent.path, prev.sent.headers, prev.sent.body);
     return { ...prev, ...a, code: errorCode(a.body) };
   }
@@ -214,14 +228,15 @@ export class AppClient {
     hookId: string,
     phase: HookPhase,
     req: { call: Record<string, Json>; context?: Record<string, Json>; output?: Json },
-    opts: { tamper?: "no_proof" | "proof_key" | "phase" | "context" | "op_proof" } = {},
-  ): Promise<HttpAnswer & { code: string | null }> {
+    opts: { tamper?: HookTamper } = {},
+  ): Promise<HookAnswer> {
     const b = this.#b;
     const context = req.context ?? {};
     const sub = `tb:agt:${b.ids.agents[0].id}`;
     const aud = `tb:ins:${b.ids.ins}` as const;
     const t = opts.tamper;
-    const body: Record<string, Json> = { phase, call: req.call, context: t === "context" ? { ...context, "tb-conformance.tampered": true } : context };
+    const call = t === "input" && req.call.input !== undefined ? { ...req.call, input: tamperValue(req.call.input) } : req.call;
+    const body: Record<string, Json> = { phase, call, context: t === "context" ? { ...context, "tb-conformance.tampered": true } : context };
     if (phase === "after") body.output = req.output ?? {};
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (t !== "no_proof") {
@@ -238,8 +253,10 @@ export class AppClient {
               ...(t === "proof_key" ? { key: b.stranger } : {}),
             });
     }
-    const a = await this.#send("POST", `/tb/v1/hooks/${encodeURIComponent(hookId)}`, headers, JSON.stringify(body));
-    return { ...a, code: errorCode(a.body) };
+    const path = `/tb/v1/hooks/${encodeURIComponent(hookId)}`;
+    const raw = JSON.stringify(body);
+    const a = await this.#send("POST", path, headers, raw);
+    return { ...a, code: errorCode(a.body), sent: { path, headers, body: raw } };
   }
 
   // ── bridge ops (C16 B5) ─────────────────────────────────────────────────────

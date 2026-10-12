@@ -242,6 +242,19 @@ export class BridgeWorld {
   get advertisedUrl(): string {
     return this.env.TB_PUBLIC_URL ?? this.publicUrl;
   }
+  /** advertised keys origin (TB_KEYS_PUBLIC_URL, BRIDGE §3.1 v0.1.10 / C59); "" when unset */
+  get keysAdvertisedUrl(): string {
+    return this.env.TB_KEYS_PUBLIC_URL ?? "";
+  }
+  /** origin the suite connects to for the key page: the public listener reached under the keys host name, so the
+   * request `Host` is the keys origin's host name (fetch derives `Host` from the URL and never lets a caller set it) */
+  get keysUrl(): string {
+    const adv = this.keysAdvertisedUrl;
+    if (!adv || !this.publicUrl) return "";
+    const u = new URL(this.publicUrl);
+    u.hostname = new URL(adv).hostname;
+    return u.origin;
+  }
   get internalUrl(): string {
     return this.bridge?.internalUrl ?? "";
   }

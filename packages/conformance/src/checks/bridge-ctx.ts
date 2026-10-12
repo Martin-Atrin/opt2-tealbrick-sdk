@@ -20,8 +20,9 @@ export interface BridgeHarness {
   world: BridgeWorld;
   /** env the bridge under test was started with (names checked by C8; values never reported) */
   env: Record<string, string>;
-  /** stops and restarts the bridge on the same data dir with `extra` env merged (B2 re-enrolment) */
-  restart?: (extra?: Record<string, string>) => Promise<void>;
+  /** stops and restarts the bridge on the same data dir with `extra` env merged (B2 re-enrolment); a `null` value
+   * removes that name from the env (B11.keys_origin_unset_503) */
+  restart?: (extra?: Record<string, string | null>) => Promise<void>;
   /** captured stdout/stderr of the bridge process; null when the harness cannot capture logs */
   logs: () => string | null;
   dataDir: string;
@@ -98,6 +99,10 @@ export class BridgeCtx {
   local(url: string): string {
     const u = new URL(url);
     return u.origin === new URL(this.adv).origin ? `${this.pub}${u.pathname}${u.search}` : url;
+  }
+  /** origin the suite connects to for the key page (keys origin host name, TB_KEYS_PUBLIC_URL; C59) */
+  get keysPub(): string {
+    return this.w.keysUrl;
   }
   get int(): string {
     return this.w.internalUrl;
@@ -258,8 +263,12 @@ export class BridgeCtx {
   post(path: string, body: string, headers: Record<string, string> = {}, base = this.pub): Promise<HttpAnswer> {
     return request(`${base}${path}`, { method: "POST", headers, body });
   }
-  form(path: string, fields: Record<string, string>, headers: Record<string, string> = {}): Promise<HttpAnswer> {
-    return request(`${this.pub}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(fields).toString() });
+  form(path: string, fields: Record<string, string>, headers: Record<string, string> = {}, base = this.pub): Promise<HttpAnswer> {
+    return request(`${base}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(fields).toString() });
+  }
+  /** keys-ticket form POST to the key page on the keys origin (BRIDGE §9.3, C59) */
+  keysForm(ticket: string): Promise<HttpAnswer> {
+    return this.form("/keys", { ticket }, {}, this.keysPub);
   }
   mcpWith(bearer: string): Promise<HttpAnswer> {
     const body = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "tb-conformance", version: "0.1.0" } } };

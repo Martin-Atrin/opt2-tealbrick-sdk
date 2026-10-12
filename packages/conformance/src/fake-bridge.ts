@@ -126,7 +126,10 @@ export class FakeBridge {
   readonly statuses: StatusSeen[] = [];
   readonly keyFetches: { name: string; ins: InstanceId; at: number }[] = [];
   readonly violations: Violation[] = [];
-  readonly companionCalls: { envelope: CallEnvelope; caller: InstanceId; answer: number; at: number }[] = [];
+  readonly companionCalls: { envelope: CallEnvelope; caller: InstanceId; answer: number; at: number; grant: string }[] = [];
+  /** companion calls refused on purpose by `control.refuseNextCompanionCalls` (the SDK's refresh-and-retry path) */
+  readonly companionRefusals: { envelope: CallEnvelope; caller: InstanceId; code: string; at: number }[] = [];
+  companionRefuseQueue: { status: number; code: string }[] = [];
   /** the first K6 for the app instance (`TB_ENROL_CODE`) */
   readonly enrolCode: string;
   url = "";
@@ -467,6 +470,11 @@ export class FakeBridge {
     if (this.configExpired) throw new HttpError(503, "config_expired", "signed config older than 12 h");
     const grant = header(req, BRIDGE_HEADERS.companionGrant) ?? "";
     if (peek(grant)?.sub !== `tb:ins:${who.ins}`) throw new HttpError(403, "grant_invalid", "companion grant subject is not the asserting instance");
+    const refuse = this.companionRefuseQueue.shift();
+    if (refuse) {
+      this.companionRefusals.push({ envelope: env as CallEnvelope, caller: who.ins, code: refuse.code, at: Date.now() });
+      throw new HttpError(refuse.status, refuse.code, "companion call refused by the control API");
+    }
     const op: OperationView = {
       standard: false,
       id: env.op,
@@ -500,7 +508,7 @@ export class FakeBridge {
       throw new HttpError(502, "hook_failed", `${h.phase} hook failed (fail closed)`);
     }
     const answer = await this.companionResponder(env as CallEnvelope, who.ins);
-    this.companionCalls.push({ envelope: env as CallEnvelope, caller: who.ins, answer: answer.status === "held" ? 202 : 200, at: Date.now() });
+    this.companionCalls.push({ envelope: env as CallEnvelope, caller: who.ins, answer: answer.status === "held" ? 202 : 200, at: Date.now(), grant });
     sendJson(res, answer.status === "held" ? 202 : 200, answer);
   }
 }
@@ -603,6 +611,10 @@ export class FakeBridgeControl {
   }
   setCompanionResponder(fn: CompanionResponder): void {
     this.#b.companionResponder = fn;
+  }
+  /** The next `refusals.length` companion calls (after the instance assertion and grant subject check) are refused in order. */
+  refuseNextCompanionCalls(refusals: { status: number; code: string }[]): void {
+    this.#b.companionRefuseQueue.push(...refusals);
   }
   waitForClaim(timeoutMs = 20_000): Promise<ClaimSeen> {
     return this.#b.waitForClaim(timeoutMs);

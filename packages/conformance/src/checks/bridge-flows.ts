@@ -109,8 +109,8 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
   const redeem = async (b: Browser, ticket: string) => {
     c.secrets.tickets.add(ticket);
     // SPEC-GAP: BRIDGE §9.3 names no form field for the keys ticket; `ticket` (the launch redeemer's field) is used.
-    const a = await b.post(`${c.pub}/keys`, { ticket });
-    return { a, page: await b.follow(c.pub, a, c.adv) };
+    const a = await b.post(`${c.keysPub}/keys`, { ticket });
+    return { a, page: await b.follow(c.keysPub, a, c.w.keysAdvertisedUrl) };
   };
   const redeemed = (r: { a: HttpAnswer; page: HttpAnswer }, b: Browser) => (r.a.status === 200 || (r.a.status >= 300 && r.a.status < 400)) && b.jar.size > 0 && r.page.status === 200;
   const refusedTicket = async (ticket: string): Promise<Outcome> => {
@@ -119,7 +119,7 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
     return verdict(!redeemed(r, b) && r.a.status >= 400 && r.a.status < 500, `${r.a.status}; session cookie ${b.jar.size ? "SET" : "none"}`);
   };
   await c.run("B11.ticket_required", "key page needs a keys ticket", "GET /keys without a session → 4xx (or a page without the key list)", async () => {
-    const a = await c.get("/keys");
+    const a = await c.get("/keys", {}, c.keysPub);
     return verdict(a.status >= 400 || !a.text.includes(key.name), `${a.status}${a.text.includes(key.name) ? " lists keys" : ""}`);
   });
   await c.run("C3.launch_ticket_at_keys", "launch ticket refused at the key page", "4xx, no session", async () => refusedTicket(await c.w.launchTicket(p)));
@@ -134,7 +134,7 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
     if (fine) c.evidence.set("K11", "keys ticket redeemed");
     return verdict(fine, `${r.a.status} → page ${r.page.status}; cookies ${b.jar.size}`);
   });
-  const https = c.adv.startsWith("https:");
+  const https = c.w.keysAdvertisedUrl.startsWith("https:");
   await c.run("B11.cookie_flags", "key-page cookie: HttpOnly, Secure, SameSite=Strict, Path=/keys", `Set-Cookie with HttpOnly, SameSite=Strict, Path=/keys${https ? ", Secure" : " (Secure not required: the advertised public URL of this run is http)"}`, () => {
     const sc = b.setCookies[0] ?? "";
     const has = (re: RegExp) => re.test(sc);
@@ -159,7 +159,7 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
     if (!form) return bad(`no form for ${key.name} on the page (${forms.length} POST forms)`);
     const field = form.visible.find((v) => v.includes(key.name)) ?? (form.visible[0] as string);
     const csrf = Object.entries(form.fields).find(([k]) => /csrf/i.test(k))?.[1];
-    submitted = await b.submit(c.pub, form, { [field]: value }, csrf ? { [BRIDGE_HEADERS.csrf]: csrf } : {});
+    submitted = await b.submit(c.keysPub, form, { [field]: value }, csrf ? { [BRIDGE_HEADERS.csrf]: csrf } : {});
     const f = await c.until(async () => {
       const a = await p.fetchKey(key.name);
       return a.status === 200 ? a : null;
@@ -170,7 +170,7 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
     return verdict(fine, `submit ${(submitted as HttpAnswer).status}; fetch ${a ? `200 value ${body.value === value ? "=" : "≠"}, keysRev ${String(body.keysRev)}, cache-control ${a.headers.get("cache-control")}` : "never 200"}`);
   });
   await c.run("B11.never_echoed", "values never echoed to the browser", "submit answer and the page afterwards carry no value", async () => {
-    const after = await b.get(`${c.pub}/keys`);
+    const after = await b.get(`${c.keysPub}/keys`);
     const s = submitted as HttpAnswer | null;
     return verdict(!!s && !s.text.includes(value) && !after.text.includes(value), `submit ${s ? (s.text.includes(value) ? "ECHOES" : "clean") : "not sent"}; page ${after.text.includes(value) ? "ECHOES" : "clean"}`);
   });
@@ -184,6 +184,95 @@ export async function keyChecks(c: BridgeCtx): Promise<void> {
     const entries = got.value?.keys ?? [];
     const extra = entries.filter((k) => Object.keys(k).sort().join(",") !== "ins,name,set");
     return verdict(!!got.value && extra.length === 0, `${got.value ? "set: true reported" : "not reported"}; entries with other fields ${extra.length}`);
+  });
+}
+
+// ── B11b key page on its own origin (BRIDGE §3.1 / §9.3 v0.1.10, C59) ──────────
+/** `form-action` of a CSP header is exactly `'self'` */
+export function cspFormActionSelf(csp: string | null): boolean {
+  const d = (csp ?? "")
+    .split(";")
+    .map((x) => x.trim().split(/\s+/))
+    .find((x) => x[0]?.toLowerCase() === "form-action");
+  return !!d && d.length === 2 && d[1] === "'self'";
+}
+
+export async function keysOriginChecks(c: BridgeCtx): Promise<void> {
+  if (!c.on("keys_origin")) return;
+  const p = c.primary;
+  const keysPub = c.keysPub;
+  if (!keysPub) {
+    for (const x of ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"]) c.s.record(x, "key page origin", "TB_KEYS_PUBLIC_URL set by the suite", bad("no keys origin in the bridge env"));
+    return;
+  }
+  if (new URL(keysPub).hostname === new URL(c.pub).hostname) {
+    for (const x of ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"]) c.s.record(x, "key page origin", "the harness public URL differs in host name from the keys origin", bad(`harness publicUrl ${c.pub} uses the keys host name`));
+    return;
+  }
+  const ticket = async () => {
+    const t = await c.w.keysTicket();
+    c.secrets.tickets.add(t);
+    return t;
+  };
+  await c.run("B11.main_origin_keys_404", "main origin answers 404 for /keys (C59)", "GET /keys and a valid keys-ticket POST /keys on the main origin (TB_PUBLIC_URL host) → 404, no session cookie", async () => {
+    const g = await c.get("/keys");
+    const f = await c.form("/keys", { ticket: await ticket() });
+    const cookie = f.headers.getSetCookie?.().length ?? 0;
+    return verdict(g.status === 404 && f.status === 404 && cookie === 0, `GET ${g.status}; ticket POST ${f.status}; cookies ${cookie}`);
+  });
+  await c.run("B11.keys_origin_only", "keys origin serves only /keys, /healthz, /readyz (C59)", "on the keys origin: /a/*, /mcp, /oauth/*, OAuth metadata, /p/* → 404 (a launch ticket reaches no app); /healthz and /readyz → 200", async () => {
+    const route = p.manifest.publicRoutes?.[0];
+    const probes: [string, string, Record<string, string> | null][] = [
+      ["GET", `/a/${p.product}/`, null],
+      ["POST", `/a/${p.product}/tb/launch`, { ticket: await c.w.launchTicket(p) }],
+      ["POST", "/mcp", null],
+      ["GET", "/oauth/authorize", null],
+      ["POST", "/oauth/token", { grant_type: "client_credentials" }],
+      ["POST", "/oauth/register", null],
+      ["GET", "/.well-known/oauth-authorization-server", null],
+      ["GET", "/.well-known/oauth-protected-resource", null],
+      ...(route ? [[route.purpose === "webhook" ? "POST" : "GET", `/p/${p.product}${route.path}`, null] as [string, string, null]] : []),
+    ];
+    const s0 = c.w.seqNow();
+    const seen: string[] = [];
+    for (const [m, path, fields] of probes) {
+      const a = m === "GET" ? await c.get(path, {}, keysPub) : fields ? await c.form(path, fields, {}, keysPub) : await c.post(path, "{}", { "content-type": "application/json" }, keysPub);
+      seen.push(`${m} ${path} ${a.status}`);
+    }
+    const reached = c.everyApp(s0).length;
+    const h = await c.get("/healthz", {}, keysPub);
+    const r = await c.get("/readyz", {}, keysPub);
+    const fine = seen.every((x) => x.endsWith(" 404")) && reached === 0 && h.status === 200 && r.status === 200;
+    return verdict(fine, `${seen.join("; ")}; apps reached ${reached}; healthz ${h.status}, readyz ${r.status}`);
+  });
+  await c.run("B11.keys_origin_csp", "key page carries CSP form-action 'self' (C59)", "keys-ticket POST answer (200) and the session page GET carry Content-Security-Policy with form-action 'self'", async () => {
+    const t = await ticket();
+    const post = await request(`${keysPub}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket: t }).toString() });
+    const cookie = (post.headers.getSetCookie?.() ?? []).map((x) => x.split(";")[0]).join("; ");
+    const page = cookie ? await request(`${keysPub}/keys`, { headers: { cookie } }) : null;
+    const a = cspFormActionSelf(post.headers.get("content-security-policy"));
+    const b = !!page && cspFormActionSelf(page.headers.get("content-security-policy"));
+    return verdict(post.status === 200 && a && !!page && page.status === 200 && b, `ticket POST ${post.status} form-action 'self' ${a}; page ${page ? `${page.status} form-action 'self' ${b}` : "no session cookie"}`);
+  });
+  await c.run("B11.keys_origin_unset_503", "TB_KEYS_PUBLIC_URL unset → /keys 503 key page not configured (C59)", "bridge restarted without TB_KEYS_PUBLIC_URL: /keys → 503 'key page not configured' on the main origin and the keys host name; after a restart with the env back the keys origin is no longer 503", async () => {
+    const restart = c.h.restart;
+    if (!restart) return notRun("the bridge cannot be restarted in this mode");
+    const keep = c.h.env.TB_KEYS_PUBLIC_URL as string;
+    let main: HttpAnswer;
+    let keys: HttpAnswer;
+    try {
+      await restart({ TB_KEYS_PUBLIC_URL: null });
+      c.dropSessions();
+      main = await c.get("/keys");
+      keys = await c.get("/keys", {}, keysPub);
+    } finally {
+      await restart({ TB_KEYS_PUBLIC_URL: keep });
+      c.dropSessions();
+    }
+    const back = (await c.get("/keys", {}, keysPub)).status;
+    const says = (a: HttpAnswer) => /key page not configured/i.test(a.text);
+    const fine = main.status === 503 && keys.status === 503 && says(main) && says(keys) && back !== 503;
+    return verdict(fine, `main ${main.status}${says(main) ? "" : " (no 'key page not configured')"}; keys host ${keys.status}${says(keys) ? "" : " (no 'key page not configured')"}; after restoring the env /keys ${back}`);
   });
 }
 
@@ -564,7 +653,7 @@ export async function pauseChecks(c: BridgeCtx): Promise<void> {
   const keysPage = async () => {
     const t = await c.w.keysTicket();
     c.secrets.tickets.add(t);
-    return c.form("/keys", { ticket: t });
+    return c.keysForm(t);
   };
   const restore = async (label: string) => {
     await c.apply();
@@ -784,7 +873,7 @@ export async function portalDownChecks(c: BridgeCtx): Promise<void> {
   await c.run("B4.keys_page_up", "config older than 12 h: key page stays up", "keys ticket redeemed", need(async () => {
     const t = await c.w.keysTicket();
     c.secrets.tickets.add(t);
-    const a = await c.form("/keys", { ticket: t });
+    const a = await c.keysForm(t);
     return verdict(a.status === 200 || (a.status >= 300 && a.status < 400), `${a.status}`);
   }));
   await c.run("B4.app_paths_up", "config older than 12 h: key fetch and status stay up", "key fetch not refused config_expired; status 2xx", need(async () => {
@@ -885,7 +974,7 @@ export async function standaloneChecks(c: BridgeCtx): Promise<void> {
   await c.run("B14.portal_tokens_refused", "Portal-signed tokens refused after handover", "Portal pairing code → no code; Portal keys ticket → 4xx; Portal launch ticket → 4xx, app not reached", async () => {
     const pc = await pasteOnce(c, await c.w.pairingCode("pairing"));
     const kt = await c.w.keysTicket();
-    const k = await c.form("/keys", { ticket: kt });
+    const k = await c.keysForm(kt);
     const lt = await c.w.launchTicket(p);
     const s0 = c.w.seqNow();
     const l = await c.form(`/a/${p.product}/tb/launch`, { ticket: lt });
@@ -929,7 +1018,7 @@ export async function standaloneChecks(c: BridgeCtx): Promise<void> {
     if (!t) return bad(`${a.status}: no ticket in the answer`);
     c.secrets.tickets.add(t);
     const v = verifyKeysTicket(t, { now: nowS(), self: brg, ws: c.w.ws, issuers: c.bridgeKeys() });
-    const k = await c.form("/keys", { ticket: t });
+    const k = await c.keysForm(t);
     return verdict(v.ok && (k.status === 200 || (k.status >= 300 && k.status < 400)), `${a.status}; ticket ${v.ok ? "verifies with the bridge key" : v.reason}; key page ${k.status}`);
   });
   await c.run("B14.admin_revoke_connection", "admin revoke-connection: its K5 stops at once", "the revoked connection's K5 → 401; other connections work", async () => {

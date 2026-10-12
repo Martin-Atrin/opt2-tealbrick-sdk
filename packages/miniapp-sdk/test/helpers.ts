@@ -140,6 +140,10 @@ export class FakeBridge {
   claims = 0;
   instanceKey: import("@opt2-tealbrick/spec/credentials").Ed25519PublicJwk | null = null;
   statuses: Record<string, unknown>[] = [];
+  /** companion calls seen at POST /tb/v1/call */
+  calls: { body: Record<string, unknown>; grant: string; assert: string }[] = [];
+  /** answer of POST /tb/v1/call (default: ok) */
+  onCall: (body: Record<string, unknown>) => { status: number; body: unknown } = () => ({ status: 200, body: { status: "ok", output: { done: true } } });
   #slice: string | null = null;
   #rev = 0;
   #waiting: ServerResponse[] = [];
@@ -179,6 +183,17 @@ export class FakeBridge {
       this.instanceKey = body?.instancePublicKey ?? null;
       res.writeHead(200, { "content-type": "application/json" });
       return void res.end(JSON.stringify({ ins: this.w.ins, bridge: { id: this.w.brg, publicKey: this.w.bridgeKey.publicJwk, internalUrl: `http://127.0.0.1:${this.port}` }, slice: this.#slice, _code: body?.code ? "seen" : "none" }));
+    }
+    if (url.pathname === "/tb/v1/call") {
+      const assertion = String(req.headers["tb-assert"] ?? "");
+      if (!assertion) {
+        res.writeHead(401);
+        return void res.end();
+      }
+      this.calls.push({ body, grant: String(req.headers["tb-grant"] ?? ""), assert: assertion });
+      const a = this.onCall(body);
+      res.writeHead(a.status, { "content-type": "application/json" });
+      return void res.end(JSON.stringify(a.body));
     }
     if (url.pathname === "/tb/v1/status") {
       if (!req.headers["tb-assert"]) {

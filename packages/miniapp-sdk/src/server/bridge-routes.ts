@@ -38,6 +38,27 @@ async function withTimeout<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   ]);
 }
 
+const HOOK_RESPONSE_KEYS: Record<HookRequest["phase"], readonly string[]> = { before: ["allow", "reason"], context: ["add"], after: ["output", "redactions"] };
+
+/** The phase's response shape (spec bridge.ts `HookResponseByPhase`), or why the answer violates it. */
+function hookResponseProblem(phase: HookRequest["phase"], out: unknown, product: string): string | null {
+  if (!isObj(out)) return "hook returned no object";
+  const extra = Object.keys(out).filter((k) => !HOOK_RESPONSE_KEYS[phase].includes(k));
+  if (extra.length) return `${phase} hook returned unknown keys ${extra.join(", ")}`;
+  if (phase === "before") {
+    if (typeof out.allow !== "boolean") return "before hook must return { allow }";
+    if (out.reason !== undefined && typeof out.reason !== "string") return "before hook reason must be a string";
+    return null;
+  }
+  if (phase === "context") {
+    const add = out.add;
+    return !isObj(add) || Object.keys(add).some((k) => !k.startsWith(`${product}.`)) ? `context keys must start with "${product}."` : null;
+  }
+  const red = out.redactions;
+  if (red !== undefined && !(Array.isArray(red) && red.every((p) => typeof p === "string" && (p === "" || p.startsWith("/"))))) return "after hook redactions must be JSON pointers";
+  return null;
+}
+
 // ── POST /tb/v1/hooks/:hookId ────────────────────────────────────────────────
 export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerResponse, hookId: string): Promise<void> {
   const rid = requestId();
@@ -59,12 +80,8 @@ export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerR
     if (r.phase !== hook.phase) throw new TbError("input_invalid", "phase does not match the declared hook", 400);
     const ctx = hookContext(rt, hook.timeoutMs ?? HOOK_DEFAULT_TIMEOUT_MS);
     const out = (await withTimeout(handler(r, ctx), ctx.signal)) as unknown;
-    if (!isObj(out)) throw new TbError("hook_failed", "hook returned no object", 500);
-    if (r.phase === "before" && typeof out.allow !== "boolean") throw new TbError("hook_failed", "before hook must return { allow }", 500);
-    if (r.phase === "context") {
-      const add = out.add;
-      if (!isObj(add) || Object.keys(add).some((k) => !k.startsWith(`${rt.product}.`))) throw new TbError("hook_failed", `context keys must start with "${rt.product}."`, 500);
-    }
+    const problem = hookResponseProblem(r.phase, out, rt.product);
+    if (problem) throw new TbError("hook_failed", problem, 500);
     sendJson(res, 200, out);
   } catch (e) {
     sendError(res, rid, e instanceof TbError ? e : new TbError("hook_failed", "hook failed", 500));

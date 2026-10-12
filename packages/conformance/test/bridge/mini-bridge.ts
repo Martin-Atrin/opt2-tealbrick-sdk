@@ -1,10 +1,12 @@
 // Minimal deployed bridge for the bridge target's sensitivity tests (NOT a product bridge): enrolment, signed config
 // pull + ack, jwt-bearer K5, MCP initialize / tools/list / tools/call with gate() and forward (grant + call proof).
+// Key page on its own origin (BRIDGE §3.1 / §9.3 v0.1.10, C59): keys-ticket POST → form + session, session GET.
 // Flags break exactly one rule each so a test can assert the matching check flips from pass to fail.
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   digest,
+  type Ed25519KeyPair,
   gate,
   generateKeyPair,
   keySetFrom,
@@ -19,6 +21,7 @@ import {
   verifyAssertion,
   verifyConfig,
   verifyGrant,
+  verifyKeysTicket,
   withStandardOps,
 } from "@opt2-tealbrick/manifest";
 import type { EnrolResponse, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
@@ -32,6 +35,21 @@ export interface MiniFlags {
   listPerson?: boolean;
   leakToPortal?: boolean;
   acceptPerson?: boolean;
+  /** serves /keys on the main origin too (C59) */
+  keysOnMain?: boolean;
+  /** the keys origin falls through to every main-origin route (C59) */
+  keysOriginOpen?: boolean;
+  /** key page without Content-Security-Policy (C59) */
+  noKeysCsp?: boolean;
+  /** answers 404 instead of 503 when TB_KEYS_PUBLIC_URL is unset (C59) */
+  noUnset503?: boolean;
+}
+
+/** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
+export interface MiniState {
+  key?: Ed25519KeyPair;
+  enrol?: EnrolResponse;
+  usedJtis?: Set<string>;
 }
 
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -46,17 +64,25 @@ const read = async (req: IncomingMessage) => {
 };
 const listen = (srv: Server, port: number) => new Promise<void>((r) => srv.listen(port, "127.0.0.1", () => r()));
 
-export async function startMiniBridge(env: Record<string, string>, flags: MiniFlags = {}) {
-  const key = await generateKeyPair();
+export async function startMiniBridge(env: Record<string, string>, flags: MiniFlags = {}, state: MiniState = {}) {
+  const key = state.key ?? (await generateKeyPair());
+  state.key = key;
   const portal = env.TB_PORTAL_URL as string;
   const pub = env.TB_PUBLIC_URL as string;
-  const enrol = (await (
-    await fetch(`${portal}/api/v1/bridge/enrol`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: env.TB_ENROL_CODE, publicKey: key.publicJwk, version: "0.0.0", sdkMajors: [1, 0], form: "deployed", publicOrigin: pub }),
-    })
-  ).json()) as EnrolResponse;
+  const keysHost = env.TB_KEYS_PUBLIC_URL ? new URL(env.TB_KEYS_PUBLIC_URL).hostname : null;
+  const usedJtis = state.usedJtis ?? new Set<string>();
+  state.usedJtis = usedJtis;
+  const keySessions = new Set<string>();
+  const enrol =
+    state.enrol ??
+    ((await (
+      await fetch(`${portal}/api/v1/bridge/enrol`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: env.TB_ENROL_CODE, publicKey: key.publicJwk, version: "0.0.0", sdkMajors: [1, 0], form: "deployed", publicOrigin: pub }),
+      })
+    ).json()) as EnrolResponse);
+  state.enrol = enrol;
   const brg = `tb:brg:${enrol.bridgeId}` as const;
   let trusted: PortalKeyEntry[] = enrol.portalKeys;
   let cfg: WorkspaceConfig | null = null;
@@ -176,10 +202,38 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
   const publicServer = createServer((req, res) => {
     handlePublic(req, res).catch((e: unknown) => send(res, 500, { error: { code: "internal", message: String(e), requestId: "req_mini" } }));
   });
+  const keyPage = (req: IncomingMessage, res: ServerResponse, raw: Buffer) => {
+    const html = (status: number, body: string, extra: Record<string, string> = {}) => {
+      res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...(flags.noKeysCsp ? {} : { "content-security-policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'" }), ...extra });
+      res.end(body);
+    };
+    const page = () => `<!doctype html><form method="post" action="/keys"><input type="hidden" name="csrf" value="${randomUUID()}"><label>MINI_KEY <input name="MINI_KEY"></label></form>`;
+    const sid = /(?:^|;\s*)tb_keys=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
+    if (sid && keySessions.has(sid)) return html(200, page());
+    const ticket = req.method === "POST" ? new URLSearchParams(raw.toString()).get("ticket") : null;
+    if (!ticket) return send(res, 401, { error: { code: "unauthenticated", message: "keys ticket required", requestId: "req_mini" } });
+    const v = verifyKeysTicket(ticket, { now: nowS(), self: brg, ws: enrol.workspaceId, issuers: keySetFromPortalKeys(trusted) });
+    if (!v.ok || usedJtis.has(v.claims.jti)) return send(res, 400, { error: { code: "ticket_invalid", message: "keys ticket refused", requestId: "req_mini" } });
+    usedJtis.add(v.claims.jti);
+    const id = randomUUID();
+    keySessions.add(id);
+    return html(200, page(), { "set-cookie": `tb_keys=${id}; HttpOnly; Secure; SameSite=Strict; Path=/keys` });
+  };
   const handlePublic = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = new URL(req.url ?? "/", "http://x").pathname;
     const raw = await read(req);
     if (path === "/healthz" || path === "/readyz") return send(res, 200, { status: "ok" });
+    const onKeys = keysHost !== null && (req.headers.host ?? "").replace(/:\d+$/, "").toLowerCase() === keysHost;
+    if (onKeys && path === "/keys") return keyPage(req, res, raw);
+    if (onKeys && !flags.keysOriginOpen) return send(res, 404, { error: { code: "not_found", message: "not found", requestId: "req_mini" } });
+    if (path === "/keys") {
+      if (!keysHost && !flags.noUnset503) {
+        res.writeHead(503, { "content-type": "text/plain; charset=utf-8" });
+        return void res.end("key page not configured");
+      }
+      if (flags.keysOnMain) return keyPage(req, res, raw);
+      return send(res, 404, { error: { code: "not_found", message: "not found", requestId: "req_mini" } });
+    }
     if (path === "/oauth/token" && req.method === "POST") {
       const f = new URLSearchParams(raw.toString());
       const a = f.get("assertion") ?? "";
