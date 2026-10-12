@@ -13,3 +13,58 @@ export function sdkMajorServed(version: string, currentMajor: number): boolean {
   const major = sdkMajorOf(version);
   return major === currentMajor || major === currentMajor - 1;
 }
+
+/** Semver core compare (pre-release tags sort before the release); throws on a non-semver input. */
+export function compareSemver(a: string, b: string): number {
+  const parse = (v: string) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(v);
+    if (!m) throw new TypeError(`compareSemver: not a semver version: ${JSON.stringify(v)}`);
+    return { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? null };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) if ((x.n[i] as number) !== (y.n[i] as number)) return (x.n[i] as number) < (y.n[i] as number) ? -1 : 1;
+  if (x.pre === y.pre) return 0;
+  if (x.pre === null) return 1;
+  if (y.pre === null) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
+
+/**
+ * C104 (spec 0.1.15): THE feature table of minimum bridge versions. Extend it with every bridge feature an app can depend on;
+ * the release signer and Core read only `requiredBridgeVersion`, never their own copy (L1).
+ */
+export const BRIDGE_FEATURES = [
+  { feature: "dynamic_ops", minBridge: "0.1.15", why: "dynamic tool search needs the C91 catalog proof binding" },
+  { feature: "wildcard_companion", minBridge: "0.1.16", why: "companion product \"*\" (tb.holds_pending, C82)" },
+  { feature: "holds_pending_companion", minBridge: "0.1.16", why: "tb.holds_pending as a companion op (G4)" },
+] as const;
+
+type ManifestLike = {
+  operations?: readonly { dynamic?: unknown }[];
+  companions?: readonly { product: string; operations: readonly string[] }[];
+  requires?: { bridge?: string };
+};
+
+/**
+ * C104: minimum workspace bridge version for a manifest = max(declared `requires.bridge`, every BRIDGE_FEATURES row the
+ * manifest uses), with the reasons; `bridge: null` when nothing is required.
+ */
+export function requiredBridgeVersion(m: ManifestLike): { bridge: string | null; reasons: string[] } {
+  const used = new Set<string>();
+  if ((m.operations ?? []).some((o) => o.dynamic !== undefined)) used.add("dynamic_ops");
+  for (const c of m.companions ?? []) {
+    if (c.product === "*") used.add("wildcard_companion");
+    if (c.operations.includes("tb.holds_pending")) used.add("holds_pending_companion");
+  }
+  let bridge: string | null = null;
+  const reasons: string[] = [];
+  const bump = (v: string, why: string) => {
+    reasons.push(`${v}: ${why}`);
+    if (bridge === null || compareSemver(v, bridge) > 0) bridge = v;
+  };
+  for (const f of BRIDGE_FEATURES) if (used.has(f.feature)) bump(f.minBridge, f.why);
+  const declared = m.requires?.bridge;
+  if (typeof declared === "string") bump(declared, "declared by the manifest (requires.bridge)");
+  return { bridge, reasons };
+}
