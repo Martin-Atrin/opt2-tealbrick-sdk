@@ -6,7 +6,7 @@ WORKDIR /app
 ENV CI=true COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY tealbrick.manifest.json tsconfig.json tsconfig.build.json ./
 COPY skills ./skills
 COPY scripts ./scripts

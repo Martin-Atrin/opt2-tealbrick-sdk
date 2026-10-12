@@ -117,7 +117,8 @@ describe("createMiniapp", () => {
     assert.equal(pkg.name, "opt2-tealbrick-tasks");
     assert.equal(pkg.private, true);
     assert.equal(pkg.publishConfig, undefined);
-    assert.match(pkg.packageManager, /^pnpm@\d+\.\d+\.\d+$/);
+    assert.match(pkg.packageManager, /^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/, "ci-v8: packageManager pinned by hash");
+    assert.match(readFileSync(join(dir, "Dockerfile"), "utf8"), /RUN pnpm install --frozen-lockfile --ignore-scripts/, "ci-v8: image installs never run scripts");
     for (const s of ["typecheck", "lint", "test", "conformance", "build", "gen"]) assert.equal(typeof pkg.scripts[s], "string", `script ${s}`);
     assert.equal(pkg.scripts.conformance, "node --run kit && tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json");
     // BSA-12: op ids and I/O types come from the generated kit, generated before every step that compiles or runs src
@@ -166,7 +167,7 @@ describe("createMiniapp", () => {
     // BSA-06: the ONE Dockerfile pattern (pnpm frozen lockfile, kit + tsc + UI build to dist, data under /data)
     const [build = "", runtime = ""] = docker.split(/^FROM .*$/m).slice(1);
     assert.match(build, /^RUN corepack enable$/m);
-    assert.match(build, /^RUN pnpm install --frozen-lockfile$/m);
+    assert.match(build, /^RUN pnpm install --frozen-lockfile --ignore-scripts$/m);
     assert.match(build, /^COPY tealbrick\.manifest\.json .*\n(?:.*\n)*RUN pnpm run build && pnpm prune --prod$/m, "manifest is in the build stage before tb-gen runs");
     assert.match(build, /^COPY skills \.\/skills$/m, "the kit embeds the skill texts");
     assert.match(runtime, /^ENV .*\bTB_DATA_DIR=\/data TB_BACKUP_DIR=\/data\/backup$/m);
