@@ -336,3 +336,19 @@ test("bridgeOpBinding (C91): catalog {bop, op} only; resolve {op, in}; mark {in}
   const withIn = await signBridgeOpProof({ iss: brg, sub: brg, aud: `tb:ins:${w.ins}`, call, bop: "catalog", op: "tools", in: digest(cat), iat: NOW }, w.bridgeKey);
   assert.equal(code(verifyBridgeOpProof(withIn, w.trust, bridgeOpBinding("catalog", cat))), "invalid_token");
 });
+
+test("verifyGrant (C108, tolerant reader): unknown held families are ignored, known ones still hold; malformed held refused", async () => {
+  const w = await world();
+  const g = await signGrant(w.grantClaims({ held: ["destructive", "future_x"] as never }), w.portal);
+  const r = verifyGrant(g, w.trust);
+  assert.ok(r.ok);
+  assert.deepEqual(r.ok && r.claims.held, ["destructive"]);
+  const { authorize } = await import("../src/decision.ts");
+  const op = { id: "item_delete", crud: ["read"] as "read"[], effect: "destructive" as const, holdFamily: "destructive" as const };
+  const d = authorize({ paused: { workspace: false, instance: false, agent: false }, grant: g, trust: w.trust, op, access: null, usage: {}, approval: "none", holdVerdict: null });
+  assert.equal(d.decision, "hold");
+  assert.equal(d.holdFamily, "destructive");
+  // shape is still checked: not a token-like string, duplicates
+  await assert.rejects(signGrant(w.grantClaims({ held: ["Destructive!"] as never }), w.portal));
+  await assert.rejects(signGrant(w.grantClaims({ held: ["money", "money"] as never }), w.portal));
+});

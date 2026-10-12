@@ -17,7 +17,7 @@ import {
   type Typ,
   type Ulid,
 } from "@opt2-tealbrick/spec/credentials";
-import { AGENT_MODES, CRUD_ACTIONS, HOLD_FAMILIES, HOOK_HOLD_FAMILIES, HOOK_PHASES } from "@opt2-tealbrick/spec/manifest";
+import { AGENT_MODES, CRUD_ACTIONS, HOOK_HOLD_FAMILIES, HOOK_PHASES } from "@opt2-tealbrick/spec/manifest";
 import type { Ed25519KeyPair, JwsExpect, KeySet, Refusal } from "@opt2-tealbrick/spec/sdk";
 import { sha256Bytes } from "./jcs.ts";
 import { findKey, publicKeyObject } from "./keys.ts";
@@ -57,6 +57,9 @@ const holdVerdictC: Check = (v) => {
   );
 };
 const setOf = (vals: readonly string[]): Check => (v) => Array.isArray(v) && v.every((x) => vals.includes(x)) && new Set(v).size === v.length;
+/** v0.1.17 (C108, tolerant reader): a grant's `held` may name families this build does not know (a newer Core); they are
+ *  shape-checked here and IGNORED by verifyGrant (an app cannot declare an unknown family, so ignoring is safe). */
+const heldC: Check = (v) => Array.isArray(v) && v.length <= 32 && v.every((x) => typeof x === "string" && /^[a-z][a-z0-9_]{1,31}$/.test(x)) && new Set(v).size === v.length;
 const strArr = (maxItems: number, maxLen: number): Check => (v) => Array.isArray(v) && v.length <= maxItems && v.every(str(maxLen));
 const digestC = re(/^sha256:[0-9a-f]{64}$/);
 const wsC = re(idRe("ws"));
@@ -129,7 +132,7 @@ const CLAIM_SPECS: Record<ClaimTyp, ClaimSpec> = {
     iss: re(refRe("portal", "brg")),
     sub: CALLER,
     aud: INS,
-    required: { ws: wsC, cnf: cnfC, crud: setOf(CRUD_ACTIONS), mode: oneOf(AGENT_MODES), held: setOf(HOLD_FAMILIES), caps: capsC, wf: strArr(1024, 128), polrev: int },
+    required: { ws: wsC, cnf: cnfC, crud: setOf(CRUD_ACTIONS), mode: oneOf(AGENT_MODES), held: heldC, caps: capsC, wf: strArr(1024, 128), polrev: int },
     optional: {},
     // companion grants are always bound (CREDENTIALS §11, CORE I8)
     cross: (c) => (String(c.sub).startsWith("tb:ins:") && c.mode !== "bound" ? "companion grant not bound" : null),

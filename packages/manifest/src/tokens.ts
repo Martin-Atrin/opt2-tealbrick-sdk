@@ -23,6 +23,7 @@ import {
   type WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
 import type { HookPhase } from "@opt2-tealbrick/spec/manifest";
+import { KNOWN_HOLD_FAMILIES } from "@opt2-tealbrick/spec/manifest";
 import type {
   Ed25519KeyPair,
   Json,
@@ -79,7 +80,9 @@ export function verifyGrant(token: string, ctx: TrustContext): VerifiedGrant | R
   if (ctx.revokedJtis.has(c.jti)) return kindFail("revoked jti", GRANT_REFUSAL.revoked);
   const [, kind, id] = c.sub.split(":");
   const caller = kind === "agt" ? ({ type: "agent", id } as const) : ({ type: "app", id } as const);
-  return { ok: true, token, claims: c, caller: caller as VerifiedGrant["caller"] };
+  // v0.1.17 (C108): unknown held families are ignored (tolerant reader); `money` stays held by authorize() regardless
+  const held = c.held.filter((f) => (KNOWN_HOLD_FAMILIES as readonly string[]).includes(f));
+  return { ok: true, token, claims: held.length === c.held.length ? c : { ...c, held }, caller: caller as VerifiedGrant["caller"] };
 }
 
 // ── K7 call proofs (op, hook, bridge op) ─────────────────────────────────────
