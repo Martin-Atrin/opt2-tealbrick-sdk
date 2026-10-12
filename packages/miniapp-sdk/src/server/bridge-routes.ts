@@ -1,7 +1,7 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeOpBinding, digest, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, digest, hookResponseProblem, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
@@ -38,27 +38,9 @@ async function withTimeout<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   ]);
 }
 
-const HOOK_RESPONSE_KEYS: Record<HookRequest["phase"], readonly string[]> = { before: ["allow", "reason"], context: ["add"], after: ["output", "redactions"] };
-
-/** The phase's response shape (spec bridge.ts `HookResponseByPhase`), or why the answer violates it. */
-function hookResponseProblem(phase: HookRequest["phase"], out: unknown, product: string): string | null {
-  if (!isObj(out)) return "hook returned no object";
-  const extra = Object.keys(out).filter((k) => !HOOK_RESPONSE_KEYS[phase].includes(k));
-  if (extra.length) return `${phase} hook returned unknown keys ${extra.join(", ")}`;
-  if (phase === "before") {
-    if (typeof out.allow !== "boolean") return "before hook must return { allow }";
-    if (out.reason !== undefined && typeof out.reason !== "string") return "before hook reason must be a string";
-    return null;
-  }
-  if (phase === "context") {
-    const add = out.add;
-    return !isObj(add) || Object.keys(add).some((k) => !k.startsWith(`${product}.`)) ? `context keys must start with "${product}."` : null;
-  }
-  const red = out.redactions;
-  if (red !== undefined && !(Array.isArray(red) && red.every((p) => typeof p === "string" && (p === "" || p.startsWith("/"))))) return "after hook redactions must be JSON pointers";
-  return null;
-}
-
+// The phase's answer shape is the ONE shared rule (manifest `hookResponseProblem`, L1): before {allow, reason?, hold?}
+// (v0.1.13 G1 hold verdict), context keys `<product>.` and never `tb.*`, after {output?, redactions?}. The SDK used its
+// own key list until 0.1.16 and turned every `hold` answer into hook_failed (samples v0.2.0 finding).
 // ── POST /tb/v1/hooks/:hookId ────────────────────────────────────────────────
 export async function handleHook(rt: Runtime, req: IncomingMessage, res: ServerResponse, hookId: string): Promise<void> {
   const rid = requestId();

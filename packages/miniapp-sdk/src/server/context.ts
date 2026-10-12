@@ -31,6 +31,8 @@ export interface CompanionTargetsView {
   appsPolicy(): readonly string[] | null;
   /** v0.1.18 (C106a, Connect F21): the slice's `agents[].scopeRequest` for `agt` when it targets THIS product, else null */
   agentScopeRequest(agt: string): ScopeRequest | null;
+  /** v0.1.20: `<portalUrl>/w/<ws>/open?product=<product>&path=<path>` for ANOTHER app (shared launch-path rule; null until portalUrl) */
+  ownerLinkFor(product: string, path: string): string | null;
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */

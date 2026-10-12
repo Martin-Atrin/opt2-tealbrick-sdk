@@ -146,6 +146,7 @@ function buildContext(
     // v0.1.13 (C86)
     statusChanged: () => rt.statusChanged(),
     ownerLink: (path) => rt.ownerLink(path),
+    ownerLinkFor: (product: string, path: string) => rt.ownerLinkFor(product, path),
     // v0.1.14 addition (SPEC-GAP: InstanceSlice.companionTargets)
     companionTargets: () => rt.companionTargets(),
     appsPolicy: () => rt.appsPolicy(),

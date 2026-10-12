@@ -453,6 +453,10 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
     );
     await until(async () => ctx.ownerLink("/x") !== null);
     assert.equal(ctx.ownerLink("/holds/hld_1?tab=a b"), `https://portal.example/w/${b.w.ws}/open?product=${PRODUCT}&path=${encodeURIComponent("/holds/hld_1?tab=a b")}`);
+    // v0.1.20: ownerLinkFor builds a link into another app with the same rule
+    assert.equal(ctx.ownerLinkFor("sample-caller", "/holds/hld_2"), `https://portal.example/w/${b.w.ws}/open?product=sample-caller&path=${encodeURIComponent("/holds/hld_2")}`);
+    assert.throws(() => ctx.ownerLinkFor("Bad Product", "/x"), (e: unknown) => e instanceof TbError && e.code === "product_invalid");
+    assert.throws(() => ctx.ownerLinkFor("sample-caller", "//evil.example/x"), (e: unknown) => e instanceof TbError && e.code === "path_invalid");
     assert.deepEqual(ctx.companionTargets(), ["alpha", PEER, "zeta"].sort());
     assert.deepEqual(ctx.appsPolicy(), ["destructive", "money", "first_contact"]);
     // v0.1.18 (C106a, Connect F21): scopeRequest of this product only
@@ -487,7 +491,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
   });
 
   test("Fleet: agentsChanged once after boot, on rename/pause/removal only; EventContext is complete; once again after a restart", async () => {
-    const ctxKeys = ["agentScopeRequest", "appsPolicy", "callApp", "companionTargets", "db", "log", "ownerLink", "scopes", "statusChanged"];
+    const ctxKeys = ["agentScopeRequest", "appsPolicy", "callApp", "companionTargets", "db", "log", "ownerLink", "ownerLinkFor", "scopes", "statusChanged"];
     assert.ok(b.agentsChanged.length >= 1);
     assert.deepEqual(b.agentsChanged[0]?.ctxKeys, ctxKeys);
     const n = b.agentsChanged.length;

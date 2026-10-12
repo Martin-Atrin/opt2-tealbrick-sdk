@@ -60,6 +60,8 @@ export interface Runtime {
   pendingHolds(): Promise<number>;
   /** v0.1.13 (C86): ctx.ownerLink(path); throws path_invalid; null until the slice carries portalUrl */
   ownerLink(path: string): string | null;
+  /** v0.1.20: an owner link into ANOTHER app (e.g. Inbox opening a hold's decidePath in the owning app) */
+  ownerLinkFor(product: string, path: string): string | null;
   /** v0.1.14 addition: product ids of the slice's companionTargets (sorted, unique) */
   companionTargets(): string[];
   /** v0.1.15 (C105a) */

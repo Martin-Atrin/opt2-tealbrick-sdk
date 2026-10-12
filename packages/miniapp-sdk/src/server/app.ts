@@ -199,18 +199,21 @@ export async function startApp(
     if (!link) return Promise.reject(new TbError("no_bridge", "companion calls need the bridge", 503));
     return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), parentCall: null });
   };
-  const ownerLink = (path: string): string | null => {
+  /** v0.1.13 (C86) ownerLink / v0.1.20 ownerLinkFor: ONE builder; the path passes the shared launch-path rule (L1). */
+  const ownerLinkFor = (product: string, path: string): string | null => {
+    if (typeof product !== "string" || !/^[a-z][a-z0-9-]{1,31}$/.test(product)) throw new TbError("product_invalid", "not a product id", 400);
     if (typeof path !== "string" || !isValidLaunchPath(path)) throw new TbError("path_invalid", "owner link path must be an app-relative launch path", 400);
     const portal = trust.portalUrl;
     const ws = trust.ws;
     if (!portal || !ws) return null;
-    return `${portal}/w/${ws}/open?product=${encodeURIComponent(manifest.id)}&path=${encodeURIComponent(path)}`;
+    return `${portal}/w/${ws}/open?product=${encodeURIComponent(product)}&path=${encodeURIComponent(path)}`;
   };
+  const ownerLink = (path: string): string | null => ownerLinkFor(manifest.id, path);
   const companionTargets = (): string[] => [...new Set(trust.companionTargets().map((t) => t.product))].sort();
   const statusChanged = (): void => pusher.request();
   const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
   const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
-  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets, appsPolicy, agentScopeRequest });
+  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets, appsPolicy, agentScopeRequest, ownerLinkFor });
   /** Fleet: last agent list handed to events.agentsChanged in this process (null = none yet since boot) */
   let notifiedAgents: string | null = null;
   const keys = createKeys({
@@ -307,6 +310,7 @@ export async function startApp(
       return receipts.pendingCount() + (await counter.count());
     },
     ownerLink,
+    ownerLinkFor,
     companionTargets,
     appsPolicy,
     agentScopeRequest,

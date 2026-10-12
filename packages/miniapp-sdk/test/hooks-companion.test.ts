@@ -61,7 +61,16 @@ async function boot(): Promise<Booted> {
       notebook_rename: async () => ({}),
     },
     hooks: {
-      check_before: async (req) => (mode(req) === "deny" ? { allow: false, reason: "denied" } : mode(req) === "bad" ? ({ allow: "yes" } as never) : { allow: true }),
+      check_before: async (req) =>
+        mode(req) === "deny"
+          ? { allow: false, reason: "denied" }
+          : mode(req) === "hold"
+            ? { allow: false, hold: { family: "policy", reason: "needs owner review" } }
+            : mode(req) === "badhold"
+              ? ({ allow: true, hold: { family: "policy", reason: "x" } } as never)
+              : mode(req) === "bad"
+                ? ({ allow: "yes" } as never)
+                : { allow: true },
       check_slow: async (req, ctx) => {
         await new Promise((r) => setTimeout(r, 1000).unref());
         return { allow: !ctx.signal.aborted && mode(req) !== "deny" };
@@ -137,6 +146,10 @@ describe("hook route", () => {
   test("each phase answers its shape", async () => {
     assert.deepEqual((await callHook(b, "check_before", "before", { mode: "ok" })).body, { allow: true });
     assert.deepEqual((await callHook(b, "check_before", "before", { mode: "deny" })).body, { allow: false, reason: "denied" });
+    // v0.1.13 G1: a hold verdict passes the shared shape rule (SDK ≤ 0.1.15 answered 500 hook_failed)
+    const held = await callHook(b, "check_before", "before", { mode: "hold" });
+    assert.equal(held.status, 200, JSON.stringify(held.body));
+    assert.deepEqual(held.body, { allow: false, hold: { family: "policy", reason: "needs owner review" } });
     assert.deepEqual((await callHook(b, "tag_context", "context", {})).body, { add: { [`${PRODUCT}.caller`]: b.w.agents.a } });
     const a = await callHook(b, "redact_after", "after", {}, { output: { secret: "x" } });
     assert.equal(a.status, 200);
@@ -154,6 +167,7 @@ describe("hook route", () => {
   test("answers that break the phase shape → 500 hook_failed", async () => {
     for (const [hook, phase, m] of [
       ["check_before", "before", "bad"],
+      ["check_before", "before", "badhold"],
       ["tag_context", "context", "bad"],
       ["redact_after", "after", "bad"],
       ["redact_after", "after", "pointer"],
