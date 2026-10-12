@@ -16,6 +16,7 @@ import {
   memoryReplayGuard,
   opaqueDigest,
   opaqueValue,
+  sdkMajorOf,
   signSlice,
   TYP,
   verifyAssertion,
@@ -382,7 +383,12 @@ export class FakeBridge {
     for (const [k, v] of this.enrolCodes) if (digestEqual(k, d)) entry = v;
     if (!entry || entry.used || entry.exp < nowS()) throw new HttpError(403, "code_invalid", "enrolment code unknown, used or expired");
     if ((b.service ?? undefined) !== entry.svc) throw new HttpError(403, "code_invalid", "code bound to another target");
-    const major = Number.parseInt(b.sdkVersion.split(".")[0] ?? "", 10);
+    let major = Number.NaN;
+    try {
+      major = sdkMajorOf(b.sdkVersion);
+    } catch {
+      throw new HttpError(400, "sdk_major_unsupported", "sdkVersion is not semver");
+    }
     if (!this.sdkMajors.includes(major)) throw new HttpError(400, "sdk_major_unsupported", `SDK major ${major} not served`);
     if (b.manifestDigest !== this.expectedDigest) throw new HttpError(409, "manifest_mismatch", "manifestDigest differs from the deployed manifest");
     try {

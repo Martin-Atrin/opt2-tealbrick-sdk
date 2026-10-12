@@ -156,8 +156,8 @@ void op;
         return next;
       },
     });
-    assert.deepEqual(await client.noteCreate({ notebook: "a", title: "t", body: "b" }, { idempotencyKey: "key-12345678" }), { status: "ok", output: { id: "n1" } });
-    assert.deepEqual(calls[0], { name: "notes__note_create", args: { notebook: "a", title: "t", body: "b" }, meta: { "tealbrick/idempotencyKey": "key-12345678" } });
+    assert.deepEqual(await client.noteCreate({ notebook: "a", title: "t", body: "b" }, { idempotencyKey: "idem-1" }), { status: "ok", output: { id: "n1" } });
+    assert.deepEqual(calls[0], { name: "notes__note_create", args: { notebook: "a", title: "t", body: "b" }, meta: { "tealbrick/idempotencyKey": "idem-1" } });
     next = { content: [{ type: "text", text: '{"hits":[]}' }] };
     assert.deepEqual(await client.noteSearch({ query: "q" }), { status: "ok", output: { hits: [] } });
     assert.deepEqual(calls[1], { name: "notes__note_search", args: { query: "q" }, meta: undefined });

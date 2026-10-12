@@ -108,8 +108,11 @@ describe("createMiniapp", () => {
     assert.equal(pkg.private, true);
     assert.equal(pkg.publishConfig, undefined);
     assert.match(pkg.packageManager, /^pnpm@\d+\.\d+\.\d+$/);
-    for (const s of ["typecheck", "lint", "test", "conformance", "build"]) assert.equal(typeof pkg.scripts[s], "string", `script ${s}`);
+    for (const s of ["typecheck", "lint", "test", "conformance", "build", "gen"]) assert.equal(typeof pkg.scripts[s], "string", `script ${s}`);
     assert.equal(pkg.scripts.conformance, "tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json");
+    // generated artifacts (SDK-API §15): produced by tb-gen, never committed
+    assert.equal(pkg.scripts.gen, "tb-gen all");
+    assert.ok(read(dir, ".gitignore").split("\n").includes("gen/"), "gen/ is gitignored");
     // the conformance harness the script names: default-exports start(env) with backupNow (A7 round-trip)
     const harness = read(dir, "conformance.start.ts");
     assert.match(harness, /export default async function start\(env/);

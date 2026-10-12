@@ -244,7 +244,11 @@ export async function startApp(app: App, env: Record<string, string | undefined>
       const slice = trust.slice;
       return {
         publicUrl: (slice?.bridge as { publicUrl?: unknown } | undefined)?.publicUrl?.toString() ?? null,
-        workspace: trust.ws,
+        workspace: (() => {
+          // spec 0.1.3 (C31): non-null; before the first verified slice there is no workspace to give
+          if (!trust.ws) throw new TbError("workspace_unknown", "the workspace is not known yet (no verified slice)", 503);
+          return trust.ws;
+        })(),
         scopes: { instances: scopes.instances },
         secrets: appSecrets,
       };

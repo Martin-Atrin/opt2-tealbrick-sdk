@@ -1,5 +1,6 @@
 node_modules/
 dist/
+gen/
 .tb-ci/
 .data/
 *.tgz

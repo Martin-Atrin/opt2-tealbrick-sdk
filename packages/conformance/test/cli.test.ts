@@ -24,10 +24,9 @@ describe("tb-conformance CLI", () => {
     assert.deepEqual([report.ok, report.target], [true, "manifest"]);
   });
 
-  it("bridge / core targets exit 1 (not implemented); unknown target and missing args exit 2", () => {
-    const b = run(["bridge", "--url", "http://127.0.0.1:1", "--json"]);
-    assert.equal(b.status, 1);
-    assert.ok((JSON.parse(b.stdout) as { checks: { status: string }[] }).checks.every((c) => c.status === "not_implemented"));
+  it("core against nothing exits 1; bridge without --start/--cmd, relay without --cmd, unknown target and missing args exit 2", () => {
+    assert.equal(run(["bridge", "--url", "http://127.0.0.1:1", "--json"]).status, 2, "the suite starts the bridge with its own env");
+    assert.equal(run(["relay", "--json"]).status, 2);
     assert.equal(run(["core", "--url", "http://127.0.0.1:1"]).status, 1);
     assert.equal(run(["nope"]).status, 2);
     assert.equal(run([]).status, 2);

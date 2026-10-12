@@ -4,6 +4,7 @@
 // assertions, records acks, and runs the RFC 8628 device flow; a control API mints revisions, pauses, rotates keys,
 // revokes connections, approves device requests and takes the Portal offline. Used by the (pending) bridge target.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import {
   assertPublicJwk,
   digest,
@@ -71,6 +72,13 @@ export class FakePortal {
   revoked: { jti: string; exp: number }[] = [];
   offline = false;
   readonly devices: DeviceReq[] = [];
+  /** extra config fields merged into every minted revision (bridge target: apps, grants, hooks, skills, …) */
+  configExtra: Partial<Omit<WorkspaceConfig, "iat" | "exp" | "jti">> = {};
+  /** public origin of the bridge under test (config `bridge.publicUrl`, device-flow `mcp_url` / `token_endpoint`) */
+  bridgePublicUrl = "https://bridge.conformance.test";
+  /** every request with headers and raw body, recorded after it was read (bridge target B9 scan) */
+  readonly captured: { method: string; path: string; headers: Record<string, string>; body: string; at: number }[] = [];
+  readonly #sockets = new Set<Socket>();
   readonly #opts: FakePortalOptions;
   readonly #replay = memoryReplayGuard();
   readonly #waiters = new Set<() => void>();
@@ -80,6 +88,10 @@ export class FakePortal {
     this.#opts = opts;
     this.keys = [{ key, status: "active" }];
     this.control = new FakePortalControl(this);
+    this.#server.on("connection", (sock: Socket) => {
+      this.#sockets.add(sock);
+      sock.once("close", () => this.#sockets.delete(sock));
+    });
   }
 
   static async create(opts: FakePortalOptions = {}): Promise<FakePortal> {
@@ -101,39 +113,55 @@ export class FakePortal {
     return code;
   }
 
-  /** Signs config revision `rev + 1` from the current state and wakes the config long-polls. */
-  async mintRevision(): Promise<number> {
-    this.rev++;
-    const now = nowS();
-    this.revoked = this.revoked.filter((r) => r.exp > now);
-    const grants: string[] = [];
+  /** Config body for revision `rev` from the current state (unsigned; `configExtra` merged last). */
+  configBody(rev: number, iat: number = nowS()): Omit<WorkspaceConfig, "exp" | "jti"> {
     const brg = `tb:brg:${this.bridgeId}` as const;
-    const cfg = {
+    return {
       v: 1 as const,
       iss: "tb:portal" as const,
       sub: brg,
       aud: brg,
-      iat: now,
+      iat,
       ws: this.ws,
-      rev: this.rev,
+      rev,
       workspace: { id: this.ws, name: this.#opts.workspaceName ?? "Conformance workspace" },
-      bridge: { id: this.bridgeId, publicUrl: "https://bridge.conformance.test" },
+      bridge: { id: this.bridgeId, publicUrl: this.bridgePublicUrl },
       portalKeys: this.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })),
       pause: { workspace: this.pause.workspace, agents: [...this.pause.agents], instances: [...this.pause.instances] },
       revoked: { jtis: this.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) },
       connections: this.connections,
       instanceKeys: [],
-      grants,
+      grants: [],
       apps: [],
       agents: this.agents,
       hooks: [],
       skills: { digest: digest({ files: [] }), files: [] },
       keyRequirements: [],
       enrolCodes: [],
+      ...this.configExtra,
     } satisfies Omit<WorkspaceConfig, "exp" | "jti">;
-    this.config = await signConfig(cfg, this.activeKey());
+  }
+
+  /** Signs config revision `rev + 1` from the current state and wakes the config long-polls (`iat` override: B4 config age). */
+  async mintRevision(opts: { iat?: number } = {}): Promise<number> {
+    this.rev++;
+    const now = nowS();
+    this.revoked = this.revoked.filter((r) => r.exp > now);
+    this.config = await signConfig(this.configBody(this.rev, opts.iat ?? now), this.activeKey());
     for (const w of [...this.#waiters]) w();
     return this.rev;
+  }
+
+  /** Serves `jws` verbatim as the next revision (bridge target B3: bad signature, lower rev, foreign workspace). */
+  serveRaw(jws: string): void {
+    this.rev++;
+    this.config = jws;
+    for (const w of [...this.#waiters]) w();
+  }
+
+  /** Destroys every open connection, including held config long-polls (bridge target B4: Portal down). */
+  dropConnections(): void {
+    for (const s of this.#sockets) s.destroy();
   }
 
   async close(): Promise<void> {
@@ -165,6 +193,9 @@ export class FakePortal {
         return;
       }
       const raw = await readRaw(req);
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(", ") : v;
+      this.captured.push({ method: req.method ?? "GET", path: req.url ?? "/", headers, body: raw.toString("utf8"), at: Date.now() });
       const row = FAKE_PORTAL_ROUTES.find((r) => r.method === req.method && API + r.path === path);
       if (!row) throw new HttpError(404, "not_found", "no such route");
       switch (row.opId) {
@@ -310,7 +341,7 @@ export class FakePortal {
       sendJson(res, 200, body);
       return;
     }
-    const body: DeviceAgentTokenResult = { scope: "agent", workspace_id: this.ws, bridge_id: this.bridgeId, mcp_url: "https://bridge.conformance.test/mcp", token_endpoint: "https://bridge.conformance.test/oauth/token", connections: r.connections };
+    const body: DeviceAgentTokenResult = { scope: "agent", workspace_id: this.ws, bridge_id: this.bridgeId, mcp_url: `${this.bridgePublicUrl}/mcp`, token_endpoint: `${this.bridgePublicUrl}/oauth/token`, connections: r.connections };
     sendJson(res, 200, body);
   }
 }
@@ -366,6 +397,16 @@ export class FakePortalControl {
     const norm = userCode.toUpperCase().replace(/-/g, "");
     const r = this.#p.devices.find((x) => digestEqual(x.userDigest, opaqueDigest(norm)));
     if (r?.state !== "pending") throw new Error("no pending device request for that user code");
+    await this.#approve(r, agents);
+  }
+  /** Approves the newest pending device request (the suite plays the owner for a CLI it started; relay target). */
+  async approvePending(agents: AgentId[] = []): Promise<boolean> {
+    const r = [...this.#p.devices].reverse().find((x) => x.state === "pending" && x.exp > nowS());
+    if (!r) return false;
+    await this.#approve(r, agents);
+    return true;
+  }
+  async #approve(r: DeviceReq, agents: AgentId[]): Promise<void> {
     r.state = "approved";
     if (r.scope === "agent") {
       r.agents.forEach((a, i) => {

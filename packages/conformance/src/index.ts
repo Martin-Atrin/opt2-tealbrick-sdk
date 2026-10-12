@@ -2,9 +2,16 @@
 // (S12: no other @opt2-tealbrick import), the app and manifest targets, the report shape, and the CLI entry.
 
 export { AppClient, type CallOptions, type OpAnswer, type OpTamper, type PersonSession, tamperValue } from "./app-client.ts";
+export { type AgentRole, type BridgeStart, type BridgeStartResult, BridgeWorld, deployedSettings, exampleManifests, peerManifest, SERVICE_KEY_OFF, SERVICE_KEY_ON, withServiceKeys } from "./bridge-world.ts";
 export { type AppTargetContext, coverageOutcome, runAppChecks } from "./checks/app.ts";
+export { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
 export { APP_CHECK_IDS, BRIDGE_CHECKS, CHECK_IDS, CORE_CHECKS, MANIFEST_CHECK_IDS, RELAY_CHECKS } from "./checks/catalog.ts";
+export { type CoreStaticInput, runCoreStatic } from "./checks/core.ts";
+export { authProbeRows, CORE_LIVE_CHECKS, CORE_STATIC_CHECKS } from "./checks/core-ids.ts";
+export { API_BASE, envelopeOnly, isInternalDoc, LiveClient, type LiveClientOptions, type ProbeAnswer, ProbeBlocked, type ProbeRequest, runCoreLive, type Safety } from "./checks/core-live.ts";
+export { type FieldInfo, fieldsOf, loadSpecTypes, parseDeclarations, stringUnion, type TypeIndex } from "./checks/core-types.ts";
 export { findProductLiterals, type ManifestCheckOptions, runManifestChecks } from "./checks/manifest.ts";
+export { FakeApp, type FakeAppWorld } from "./fake-app.ts";
 export {
   type CapturedPayload,
   createFakeBridge,
@@ -15,9 +22,14 @@ export {
   type FakeBridgeOptions,
 } from "./fake-bridge.ts";
 export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, type FakePortalOptions } from "./fake-portal.ts";
+export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
+export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
 export { buildReport, type CheckResult, type CheckStatus, exitCode, FAILING_STATUSES, type PayloadScan, type Report, renderMarkdown, specDigest, type Target } from "./report.ts";
 export { type AppStartResult, appEnv, loadManifest, type RunAppOptions, runApp } from "./run-app.ts";
+export { freePort, processHarness, type RunBridgeOptions, runBridgeTarget } from "./run-bridge.ts";
+export { type CoreTargetOptions, gatewayOrigin, runCoreTarget } from "./run-core.ts";
+export { type RunRelayOptions, runRelayTarget } from "./run-relay.ts";
 export { sampleInput } from "./sample.ts";
 export { scanPayloads } from "./scan.ts";
 export { SDK_COVERAGE } from "./sdk-coverage.ts";

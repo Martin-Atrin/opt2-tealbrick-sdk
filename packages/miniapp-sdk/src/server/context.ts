@@ -7,8 +7,8 @@ import type { AppSecrets } from "./app-secrets.ts";
 export interface ContextExtras {
   /** bridge public origin (`https://<bridge>`) for third-party callbacks `…/p/<product><path>`; null until the slice names it */
   publicUrl: string | null;
-  /** workspace from the slice (agent/app calls) or PersonPrincipal.ws (person calls); null before the first slice */
-  workspace: WorkspaceId | null;
+  /** workspace from the verified slice; before the first slice the SDK refuses with 503 workspace_unknown */
+  workspace: WorkspaceId;
   scopes: Pick<ScopeStore, "instances">;
   secrets: AppSecrets;
 }

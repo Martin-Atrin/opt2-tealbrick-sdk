@@ -1,7 +1,10 @@
 // Check catalogue: every id the suite reports, per target (CONFORMANCE §4). Ids are stable. App and manifest ids are
-// implemented (checks/app.ts, checks/manifest.ts); bridge, relay and core ids are listed so their runs report every id
-// as `not_implemented` (which FAILS the run) until those targets are built. A test asserts that every id a run
+// implemented in checks/app.ts and checks/manifest.ts, bridge and relay ids in checks/bridge*.ts and checks/relay.ts
+// (listed in checks/bridge-ids.ts), core ids in checks/core*.ts. A test asserts that every id a run
 // reports is in this catalogue, and A11 asserts that every SDK export maps to catalogued ids.
+
+import { BRIDGE_CHECKS, RELAY_CHECKS } from "./bridge-ids.ts";
+import { CORE_CHECKS } from "./core-ids.ts";
 
 export const MANIFEST_CHECK_IDS = [
   "M1",
@@ -122,58 +125,9 @@ export interface PendingCheck {
   title: string;
 }
 
-/** Bridge target (CONFORMANCE §4.4 + bridge cells of §4.2/§4.3) — not implemented yet. */
-export const BRIDGE_CHECKS: readonly PendingCheck[] = [
-  { id: "B1", title: "public surface equals the documented list; internal surface not on the public listener" },
-  { id: "B2", title: "enrolment: one-time code, own key pair, re-enrolment invalidates the old key" },
-  { id: "B3", title: "config: signature, monotonic revision, atomic apply, last good kept, digest-only ack" },
-  { id: "B4", title: "Portal-down: calls continue; config older than 12 h fails closed" },
-  { id: "B5", title: "gate() order; Bound agent outside wf refused" },
-  { id: "B6", title: "hooks: order, fail closed, after_failed, no hook re-entry, open context" },
-  { id: "B7", title: "MCP tools/list = agent-audience ops allowed by grants; list_changed; skills resources" },
-  { id: "B8", title: "call path: grant + TB-Call proof bound to op, input and context digests" },
-  { id: "B9", title: "no tool payload or call metadata sent to Portal" },
-  { id: "B10", title: "relay form: stdio only, holds no grants/keys/config" },
-  { id: "B11", title: "key page: keys ticket, sealed store, never logged, declared keys only" },
-  { id: "B12", title: "OAuth AS: metadata, DCR + PKCE S256, offline pairing, refresh rotation with reuse detection" },
-  { id: "B13", title: "bridge-op proofs only on /tb/v1/bridge/*; never at /tb/v1/ops" },
-  { id: "B14", title: "standalone handover: bridge-issued grants/slices, Portal tokens refused, 4 admin ops" },
-  { id: "B15", title: "pairing path A: one-time state, ret = own callback, no bridge→Portal call" },
-  { id: "B16", title: "limits: dynamic ceiling, hook re-entry, call depth, slice_stale" },
-  { id: "B17", title: "<product>__tb_skills listed for every agent with a grant" },
-  { id: "B18", title: "pendingHolds count reaches the status report" },
-  { id: "C1", title: "every credential kind: positive path in the documented check order" },
-  { id: "C4", title: "person credential refused at MCP, relay and agent paths (cred.p1.bridge_rejects_clerk_jwt, cred.p1.bridge_rejects_tbo, cred.p1.relay_rejects_person)" },
-  { id: "C6", title: "pairing and enrolment codes one-time; stored as digests" },
-  { id: "C9", title: "credential case ids from CREDENTIALS §18 reported verbatim" },
-  { id: "P1", title: "pause matrix: MCP, relay, companion, hook, key fetch paths refused at the bridge within 60 s" },
-  { id: "P3", title: "agent revoked → its sessions and refresh tokens refused; other agents unaffected" },
-];
-
-/** Relay target (bridge relay form, CLI). */
-export const RELAY_CHECKS: readonly PendingCheck[] = [
-  { id: "B10", title: "relay speaks stdio only, holds no grants, keys or config, duplicates no checks" },
-  { id: "cred.p1.relay_rejects_person", title: "relay refuses any person credential" },
-];
-
-/** Portal Core target (CONFORMANCE §4.6 + Core cells of §4.2/§4.3) — not implemented yet. */
-export const CORE_CHECKS: readonly PendingCheck[] = [
-  { id: "R1", title: "route table at /internal/routes equals types/routes.ts; default deny" },
-  { id: "R2", title: "owner-cli auth class: reads + drafts.* only" },
-  { id: "R3", title: "licence gate: no grants, edges or tickets for unlicensed apps" },
-  { id: "R4", title: "no op accepts a key value; key status booleans only" },
-  { id: "R5", title: "no op for tool execution, connectors, relay or app data" },
-  { id: "R6", title: "signing keys and provider token sealed" },
-  { id: "R7", title: "device flow polling errors and one-time 10 min codes" },
-  { id: "R8", title: "device binding requires the user code; kit cannot get owner (cred.p1.kit_cannot_get_owner)" },
-  { id: "R9", title: "owner-cli outputs carry no codes or tickets; K3 idle 24 h" },
-  { id: "R10", title: "idempotency store never holds bodyLog: none responses" },
-  { id: "R11", title: "onboarding order: bridge enrolled before any app; licence-last" },
-  { id: "R12", title: "pairing approval checks the principal; shows redirect host + unverified client name" },
-  { id: "C6", title: "device codes one-time, digest-stored (cred.dev.one_time, cred.dev.no_clear_user_code)" },
-  { id: "C7", title: "no issued token exceeds its kind's lifetime" },
-  { id: "P2", title: "owner CLI session revoked → next CLI call refused; agents keep working" },
-];
+/** Bridge and relay targets (CONFORMANCE §4.4 + bridge / relay cells of §4.2, §4.3, §5): ids live beside the checks (checks/bridge-ids.ts). */
+/** Portal Core target (CONFORMANCE §4.6 + Core cells of §4.2/§4.3): ids live beside the checks (checks/core-ids.ts). */
+export { BRIDGE_CHECKS, CORE_CHECKS, RELAY_CHECKS };
 
 export const CHECK_IDS: ReadonlySet<string> = new Set<string>([
   ...MANIFEST_CHECK_IDS,

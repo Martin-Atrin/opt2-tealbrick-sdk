@@ -3,7 +3,12 @@
 //   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file> [options]
 //     --start: the module default-exports `start(env) → Promise<{ url, stop, backupNow? }>` (runApp's harness contract)
 //   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>]
-//   tb-conformance bridge|core --url <origin>   |   tb-conformance relay --cmd "<command>"   (not implemented: run fails)
+//   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>]
+//     static route-table checks; with --url also live probes (--live-readonly: no sign-in, no writes)
+//   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups a,b] [--pause-latency <ms>]
+//     --start: default export `start(env) → Promise<{ publicUrl, internalUrl, stop }>`; --cmd: a separate process with
+//     the suite env (TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) merged
+//   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"]
 // Output: markdown (default) or JSON (--json); --report <base> also writes <base>.json and <base>.md. Exit code 0 only
 // when every check passes (CONFORMANCE §6).
 import { type ChildProcess, spawn } from "node:child_process";
@@ -11,16 +16,22 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import type { BridgeStart } from "./bridge-world.ts";
 import { request } from "./http.ts";
 import { exitCode, type Report, renderMarkdown } from "./report.ts";
 import { type AppStartResult, loadManifest, runApp } from "./run-app.ts";
-import { runManifestTarget, runPendingTarget } from "./targets.ts";
+import { runBridgeTarget } from "./run-bridge.ts";
+import { runCoreTarget } from "./run-core.ts";
+import { runRelayTarget } from "./run-relay.ts";
+import { runManifestTarget } from "./targets.ts";
 
 const USAGE = `usage:
   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file>
                      [--inputs <file.json>] [--deploy-template <file.json>] [--timeout <ms>] [--json] [--report <base>]
   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--json] [--report <base>]
-  tb-conformance bridge --url <origin> | core --url <origin> | relay --cmd "<command>"`;
+  tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
+  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--timeout <ms>] [--json] [--report <base>]
+  tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"] [--timeout <ms>] [--json] [--report <base>]`;
 
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf8"));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -94,6 +105,13 @@ export async function main(argv: string[]): Promise<number> {
       timeout: { type: "string" },
       scan: { type: "string", multiple: true },
       "expect-digest": { type: "string" },
+      "live-readonly": { type: "boolean", default: false },
+      "max-requests": { type: "string" },
+      "interval-ms": { type: "string" },
+      groups: { type: "string" },
+      "pause-latency": { type: "string" },
+      "login-cmd": { type: "string" },
+      "echo-logs": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       report: { type: "string" },
       help: { type: "boolean", default: false },
@@ -143,11 +161,54 @@ export async function main(argv: string[]): Promise<number> {
       });
       break;
     }
-    case "bridge":
-    case "core":
-    case "relay":
-      report = runPendingTarget(target, values.url ?? values.cmd ?? "(none)");
+    case "core": {
+      const num = (v: string | undefined, name: string) => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0) throw new Error(`core: --${name} must be a non-negative integer`);
+        return n;
+      };
+      const maxRequests = num(values["max-requests"], "max-requests");
+      const minIntervalMs = num(values["interval-ms"], "interval-ms");
+      report = await runCoreTarget({
+        ...(values.url ? { url: values.url } : {}),
+        liveReadonly: values["live-readonly"],
+        ...(maxRequests !== undefined ? { maxRequests } : {}),
+        ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
+      });
+      const k = report.counts;
+      process.stderr.write(`tb-conformance core: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_implemented} not_implemented → ${report.ok ? "PASS" : "FAIL"}\n`);
       break;
+    }
+    case "bridge": {
+      if (!values.start === !values.cmd) throw new Error("bridge: exactly one of --start <module.ts> and --cmd \"<command>\" (the deployed bridge is started by the suite with its env)");
+      const ms = (v: string | undefined, name: string) => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        if (!Number.isInteger(n) || n <= 0) throw new Error(`bridge: --${name} must be a positive integer (ms)`);
+        return n;
+      };
+      const timeoutMs = ms(values.timeout, "timeout");
+      const pauseLatencyMs = ms(values["pause-latency"], "pause-latency");
+      report = await runBridgeTarget({
+        ...(values.start ? { start: (await loadStart(values.start)) as unknown as BridgeStart } : { cmd: values.cmd as string }),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(pauseLatencyMs !== undefined ? { pauseLatencyMs } : {}),
+        ...(values.groups ? { groups: values.groups.split(",").map((g) => g.trim()).filter(Boolean) } : {}),
+        echoLogs: values["echo-logs"],
+      });
+      const k = report.counts;
+      process.stderr.write(`tb-conformance bridge: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_applicable} not_applicable → ${report.ok ? "PASS" : "FAIL"}\n`);
+      break;
+    }
+    case "relay": {
+      if (!values.cmd) throw new Error('relay: --cmd "<stdio relay command>" required');
+      const timeoutMs = values.timeout ? Number(values.timeout) : undefined;
+      report = await runRelayTarget({ cmd: values.cmd, ...(values["login-cmd"] ? { loginCmd: values["login-cmd"] } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
+      const k = report.counts;
+      process.stderr.write(`tb-conformance relay: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run → ${report.ok ? "PASS" : "FAIL"}\n`);
+      break;
+    }
     default:
       process.stderr.write(`unknown target ${target}\n${USAGE}\n`);
       return 2;
