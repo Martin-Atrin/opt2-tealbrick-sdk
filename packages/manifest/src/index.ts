@@ -6,6 +6,7 @@ export * from "./jcs.ts";
 export * from "./jws.ts";
 export * from "./keys.ts";
 export * from "./ops.ts";
+export * from "./privilege.ts";
 export * from "./random.ts";
 export * from "./seal.ts";
 export * from "./skills.ts";

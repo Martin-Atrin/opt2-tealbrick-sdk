@@ -152,7 +152,10 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
     const claimed = await claimOrLoad(cfg, key, bridge, log, startup.signal);
     const rec = { ...claimed, serviceKeys: keysInForce(cfg.manifest, cfg.service.id, claimed.serviceKeys, o.env, log) };
     let keys = await fetchKeys(rec, bridge, secrets, log, startup.signal);
-    if (keys.missing.length > 0) log.warn("needs_keys", { missing: keys.missing });
+    // Required keys block the upstream (Knowledge S2): it waits in needs_keys and keys are re-pulled with backoff.
+    const required = new Set((cfg.manifest.settings?.keys ?? []).filter((k) => k.required && k.usedBy.includes(cfg.service.id)).map((k) => k.name));
+    const blocking = (k: FetchedKeys) => k.missing.filter((n) => required.has(n));
+    if (keys.missing.length > 0) log.warn("needs_keys", { missing: keys.missing, blocking: blocking(keys) });
     if (startup.signal.aborted) throw new TbError("stopped", "stopped before start", 500);
 
     const verify = appAssertionVerifier(rec);
@@ -177,7 +180,21 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       await closeAll(servers);
       return signalExitCode(stopSignal);
     }
-    up.start(childEnv(o.env, keys.values));
+    if (blocking(keys).length === 0) up.start(childEnv(o.env, keys.values));
+    else log.warn("upstream waits for required keys", { missing: blocking(keys) });
+
+    /** start the waiting upstream once no required key is missing; restart a running one when values changed */
+    const applyKeys = async (changed: boolean): Promise<void> => {
+      if (up.stopping) return;
+      if (!up.started) {
+        if (blocking(keys).length === 0) {
+          log.info("required keys present; starting upstream");
+          up.start(childEnv(o.env, keys.values));
+        }
+        return;
+      }
+      if (changed) await up.restart(childEnv(o.env, keys.values));
+    };
 
     // Status long-poll: echo the bridge's slice revision, act on a new keysRev (restart only when values changed).
     const polling = new AbortController();
@@ -205,7 +222,7 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
             next.rev = Math.max(next.rev, r.keysRev);
             const restart = next.fingerprint !== keys.fingerprint;
             keys = next;
-            if (restart && !polling.signal.aborted) await up.restart(childEnv(o.env, keys.values));
+            if (!polling.signal.aborted) await applyKeys(restart);
           }
           if (!changed) await sleep(1000, polling.signal); // a bridge answering 200 without a change must not spin
         } catch (e) {
@@ -217,9 +234,29 @@ export function startTbExec(o: TbExecOptions): TbExecHandle {
       }
     })();
 
+    // Re-pull keys with backoff (5 s → 60 s) while a required key is missing; start the upstream when they arrive.
+    const keyRetry = (async () => {
+      let delay = 5000;
+      while (!polling.signal.aborted && !up.stopping && blocking(keys).length > 0) {
+        try {
+          await sleep(delay, polling.signal);
+        } catch {
+          break;
+        }
+        delay = Math.min(delay * 2, 60_000);
+        const next = await fetchKeys(rec, bridge, secrets, log, polling.signal).catch(() => null);
+        if (!next || polling.signal.aborted) continue;
+        next.rev = Math.max(next.rev, keys.rev);
+        const restart = next.fingerprint !== keys.fingerprint;
+        keys = next;
+        await applyKeys(restart);
+      }
+    })();
+
     const code = await up.exited;
     polling.abort();
     await loop;
+    await keyRetry;
     await helper?.stop();
     await closeAll(servers);
     return code;

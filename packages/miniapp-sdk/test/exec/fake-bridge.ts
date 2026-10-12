@@ -16,6 +16,8 @@ export interface FakeBridge {
   refused: string[];
   keysRev: number;
   setKey(name: string, value: string | null): void;
+  /** test switch: names answered 403 key_not_declared (Core declaration bug, Knowledge S2); changes do NOT bump keysRev */
+  undeclared: Set<string>;
   close(): Promise<void>;
 }
 
@@ -58,6 +60,7 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
     statusBodies: [],
     refused: [],
     keysRev: 7,
+    undeclared: new Set<string>(),
     setKey(name, value) {
       if (value === null) keys.delete(name);
       else keys.set(name, value);
@@ -110,6 +113,7 @@ export async function startFakeBridge(o: { ins: InstanceId; code: string; servic
     if (req.method === "GET" && url.startsWith("/tb/v1/keys/")) {
       const name = decodeURIComponent(url.slice("/tb/v1/keys/".length));
       fb.keyFetches.push(name);
+      if (fb.undeclared.has(name)) return refuse(res, 403, "key_not_declared");
       const value = keys.get(name);
       if (value === undefined) return refuse(res, 404, "key_not_set");
       return send(res, 200, { name, value, keysRev: fb.keysRev });

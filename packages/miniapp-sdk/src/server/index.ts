@@ -1,6 +1,7 @@
 // @opt2-tealbrick/miniapp-sdk — server entry (SDK-API §3–§13, types/sdk.ts §B).
 
-export { SDK_AUDIT_ACTIONS } from "@opt2-tealbrick/manifest";
+/** C64: the ONE privilege drop (from @opt2-tealbrick/manifest; startApp and tb-exec call it). */
+export { dropPrivileges, PrivilegeDropError, type PrivilegeProc, RUN_GID, RUN_UID, SDK_AUDIT_ACTIONS } from "@opt2-tealbrick/manifest";
 export type {
   App,
   AppDefinition,

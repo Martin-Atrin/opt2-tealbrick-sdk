@@ -28,6 +28,11 @@ export class Upstream {
     return this.#child?.pid;
   }
 
+  /** true once the child has been started (it may be waiting for required keys before that). */
+  get started(): boolean {
+    return this.#childExit !== null || this.#child !== null;
+  }
+
   start(env: Record<string, string>): void {
     const [file, ...args] = this.#command as [string, ...string[]];
     const child = spawn(file, args, { env, stdio: "inherit" });
@@ -75,8 +80,10 @@ export class Upstream {
 
   /** Forwards a signal; stop signals (TERM/INT/QUIT) also end restarts so the child's exit ends tb-exec. */
   signal(sig: NodeJS.Signals): void {
-    if (sig === "SIGTERM" || sig === "SIGINT" || sig === "SIGQUIT") this.#stopping = true;
-    this.#child?.kill(sig);
+    const stop = sig === "SIGTERM" || sig === "SIGINT" || sig === "SIGQUIT";
+    if (stop) this.#stopping = true;
+    if (this.#child) this.#child.kill(sig);
+    else if (stop) this.#resolveExited(signalExitCode(sig)); // never started (waiting for keys): end tb-exec
   }
 
   get stopping(): boolean {

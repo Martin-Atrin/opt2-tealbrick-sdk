@@ -306,3 +306,39 @@ test("keysInForce: drops a listed key whose manifest `when` is false for the set
   // setting not carried in the service env → trust the bridge list
   assert.equal(keysInForce(manifest, "engine", listed, {}).length, 3);
 });
+
+describe("tb-exec waits for required keys (Knowledge S2)", () => {
+  test("a required key answered key_not_declared: upstream not started, status needs_keys; re-pulled with backoff; starts with the key once it is delivered", { timeout: 30_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    w.bridge.undeclared.add("ENGINE_KEY");
+    try {
+      const h = startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: w.env, host: "127.0.0.1", logSink: w.sink });
+      await until(() => w.bridge.statusBodies.length > 0, 10_000);
+      assert.equal(w.starts().length, 0, "upstream must not start without the required key");
+      assert.equal(w.bridge.statusBodies.at(-1)?.readiness, "needs_keys");
+      w.bridge.undeclared.delete("ENGINE_KEY"); // declaration fixed; keysRev unchanged → only the backoff re-pull finds it
+      await until(() => w.starts().length === 1, 15_000);
+      assert.equal(w.starts()[0].key, KEY_VALUE, "upstream got the key in its env");
+      assert.ok(w.bridge.keyFetches.filter((n) => n === "ENGINE_KEY").length >= 2, "re-pulled");
+      h.signal("SIGTERM");
+      await h.exited;
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("stop while waiting for keys ends tb-exec", { timeout: 15_000 }, async () => {
+    const w = await execWorld({ helper: false, backup: false });
+    w.bridge.undeclared.add("ENGINE_KEY");
+    try {
+      const h = startTbExec({ argv: ["--manifest", w.manifestPath, "--", process.execPath, UPSTREAM, w.outFile], env: w.env, host: "127.0.0.1", logSink: w.sink });
+      await until(() => w.bridge.statusBodies.length > 0, 10_000);
+      h.signal("SIGTERM");
+      const code = await h.exited;
+      assert.equal(code, 143);
+      assert.equal(w.starts().length, 0);
+    } finally {
+      await w.cleanup();
+    }
+  });
+});
