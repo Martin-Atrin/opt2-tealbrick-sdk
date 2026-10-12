@@ -23,6 +23,8 @@ test("nextCronTime UTC: strictly after, minute resolution, dom/dow OR rule, hori
   assert.equal(iso(nextCronTime("0 0 29 2 *", at("2026-03-01T00:00:00Z"))), "2028-02-29T00:00:00.000Z");
   assert.equal(nextCronTime("0 0 31 2 *", at("2026-01-01T00:00:00Z")), null);
   assert.equal(iso(nextCronTime("0 0 1 1 *", at("2026-12-31T23:59:00Z"))), "2027-01-01T00:00:00.000Z");
+  // epoch ms accepted (Evolution)
+  assert.equal(iso(nextCronTime("0 3 * * *", Date.parse("2026-10-12T03:00:00Z"))), "2026-10-13T03:00:00.000Z");
 });
 
 test("nextCronTime tz: plain local time; unknown zone is tz_invalid", () => {

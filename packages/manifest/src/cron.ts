@@ -179,11 +179,12 @@ function gapEnd(tz: string, wall: number): number {
 
 /**
  * The first due time strictly after `after` (minute resolution), or null when none falls within
- * {@link CRON_HORIZON_MS}. `cron` is an expression or a parsed schedule; `opts.tz` an IANA zone (default UTC).
+ * {@link CRON_HORIZON_MS}. `cron` is an expression or a parsed schedule; `after` a Date or epoch ms; `opts.tz` an IANA
+ * zone (default UTC).
  */
-export function nextCronTime(cron: string | CronSchedule, after: Date, opts: CronOptions = {}): Date | null {
+export function nextCronTime(cron: string | CronSchedule, after: Date | number, opts: CronOptions = {}): Date | null {
   const c = typeof cron === "string" ? parseCron(cron) : cron;
-  const a = after.getTime();
+  const a = typeof after === "number" ? after : after.getTime();
   if (!Number.isFinite(a)) throw new CronError("cron_invalid", "after is not a valid date");
   const tz = opts.tz ?? "UTC";
   const limit = a + CRON_HORIZON_MS;
