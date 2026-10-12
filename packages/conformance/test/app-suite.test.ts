@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { APP_CHECK_IDS, CHECK_IDS, type ConformanceConfig, exitCode, parseConformanceConfig, type Report, renderMarkdown, runApp } from "../src/index.ts";
 import { freePort } from "./apps/free-port.ts";
-import { type MiniAppFaults, startMiniApp } from "./apps/mini-app.ts";
+import { type MiniAppFaults, RECALL_OP, RECALL_TAG, startMiniApp } from "./apps/mini-app.ts";
 
 const path = new URL("./fixtures/sample.manifest.json", import.meta.url).pathname;
 const manifest = JSON.parse(readFileSync(path, "utf8")) as Manifest;
@@ -36,6 +36,7 @@ describe("app target", () => {
     const st = (id: string) => r.checks.find((c) => c.id === id)?.status;
     assert.equal(st("A12.app_caller_held"), "not_applicable");
     assert.equal(st("A11.resolve_family"), "not_applicable");
+    assert.equal(st("A11.narrowing_empty_anyof"), "not_applicable");
     assert.equal(st("A12.caller_name"), "pass");
     assert.match(r.checks.find((c) => c.id === "C3.grant_held_unknown")?.asserted ?? "", /item_delete \(destructive\): 202 held/);
   });
@@ -211,6 +212,51 @@ describe("app target", () => {
     const bf = statusOf(broken, "A11.resolve_family");
     assert.equal(bf?.status, "fail", bf?.asserted);
     assert.match(bf?.asserted ?? "", /item_lookup\/dyn_nope: listed in dynamic\.item_lookup\.resolveTools but resolve answered null/);
+  });
+
+  // ── v0.1.23 (C115, conformance 0.1.14): rules.narrowing — an empty anyOf passes NOTHING ──
+  const nr = structuredClone(manifest) as Manifest;
+  nr.operations.push({
+    id: RECALL_OP,
+    title: "Recall memories",
+    description: "Tag-filtered memory read (rules.narrowing).",
+    input: { type: "object", required: ["space"], properties: { space: { type: "string" } } },
+    output: { type: "object" },
+    crud: ["read"],
+    effect: "read",
+    scopeType: "space",
+    idempotency: "none",
+    receipt: false,
+    audience: "agent",
+  } as Manifest["operations"][number]);
+  const narrowingConfig = (n: Record<string, unknown> = { op: RECALL_OP, tag: RECALL_TAG.toUpperCase() }) => parseConformanceConfig({ narrowing: n }, "test config");
+  const runNr = (faults: MiniAppFaults = {}, config: ConformanceConfig | null = narrowingConfig()) => runApp({ manifest: nr, manifestPath: path, config, start: (env) => startMiniApp(nr, env, faults), deployTemplate: template, timeoutMs: 8000 });
+
+  it("v0.1.23 (C115): narrowing {op, tag} → a correct tag-filtered read passes A11.narrowing_empty_anyof (and every other check)", async () => {
+    const r = await runNr();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    const n = statusOf(r, "A11.narrowing_empty_anyof");
+    assert.equal(n?.status, "pass", n?.asserted);
+    assert.match(n?.asserted ?? "", /^memory_recall: unfiltered 3 item\(s\); anyOf \[\] → 200 ok, 0 item\(s\); anyOf \["CONFORMANCE"\] → 1 item\(s\)$/);
+  });
+
+  it("v0.1.23 (C115): an app whose filter reads anyOf: [] as \"no constraint\" fails A11.narrowing_empty_anyof", async () => {
+    const r = await runNr({ emptyAnyOfNoFilter: true });
+    const n = statusOf(r, "A11.narrowing_empty_anyof");
+    assert.equal(n?.status, "fail", n?.asserted);
+    assert.match(n?.asserted ?? "", /anyOf \[\] → 200 ok, 3 item\(s\) \(an empty anyOf must pass NOTHING\)/);
+    assert.equal(r.ok, false);
+  });
+
+  it("v0.1.23 (C115): narrowing config keys are checked (usage error); narrowing.op must be a static agent read op", async () => {
+    for (const bad of [{ narrowing: [] }, { narrowing: {} }, { narrowing: { op: "" } }, { narrowing: { op: RECALL_OP, extra: 1 } }, { narrowing: { op: RECALL_OP, tag: "" } }, { narrowing: { op: RECALL_OP, tag: "x".repeat(65) } }, { narrowing: { op: RECALL_OP, input: { space: "${nope}" } } }]) {
+      assert.throws(() => parseConformanceConfig(bad, "test config"), /narrowing/, JSON.stringify(bad));
+    }
+    assert.deepEqual(parseConformanceConfig({ narrowing: { op: RECALL_OP, input: { space: "${tb.instance}" }, tag: "x" } }, "t").narrowing, { op: RECALL_OP, input: { space: "${tb.instance}" }, tag: "x" });
+    const r = await runNr({}, narrowingConfig({ op: "item_create" }));
+    const n = statusOf(r, "A11.narrowing_empty_anyof");
+    assert.equal(n?.status, "fail", n?.asserted);
+    assert.match(n?.asserted ?? "", /narrowing\.op "item_create": not a static agent read op/);
   });
 
   it("--no-test-roots: a strict app refuses every fake-bridge slice, the run fails at boot with the pinned-roots note", async () => {

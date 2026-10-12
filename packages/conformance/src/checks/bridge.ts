@@ -708,6 +708,7 @@ export async function hookChecks(c: BridgeCtx): Promise<void> {
   }
   const entries = c.w.hookEntries().filter((h) => {
     const m = h.match;
+    if (h.enabled === false) return false;
     const prodOk = m.products.includes("*") || m.products.includes(p.product);
     const opOk = !m.operations || m.operations.includes(hooked.id);
     return prodOk && opOk;

@@ -17,13 +17,13 @@ const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url")
 const unb64 = (s: string) => JSON.parse(Buffer.from(s, "base64url").toString("utf8")) as Record<string, unknown>;
 const ON_BEHALF_OF_META = "tealbrick/onBehalfOf";
 
-/** Hook entries of `phase` that match a call of `op` at `app`, in chain order (order, then product). */
+/** Enabled hook entries of `phase` that match a call of `op` at `app`, in chain order (order, then product). */
 export function chainFor(c: BridgeCtx, app: FakeApp, op: Operation, phase: "before" | "context" | "after"): Chain {
   return c.w
     .hookEntries()
     .filter((h) => {
       const m = h.match;
-      return h.phase === phase && (m.products.includes("*") || m.products.includes(app.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
+      return h.enabled !== false && h.phase === phase && (m.products.includes("*") || m.products.includes(app.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
     })
     .sort((a, b) => a.order - b.order || (a.product < b.product ? -1 : a.product > b.product ? 1 : 0))
     .map((h) => ({ ...h, by: `${h.product}/${h.hookId}` }));

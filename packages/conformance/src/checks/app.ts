@@ -4,7 +4,7 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -20,7 +20,7 @@ import { SDK_COVERAGE } from "../sdk-coverage.ts";
 import { resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
-import type { ConformanceConfig, InputCaller, SetupStep } from "../waivers.ts";
+import type { ConformanceConfig, InputCaller, NarrowingFixture, SetupStep } from "../waivers.ts";
 import { CHECK_IDS } from "./catalog.ts";
 
 export interface AppTargetContext {
@@ -48,6 +48,8 @@ export interface AppTargetContext {
   setup?: readonly SetupStep[];
   /** v0.1.18: dynamic op id → tool names A11.resolve_family resolves instead of the catalog's */
   dynamic?: ConformanceConfig["dynamic"];
+  /** v0.1.23 (C115): the tag-filtered read A11.narrowing_empty_anyof sends (tealbrick-conformance.json `narrowing`) */
+  narrowing?: NarrowingFixture;
   /** report notes (setup step results are appended) */
   notes?: string[];
 }
@@ -881,6 +883,58 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const via = dyn.filter((o) => configured[o.id]).length;
     return ok(`${resolved} resolutions of ${dyn.length} dynamic op(s)${via ? ` (${via} via configured resolveTools)` : ""}; outward/money ones carry a family${seen.length ? `: ${seen.slice(0, 4).join("; ")}` : ""}`);
   });
+
+  // ── A11 rules.narrowing: an empty anyOf passes NOTHING (SDK-API §18 v0.1.23, C115) ──
+  // `narrowing {op, input?, tag?}` (tealbrick-conformance.json) names a tag-filtered read. Items = the entries of every
+  // array-valued field of `output` (or `output` itself when it is an array). n/a without the fixture.
+  await s.run(
+    "A11.narrowing_empty_anyof",
+    "rules.narrowing memoryTags {anyOf: []} returns no items (C115)",
+    "the configured narrowing.op as agent A: no rules.narrowing → ok with ≥ 1 item; rules.narrowing {v: 1, ruleId, reason, memoryTags: {anyOf: []}} → ok with no items, or 409 narrowing_unsupported; with narrowing.tag: {anyOf: [tag]} → only items whose tags hold it (normalised), ≥ 1 and ≤ the unfiltered count (or narrowing_unsupported)",
+    async () => {
+      const cfg = ctx.narrowing;
+      if (!cfg) return na("no narrowing fixture in tealbrick-conformance.json (an app without tag-filtered reads)");
+      const op = m.operations.find((o) => o.id === cfg.op);
+      if (op?.audience !== "agent" || op.dynamic || op.crud.length !== 1 || op.crud[0] !== "read") return bad(`tealbrick-conformance.json narrowing.op ${JSON.stringify(cfg.op)}: not a static agent read op (crud [read]) of this manifest`);
+      let input: Json;
+      if (cfg.input !== undefined) {
+        const r = resolvePlaceholders(cfg.input, setup);
+        taint.push(...r.blocked);
+        input = r.value;
+      } else input = inputFor(op);
+      const narrowed = (memoryTags: { anyOf: string[] } | null) =>
+        c().callOp(op.id, input, { agent: agentA.id, ...(idemKey(op) ? { idempotencyKey: idemKey(op) } : {}), context: memoryTags ? { "rules.narrowing": { v: 1, ruleId: "conf", reason: "conformance", memoryTags } } : {} });
+      const itemsOf = (a: OpAnswer): unknown[] => {
+        const out = isObj(a.body) ? a.body.output : undefined;
+        return Array.isArray(out) ? out : isObj(out) ? Object.values(out).filter(Array.isArray).flat() : [];
+      };
+      const unsupported = (a: OpAnswer) => a.status === 409 && errorCode(a.body) === "narrowing_unsupported";
+      const plain = await narrowed(null);
+      if (!isOk(plain)) return bad(`${op.id} without rules.narrowing: ${show(plain)} (expected 200 ok)`);
+      const all = itemsOf(plain).length;
+      if (all === 0) return notRun(`${op.id} without rules.narrowing returned no items: the fixture (setup + narrowing.input) must yield tagged items, else an empty anyOf cannot be told apart`);
+      const empty = await narrowed({ anyOf: [] });
+      const emptyN = isOk(empty) ? itemsOf(empty).length : null;
+      const emptyOk = unsupported(empty) || emptyN === 0;
+      const parts = [`unfiltered ${all} item(s)`, `anyOf [] → ${show(empty)}${emptyN === null ? "" : `, ${emptyN} item(s)${emptyN ? " (an empty anyOf must pass NOTHING)" : ""}`}`];
+      let tagOk = true;
+      if (cfg.tag !== undefined) {
+        const want = normalizeTag(cfg.tag);
+        const tagged = await narrowed({ anyOf: [cfg.tag] });
+        if (unsupported(tagged)) parts.push(`anyOf [${JSON.stringify(cfg.tag)}] → ${show(tagged)}`);
+        else if (!isOk(tagged)) {
+          tagOk = false;
+          parts.push(`anyOf [${JSON.stringify(cfg.tag)}] → ${show(tagged)} (expected 200 ok or narrowing_unsupported)`);
+        } else {
+          const items = itemsOf(tagged);
+          const off = items.filter((x) => !isObj(x) || !Array.isArray(x.tags) || !x.tags.some((t) => typeof t === "string" && normalizeTag(t) === want)).length;
+          tagOk = off === 0 && items.length >= 1 && items.length <= all;
+          parts.push(`anyOf [${JSON.stringify(cfg.tag)}] → ${items.length} item(s)${off ? `, ${off} without the tag` : ""}${items.length === 0 ? " (none: the fixture promises an item with the tag)" : ""}${items.length > all ? " (more than unfiltered)" : ""}`);
+        }
+      } else parts.push("anyOf [tag] not checked (no narrowing.tag)");
+      return verdict(emptyOk && tagOk, `${op.id}: ${parts.join("; ")}`);
+    },
+  );
 
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──
   let retry: OpAnswer | null = null;

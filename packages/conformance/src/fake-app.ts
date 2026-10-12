@@ -139,7 +139,22 @@ export class FakeApp {
   }
 
   close(): Promise<void> {
-    return closeServer(this.#server);
+    return this.#server.listening ? closeServer(this.#server) : Promise.resolve();
+  }
+
+  /** v0.1.24 (C117, B27.hook_app_down): the app goes down — its listener closes, connections are refused. */
+  async stop(): Promise<void> {
+    if (this.#server.listening) await closeServer(this.#server);
+  }
+
+  /** Brings a stopped app up again on the same origin (`url` unchanged). */
+  async start(): Promise<void> {
+    if (this.#server.listening) return;
+    await listen(this.#server, Number(new URL(this.url).port));
+  }
+
+  get up(): boolean {
+    return this.#server.listening;
   }
 
   // ── server side (what the bridge calls) ──────────────────────────────────────

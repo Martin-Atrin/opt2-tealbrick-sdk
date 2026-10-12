@@ -5,6 +5,7 @@
 // that never boots fails every check.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { BridgeWorld } from "../../src/bridge-world.ts";
 import { cspFormActionSelf } from "../../src/checks/bridge-flows.ts";
 import { BRIDGE_CHECKS, CHECK_IDS, type Report, runBridgeTarget } from "../../src/index.ts";
 import { type MiniFlags, type MiniState, startMiniBridge } from "./mini-bridge.ts";
@@ -20,7 +21,12 @@ const KEYSET_IDS = ["B20.kss_enrolled", "B20.portal_keys_ignored", "B20.kss_unkn
 
 const SPINE013_IDS = ["B22.hold_verdict", "B22.hold_retry_refused", "B22.hv_tamper", "B23.on_behalf_of", "B23.reserved_tb_namespace", "B24.app_initiated", "B24.no_grant"];
 const B26_IDS = ["B26.app_initiated_real", "B26.app_initiated_rate", "B26.app_initiated_audit", "B26.parent_call_forged", "B26.parent_call_foreign", "B26.parent_call_expired"];
-const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark", "B25.real_hook_hold", ...B26_IDS];
+const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark", "B25.real_hook_hold", "B25.real_hook_after_update", ...B26_IDS];
+const C117_IDS = ["B27.hook_declared_absent", "B27.hook_disabled_skipped", "B27.hook_app_down"];
+const HOOK_IDS = ["B6.order", "B6.hook_proof", "B6.no_hook_recursion", "B6.before_denied", "B6.before_failed", "B6.context_merged", "B6.after_failed"]; // B6.after_output: the mini bridge applies no redactions (not a C117 rule)
+// the pause.instance checks C117 touches (hooks switched off by the owner while the hook app is paused); the mini bridge
+// does not implement the rest of the instance pause (tools/list, companion, key fetch)
+const PAUSE_INSTANCE_IDS = ["P1.instance.hook_app_paused", "P1.instance.other_app"];
 const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"];
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
@@ -108,6 +114,34 @@ describe("bridge target", () => {
     for (const id of REAL_APP_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
   });
 
+  it("C117 (spec 0.1.24): the fake Portal lists every declared hook with enabled: true; hookState drops or switches one entry; hooksOn=false switches all off", async () => {
+    const w = await BridgeWorld.create();
+    try {
+      const all = w.hookEntries();
+      const declared = w.apps.reduce((n, a) => n + (a.manifest.hooks ?? []).length, 0);
+      assert.ok(all.length > 0 && all.length === declared, `${all.length} entries for ${declared} declared hooks`);
+      assert.ok(all.every((h) => h.enabled === true));
+      const [one, two] = all as [(typeof all)[0], (typeof all)[0]];
+      w.hookState.set(one.id, "absent");
+      w.hookState.set(two.id, "disabled");
+      const next = w.hookEntries();
+      assert.equal(next.length, all.length - 1);
+      assert.equal(next.find((h) => h.id === one.id), undefined);
+      assert.equal(next.find((h) => h.id === two.id)?.enabled, false);
+      w.hookState.clear();
+      w.hooksOn = false;
+      assert.ok(w.hookEntries().length === all.length && w.hookEntries().every((h) => h.enabled === false));
+    } finally {
+      await w.close();
+    }
+  });
+
+  it("C117 (group c117): a correct bridge passes B27.hook_*; hooks and pause.instance (hooks switched off, not dropped) stay green", async () => {
+    const r = await run({}, ["c117", "hooks", "pause.instance"]);
+    for (const id of [...C117_IDS, ...HOOK_IDS, ...PAUSE_INSTANCE_IDS]) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
+    assert.equal(status(r, "B25.real_hook_after_update"), "not_run", "real_app not selected");
+  });
+
   it("QA S1 regression (C91): a bridge that signs catalog proofs with `in` fails B25.real_catalog_search (real SDK) and B16.search_uses_catalog (fake app)", async () => {
     const r = await run({ catalogWithIn: true }, ["real_app", "dynamic"]);
     for (const id of ["B25.real_catalog_search", "B16.search_uses_catalog"]) assert.equal(status(r, id), "fail", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
@@ -163,6 +197,12 @@ describe("bridge target", () => {
     ["treats a before hook's hold verdict as hook_failed", { holdAsHookFailed: true }, ["real_app"], ["B25.real_hook_hold"]],
     ["accepts another instance's in-flight call as parentCall", { parentAnyInstance: true }, ["real_app"], ["B26.parent_call_foreign"]],
     ["keeps finished calls as valid parentCalls", { parentKeepsFinished: true }, ["real_app"], ["B26.parent_call_expired"]],
+    // spec 0.1.24 (C117, S1 fail-open: hooks dropped after an update)
+    ["builds the hook chain from config hooks[] only (a declared, absent hook is not enforced)", { trustConfigHooks: true }, ["c117"], ["B27.hook_declared_absent"]],
+    ["forwards ungated while the real gate app updates and its hook is missing from config hooks[]", { trustConfigHooks: true }, ["real_app"], ["B25.real_hook_after_update"]],
+    ["refuses a declared, unlisted hook without reporting rejected hook_not_listed (v0.1.25)", { noHookNotListedReport: true }, ["c117"], ["B27.hook_declared_absent"]],
+    ["ignores the hook enabled switch", { ignoreHookEnabled: true }, ["c117"], ["B27.hook_disabled_skipped"]],
+    ["skips a hook whose app is down", { skipDownHookApp: true }, ["c117"], ["B27.hook_app_down"]],
   ];
   for (const [name, flags, groups, ids] of broken) {
     it(`fails a bridge that ${name}`, async () => {

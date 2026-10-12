@@ -65,6 +65,7 @@ export {
   type InputCaller,
   loadConformanceConfig,
   loadWaiverFile,
+  type NarrowingFixture,
   parseConformanceConfig,
   parseWaiveFlag,
   SETUP_CALLERS,

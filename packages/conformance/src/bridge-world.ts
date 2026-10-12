@@ -203,7 +203,17 @@ export class BridgeWorld {
   /** `held` overrides the agent card default (DEFAULT_HELD_FAMILIES); v0.1.17 (C108) it may name unknown families */
   /** agent grants the fake Portal mints into the config; `caps` (v0.1.19 C111a: applies in any mode) default {} */
   grantSpecs: { role: AgentRole; app: FakeApp; crud: CrudAction[]; mode: AgentMode; wf: string[]; held?: readonly string[]; caps?: FreeCaps }[] = [];
+  /**
+   * Owner switch for every hook (v0.1.24, C117): false → every config `hooks[]` entry carries `enabled: false` (the
+   * owner switched them off; the bridge skips them). Core still LISTS every declared hook: a hook missing from the
+   * config is refused (hook_failed), so "no hooks" is never modelled by dropping entries.
+   */
   hooksOn = true;
+  /**
+   * v0.1.24 (C117, B27.hook_*): per config hook entry id (`<product>.<hookId>`): `absent` = left out of config
+   * `hooks[]` (the S1 fault: Core dropped a declared hook), `disabled` = listed with `enabled: false`.
+   */
+  readonly hookState = new Map<string, "absent" | "disabled">();
   enrolCodes: EnrolCodeEntry[] = [];
   claimCode = "";
   standalone: (StandaloneState & { ownerKey: Ed25519KeyPair; owner: PersonId }) | null = null;
@@ -385,16 +395,23 @@ export class BridgeWorld {
     return this.grants.get(`${role}|${app.ins}`);
   }
 
+  /**
+   * Config `hooks[]` (BRIDGE v0.1.24, C117): EVERY declared hook of every deployed app (the fake apps and the listed real
+   * SDK app) with `enabled` (the owner switch, true unless `hooksOn` is false or `hookState` says `disabled`); an entry
+   * whose `hookState` is `absent` is left out.
+   */
   hookEntries(): HookEntry[] {
-    if (!this.hooksOn) return [];
     const out: HookEntry[] = [];
-    for (const a of this.apps)
-      for (const h of a.manifest.hooks ?? [])
-        out.push({ id: `${a.product}.${h.id}` as HookEntry["id"], ins: a.ins, product: a.product, hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match });
+    const add = (ins: InstanceId, product: string, h: NonNullable<Manifest["hooks"]>[number]) => {
+      const id = `${product}.${h.id}` as HookEntry["id"];
+      const state = this.hookState.get(id);
+      if (state === "absent") return;
+      out.push({ id, ins, product: product as HookEntry["product"], hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match, enabled: this.hooksOn && state !== "disabled" });
+    };
+    for (const a of this.apps) for (const h of a.manifest.hooks ?? []) add(a.ins, a.product, h);
     // the listed real SDK app's hooks (B25.real_hook_hold: a REAL before hook answering a hold verdict)
     const real = this.realApp?.listed ? this.realApp : null;
-    for (const h of real?.manifest.hooks ?? [])
-      out.push({ id: `${real?.manifest.id}.${h.id}` as HookEntry["id"], ins: real?.ins as InstanceId, product: real?.manifest.id as HookEntry["product"], hookId: h.id, phase: h.phase, order: h.order, timeoutMs: h.timeoutMs ?? 2000, match: h.match });
+    if (real) for (const h of real.manifest.hooks ?? []) add(real.ins, real.manifest.id, h);
     return out;
   }
 

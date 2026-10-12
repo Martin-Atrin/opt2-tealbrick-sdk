@@ -1,4 +1,5 @@
-// Per-app conformance config (v0.1.18: one loader for `waivers`, `setup`, `inputs`, `inputsAs`, `dynamic`).
+// Per-app conformance config (v0.1.18: one loader for `waivers`, `setup`, `inputs`, `inputsAs`, `dynamic`; v0.1.23
+// (package 0.1.14): `narrowing`).
 // Waivers (CONFORMANCE v0.1.13, Fleet C89): `--waive <checkId>@<untilVersion>` (repeatable) and an optional
 // `tealbrick-conformance.json` next to the manifest `{ "waivers": [{ "id", "until", "reason" }] }`. A waived check that
 // would fail / not_run reports `waived` while this package's version < `until` (report.ts applyWaivers). Unknown ids
@@ -76,6 +77,19 @@ export interface ConformanceConfig {
   inputsAs: Partial<Record<InputCaller, Record<string, Json>>>;
   /** dynamic op id → tool names A11.resolve_family resolves instead of the catalog's */
   dynamic: Record<string, { resolveTools: string[] }>;
+  /** v0.1.23 (C115, package 0.1.14): the tag-filtered read A11.narrowing_empty_anyof sends (absent → not_applicable) */
+  narrowing?: NarrowingFixture;
+}
+
+/**
+ * `narrowing` (CONFORMANCE v0.1.23, C115): `op` = an agent read op that filters its items by `rules.narrowing`
+ * memoryTags; `input` = its input (placeholders allowed; default: generated from the schema); `tag` = a tag the
+ * setup gave at least one item (optional: without it the `anyOf: [tag]` part is not checked).
+ */
+export interface NarrowingFixture {
+  op: string;
+  input?: Json;
+  tag?: string;
 }
 
 export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
@@ -84,7 +98,8 @@ export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], setu
 export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOP_KEYS = new Set(["waivers", "setup", "inputs", "inputsAs", "dynamic", "$schema", "$comment"]);
+const TOP_KEYS = new Set(["waivers", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "$schema", "$comment"]);
+const NARROWING_KEYS = new Set(["op", "input", "tag"]);
 const STEP_KEYS = new Set(["id", "as", "op", "input", "capture"]);
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -102,7 +117,7 @@ export function placeholderNames(v: unknown, out: string[] = []): string[] {
 /** Validates a parsed `tealbrick-conformance.json` (`where` names the file in errors). */
 export function parseConformanceConfig(doc: unknown, where: string): ConformanceConfig {
   if (!isRecord(doc)) throw new WaiverError(`${where}: must be a JSON object`);
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, setup, inputs, inputsAs, dynamic)`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, setup, inputs, inputsAs, dynamic, narrowing)`);
   const waivers = parseWaivers(doc.waivers, where);
   const builtins = new Set<string>(BUILTIN_PLACEHOLDERS);
   const captured = new Set<string>();
@@ -164,7 +179,19 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
       dynamic[op] = { resolveTools: [...(tools as string[])] };
     }
   }
-  return { waivers, setup, inputs, inputsAs, dynamic };
+  let narrowing: NarrowingFixture | undefined;
+  if (doc.narrowing !== undefined) {
+    const n = doc.narrowing;
+    const shape = `${where}: narrowing must be {op: "<agent read op id>", input?: <input>, tag?: "<tag>"}`;
+    if (!isRecord(n)) throw new WaiverError(shape);
+    for (const k of Object.keys(n)) if (!NARROWING_KEYS.has(k)) throw new WaiverError(`${where}: narrowing: unknown key ${JSON.stringify(k)} (allowed: op, input, tag)`);
+    if (typeof n.op !== "string" || n.op.length === 0) throw new WaiverError(`${shape}; op missing`);
+    // SDK-API §18: tags ≤ 64 chars (compared after normalizeTag = trim + lower case)
+    if (n.tag !== undefined && (typeof n.tag !== "string" || n.tag.trim().length === 0 || n.tag.length > 64)) throw new WaiverError(`${where}: narrowing.tag must be a non-empty string of ≤ 64 characters`);
+    if (n.input !== undefined) known(placeholderNames(n.input), "narrowing.input", "any setup step");
+    narrowing = { op: n.op, ...(n.input !== undefined ? { input: n.input as Json } : {}), ...(typeof n.tag === "string" ? { tag: n.tag } : {}) };
+  }
+  return { waivers, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}) };
 }
 
 function parseWaivers(list: unknown, where: string): Waiver[] {

@@ -116,6 +116,14 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B24.app_initiated": "companion call without parentCall passes the whole pipeline; hooks see caller type app",
     "B24.no_grant": "app-initiated call without TB-Grant or for an undeclared op → refused; the target is not called",
   }),
+  // spec 0.1.24 (C117, S1 fail-open: Rules hooks dropped after an update; bridge 0.1.22+): the bridge builds the chain from
+  // the hooks DECLARED in the deployed apps' manifests; config hooks[] only switches them (enabled). An older bridge
+  // deselects this group (--groups without c117).
+  c117: ids({
+    "B27.hook_declared_absent": "a before hook declared in a deployed app's manifest but absent from config hooks[] → hook_failed, not forwarded; reported rejected config hook_not_listed with the hook app's ins (C117, v0.1.25)",
+    "B27.hook_disabled_skipped": "a declared hook listed with enabled: false → skipped: the call is forwarded, its app gets no hook call (C117)",
+    "B27.hook_app_down": "a declared hook listed and enabled whose app is down (connection refused) → hook_failed; the call is not forwarded (C117)",
+  }),
   // C91: a REAL @opt2-tealbrick/miniapp-sdk app behind the bridge (the fake apps cannot catch a binding the SDK refuses)
   real_app: ids({
     "B25.real_catalog_search": "<product>__<op>_search through the bridge returns the real SDK app's catalog entries",
@@ -123,6 +131,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B25.real_op_call": "a plain op passes the real SDK's proof / grant verification and authorize() and writes its receipt",
     "B25.real_mark": "a failing after hook marks the real SDK app's receipt after_failed (bridge op mark)",
     "B25.real_hook_hold": "a REAL SDK before hook answering a hold verdict → the bridge forwards with hv, the fake app holds (never hook_failed; L2)",
+    "B25.real_hook_after_update": "the REAL SDK app owning a before hook restarts (release update): while it is down — also with its hook missing from config hooks[] — the call is refused, never forwarded ungated; after the restart the hook gates again (C117)",
     // C85 + v0.1.14 A2A-10: app-initiated companion calls (the real SDK app as the CALLER; fake apps for parentCall)
     "B26.app_initiated_real": "StartContext.callApp of the real SDK app reaches a fake app: ok, hooks see caller type app, no parentCall forwarded",
     "B26.app_initiated_rate": "app-initiated calls are rate-limited per caller instance (burst 30, then rate_limited; a refilled token passes)",

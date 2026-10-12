@@ -43,7 +43,7 @@ export interface RunAppOptions {
   /** known-good inputs per op id (generic fixtures; never needed for the standard ops); the config file's `inputs` win per key */
   inputs?: Record<string, Json>;
   /**
-   * v0.1.18: the per-app `tealbrick-conformance.json` (setup, inputs, inputsAs, dynamic; waivers are applied by the
+   * v0.1.18: the per-app `tealbrick-conformance.json` (setup, inputs, inputsAs, dynamic, narrowing; waivers are applied by the
    * caller). Default: loaded from beside `manifestPath` (a malformed file throws WaiverError); `null`: none.
    */
   config?: ConformanceConfig | null;
@@ -203,6 +203,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       inputsAs: config.inputsAs,
       setup: config.setup,
       dynamic: config.dynamic,
+      ...(config.narrowing ? { narrowing: config.narrowing } : {}),
       notes,
       testRoots,
       keysetRequired,

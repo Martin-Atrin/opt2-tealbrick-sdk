@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { type BridgeStart, type BridgeStartResult, BridgeWorld } from "./bridge-world.ts";
 import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dynamicChecks, enrolChecks, enrolRequests, hookChecks, mcpChecks, peerCatalog, surfaceChecks } from "./checks/bridge.ts";
+import { c117Checks } from "./checks/bridge-c117.ts";
 import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
 import { addressChecks, configChecks, keyChecks, keySetChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
@@ -146,6 +147,7 @@ const RUNNERS: [string[], Group][] = [
   [["dynamic"], dynamicChecks],
   [["companion"], companionChecks],
   [["spine013"], spine013Checks],
+  [["c117"], c117Checks],
   [["real_app"], realAppChecks],
   [["claim"], claimChecks],
   [["keys"], keyChecks],

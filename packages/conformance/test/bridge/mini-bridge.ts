@@ -6,6 +6,8 @@
 // C85 + v0.1.14 (A2A-10): calls in flight per instance (target or answering one of its hooks), hook re-entry and depth
 // from a VALID parentCall only; anything else is app-initiated: per-caller token bucket (burst 30, 2/s → rate_limited +
 // Retry-After) and a `call.app_initiated` JSON log line (kept in MiniState.logs, which the tests hand the runner).
+// v0.1.24 (C117): the chain = the hooks DECLARED in the deployed apps' manifests (fetched at config apply); config
+// hooks[] is the owner switch (enabled: false → skipped); a declared hook absent from it, or whose app is down → hook_failed.
 // Flags break exactly one rule each so a test can assert the matching check flips from pass to fail.
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -111,6 +113,14 @@ export interface MiniFlags {
   parentAnyInstance?: boolean;
   /** A2A-10: finished calls stay valid parents (fails B26.parent_call_expired) */
   parentKeepsFinished?: boolean;
+  /** C117: builds the chain from config hooks[] only: a declared hook absent from it is not run and refuses nothing (fails B27.hook_declared_absent, B25.real_hook_after_update) */
+  trustConfigHooks?: boolean;
+  /** v0.1.25: refuses a declared, unlisted hook but reports no rejected hook_not_listed (fails B27.hook_declared_absent) */
+  noHookNotListedReport?: boolean;
+  /** C117: ignores the owner switch: a hook listed with enabled: false still runs (fails B27.hook_disabled_skipped) */
+  ignoreHookEnabled?: boolean;
+  /** C117: a hook whose app refuses the connection (down) is skipped instead of hook_failed (fails B27.hook_app_down) */
+  skipDownHookApp?: boolean;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -200,7 +210,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
   let trusted: PortalKeyEntry[] = state.trusted ?? enrol.portalKeys;
   const brg = `tb:brg:${enrol.bridgeId}` as const;
   const rejected = new Map<string, number>();
-  const reject = (code: string, kind = "config") => rejected.set(`${kind}|${code}`, (rejected.get(`${kind}|${code}`) ?? 0) + 1);
+  const reject = (code: string, kind = "config", ins = "") => rejected.set(`${kind}|${code}|${ins}`, (rejected.get(`${kind}|${code}|${ins}`) ?? 0) + 1);
   const routable = (a: { internalUrl: string; ownInfra?: boolean }) => flags.noAddressCheck || isPrivateInternalUrl(a.internalUrl, { ownInfra: a.ownInfra === true, allowList });
   let cfg: WorkspaceConfig | null = null;
   const verdictCache = new Map<string, HoldVerdictClaim>();
@@ -228,7 +238,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       connectionsCreated: [],
       connectionsRevoked: [],
       claims: claimsSeen,
-      rejected: [...rejected].map(([k, count]) => ({ kind: k.split("|")[0], code: k.split("|")[1], count })),
+      rejected: [...rejected].map(([k, count]) => {
+        const [kind, code, ins] = k.split("|");
+        return { kind, code, count, ...(ins ? { ins } : {}) };
+      }),
       toolsOmitted: [],
       ...extra,
     }).catch(() => undefined);
@@ -368,10 +381,14 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     return { isError: true, content: [{ type: "text", text: JSON.stringify({ error }) }], structuredContent: { error } };
   };
 
+  /** skipDownHookApp: the answer of a hook call whose app refused the connection */
+  const DOWN = { status: -1, body: null } as const;
   /** one hook call (hook proof, BRIDGE §8.1 steps 6/7/12); null on transport failure or timeout */
   const hookCall = async (h: HookEntry, phase: "before" | "context" | "after", sub: string, callId: string, call: Record<string, Json>, context: Record<string, Json>, output?: Json): Promise<{ status: number; body: unknown } | null> => {
     const app = (cfg as WorkspaceConfig).apps.find((a) => a.ins === h.ins);
     if (!app) return null;
+    // P1: a paused hook app gets no hook call; its hook fails closed
+    if (!flags.skipPause && (cfg as WorkspaceConfig).pause.instances.includes(h.ins as never)) return null;
     const live = calls.get(callId);
     live?.inHook.set(h.ins, (live.inHook.get(h.ins) ?? 0) + 1);
     try {
@@ -392,7 +409,9 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         signal: AbortSignal.timeout(h.timeoutMs + 200),
       });
       return { status: r.status, body: await r.json().catch(() => null) };
-    } catch {
+    } catch (e) {
+      // skipDownHookApp: a refused connection (not a timeout) reads as "app down → skip the hook"
+      if (flags.skipDownHookApp && !(e instanceof Error && e.name === "TimeoutError")) return DOWN;
       return null;
     }
   };
@@ -416,10 +435,24 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     const sub = `tb:${o.caller.type === "agent" ? "agt" : "ins"}:${o.caller.id}`;
     const op = o.op;
     const call: Record<string, Json> = { id: callId, ws: c.ws, caller: o.caller as unknown as Json, target: { instance: o.ins, product: o.m.id, op: op.id, crud: op.crud, effect: op.effect }, input: o.input };
+    const matches = (h: { match: HookEntry["match"] }) => (h.match.products.includes("*") || h.match.products.includes(o.m.id)) && (!h.match.operations || h.match.operations.includes(op.id)) && (!h.match.effects || h.match.effects.includes(op.effect));
+    // C117: config hooks[] is the owner switch (enabled: false → skipped); the chain itself is the declared hooks
     const matching = (phase: string) =>
       (o.hooks ? (c.hooks ?? []) : [])
-        .filter((h) => h.phase === phase && (h.match.products.includes("*") || h.match.products.includes(o.m.id)) && (!h.match.operations || h.match.operations.includes(op.id)) && (!h.match.effects || h.match.effects.includes(op.effect)))
+        .filter((h) => (flags.ignoreHookEnabled || h.enabled !== false) && h.phase === phase && matches(h))
         .sort((a, b) => a.order - b.order || (a.product < b.product ? -1 : a.product > b.product ? 1 : 0));
+    // C117 (BRIDGE v0.1.24): a matching hook DECLARED in the manifest of a deployed app but absent from config hooks[]
+    // refuses the call (fail closed; never forwarded without it)
+    if (o.hooks && !flags.trustConfigHooks)
+      for (const a of c.apps) {
+        const dm = manifests.get(a.ins);
+        for (const h of dm?.hooks ?? [])
+          if (matches(h) && !(c.hooks ?? []).some((e) => e.ins === a.ins && e.hookId === h.id)) {
+            // v0.1.25 (bridge 0.1.22): reported as rejected {kind: config, code: hook_not_listed, ins: the hook app}
+            if (!flags.noHookNotListedReport) reject("hook_not_listed", "config", a.ins);
+            return { error: "hook_failed" };
+          }
+      }
     let context = { ...o.context };
     const cacheKey = `${sub}|${op.id}|${digest(o.input)}`;
     let hv: HoldVerdictClaim | undefined = flags.cacheHoldVerdict ? verdictCache.get(cacheKey) : undefined;
@@ -427,6 +460,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       const answers: { by: string; answer: { allow: boolean; reason?: string; hold?: never } }[] = [];
       for (const h of matching("before")) {
         const r = await hookCall(h, "before", sub, callId, call, context);
+        if (r === DOWN) continue;
         if (r?.status !== 200 || hookResponseProblem("before", r.body, h.product)) return { error: "hook_failed" };
         const answer = r.body as { allow: boolean; reason?: string; hold?: never };
         if (flags.holdAsHookFailed && answer.hold) return { error: "hook_failed" };
@@ -443,6 +477,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
     for (const h of matching("context")) {
       const r = await hookCall(h, "context", sub, callId, call, context);
+      if (r === DOWN) continue;
       if (r?.status !== 200 || !isObj(r.body) || !isObj(r.body.add)) return { error: "hook_failed" };
       const add = r.body.add as Record<string, Json>;
       const checked = flags.allowTbContext ? { add: Object.fromEntries(Object.entries(add).filter(([k]) => !k.startsWith("tb."))) } : r.body;
@@ -460,6 +495,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     if (r.status === 200) {
       for (const h of matching("after")) {
         const a = await hookCall(h, "after", sub, callId, call, context, (body.output ?? null) as Json);
+        if (a === DOWN) continue;
         if (a?.status !== 200 || hookResponseProblem("after", a.body, h.product)) {
           // the op ran: its receipt is marked after_failed (bridge op mark, BRIDGE §8.1 step 12)
           await bridgeOp(o.ins, "mark", { call: callId, mark: "after_failed" });

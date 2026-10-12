@@ -24,6 +24,7 @@ import {
   seal,
   sealAad,
   signInstanceAssertion,
+  tagsMatch,
   trustedPortalKeys,
   unseal,
   validateInput,
@@ -102,7 +103,23 @@ export interface MiniAppFaults {
    * dynamic.<op>.resolveTools.
    */
   emptyCatalog?: boolean;
+  /** v0.1.23 (C115): the tag-filtered read treats `anyOf: []` as "no constraint" (manifest 0.1.15 bug; fails A11.narrowing_empty_anyof) */
+  emptyAnyOfNoFilter?: boolean;
 }
+
+/**
+ * v0.1.23 (C115): a manifest op with this id is a tag-filtered memory read (SDK-API §18 `rules.narrowing`): output
+ * `{items: [{id, tags}], nextCursor}` over RECALL_ITEMS, filtered with the shared `tagsMatch` (L1); an unknown `v` →
+ * 409 narrowing_unsupported. The tests add it to a manifest variant only.
+ */
+export const RECALL_OP = "memory_recall";
+/** The recall op's items; RECALL_TAG (any case) is carried by exactly one of them. */
+export const RECALL_TAG = "conformance";
+const RECALL_ITEMS = [
+  { id: "mem_1", tags: [" Conformance "] },
+  { id: "mem_2", tags: ["other"] },
+  { id: "mem_3", tags: [] as string[] },
+] as const;
 
 /** Catalog of every dynamic op of the mini app (DynamicCatalogEntry): a read entry, an outward and a money entry. */
 const DYN_ENTRIES = [
@@ -541,6 +558,18 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       save();
       statusChanged();
       return json(res, 202, { status: "held", holdId: h.id, expiresAt: new Date(h.expiresAt ?? 0).toISOString() });
+    }
+    if (op.id === RECALL_OP) {
+      // SDK-API §18 rules.narrowing (G5): absent → unfiltered; unknown v → narrowing_unsupported; memoryTags via tagsMatch
+      const n = body.context?.["rules.narrowing"];
+      let items = [...RECALL_ITEMS];
+      if (n !== undefined) {
+        if (!isObj(n) || n.v !== 1) throw new E(409, "narrowing_unsupported");
+        const mt = isObj(n.memoryTags) ? (n.memoryTags as { anyOf?: string[]; noneOf?: string[] }) : undefined;
+        const tags = faults.emptyAnyOfNoFilter && mt?.anyOf?.length === 0 ? { ...(mt.noneOf ? { noneOf: mt.noneOf } : {}) } : mt;
+        items = items.filter((x) => tagsMatch(tags, x.tags));
+      }
+      return json(res, 200, { status: "ok", output: { items: items.map((x) => ({ id: x.id, tags: [...x.tags] })), nextCursor: null } });
     }
     // read ops also read the companion product (app→app through the bridge)
     const companion = op.crud.includes("read") ? await callCompanion(callId) : null;

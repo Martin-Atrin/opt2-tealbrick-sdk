@@ -128,6 +128,7 @@ export const APP_CHECK_IDS = [
   "A12.app_caller_held",
   "A12.scope_request",
   "A11.resolve_family",
+  "A11.narrowing_empty_anyof",
   "A13.kss_pinned",
   "A13.portal_keys_ignored",
   "A13.kss_unknown_root",

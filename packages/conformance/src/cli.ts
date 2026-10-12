@@ -49,6 +49,7 @@ const USAGE = `usage:
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
       --groups: e.g. spine013 = the spec 0.1.13 checks B22–B24 (hold verdict, reserved context, app-initiated calls); leave it out for a bridge older than 0.1.14;
+        c117 = B27.hook_*: chain from the hooks declared in the deployed manifests, config hooks[] enabled switch (spec 0.1.24); leave it out for an older bridge;
         real_app = B25: a REAL @opt2-tealbrick/miniapp-sdk app (started in this process) behind the bridge (C91); B26: its app-initiated
           callApp (C85: rate limit, call.app_initiated audit from the --cmd / --start logs) and ignored parentCalls (v0.1.14 A2A-10)
       --sdk-module <specifier|file URL>: the SDK for real_app (default: the installed @opt2-tealbrick/miniapp-sdk)
@@ -67,6 +68,8 @@ const USAGE = `usage:
       "inputs": {"<opId>": input}  merged over --inputs (the file wins per key)
       "inputsAs": {"agentA"|"agentB"|"app": {"<opId>": input}}  overrides "inputs" for that caller
       "dynamic": {"<dynamicOpId>": {"resolveTools": ["<tool>"]}}  A11.resolve_family resolves these instead of the catalog
+      "narrowing": {"op": "<tag-filtered agent read op>", "input"?: input, "tag"?: "<tag of a setup item>"}  A11.narrowing_empty_anyof
+        (C115) sends that read with context rules.narrowing memoryTags {anyOf: []} (no items, or narrowing_unsupported), {anyOf: [tag]}, none
       "\${name}" (whole string values) = a captured value, or \${tb.agentA} \${tb.agentB} \${tb.app} \${tb.instance};
       a check that needs a capture of a failed step reports not_run naming the step and its answer`;
 

@@ -99,7 +99,7 @@ export async function realAppChecks(c: BridgeCtx): Promise<void> {
     });
     await c.run("B25.real_mark", "a failing after hook marks the real app's receipt after_failed", "after hook answers 500 → isError after_failed; the real app's receipt of that call → after_failed (verified bridge-op mark)", async () => {
       const op: Operation | undefined = manifest.operations.find((o) => o.id === REAL_OPS.plain);
-      const after = c.w.hookEntries().filter((h) => h.phase === "after" && (h.match.products.includes("*") || h.match.products.includes(manifest.id)) && (!h.match.operations || h.match.operations.includes(REAL_OPS.plain)) && (!h.match.effects || (op && h.match.effects.includes(op.effect))));
+      const after = c.w.hookEntries().filter((h) => h.enabled !== false && h.phase === "after" && (h.match.products.includes("*") || h.match.products.includes(manifest.id)) && (!h.match.operations || h.match.operations.includes(REAL_OPS.plain)) && (!h.match.effects || (op && h.match.effects.includes(op.effect))));
       const hookApp = after[0] ? c.w.apps.find((x) => x.product === after[0]?.product) : undefined;
       if (!after[0] || !hookApp) return bad("no after hook matches the real app's op");
       const id = after[0].hookId;
@@ -148,6 +148,65 @@ export async function realAppChecks(c: BridgeCtx): Promise<void> {
       }
     });
     await appInitiatedChecks(c, ins, app, target, targetOp);
+
+    // C117 (spec 0.1.24, S1 fail-open): the gate app is updated = its process stops and the new release starts on the
+    // same volume (claimed identity kept). Last in the group: the restart replaces the StartContext B26 uses.
+    const hookEntryId = `${REAL_PRODUCT}.${REAL_HOOK.id}`;
+    await c.run(
+      "B25.real_hook_after_update",
+      "the REAL SDK gate app restarts (release update): calls are refused or gated, never forwarded ungated (C117)",
+      `${REAL_PRODUCT}/${REAL_HOOK.id} gates <primary>.<agent op>: (1) the app stopped, config unchanged → the call (input with the marker) is refused and not forwarded; (2) still stopped and its hook left out of config hooks[] (Core mid-update) → refused, not forwarded; (3) the app started again (same data dir) and listed → the hook runs again: held with hv by ${REAL_PRODUCT}/${REAL_HOOK.id}`,
+      async () => {
+        if (!hookOp) return bad("the primary fake app has no second agent op within the free grant for the real app's before hook");
+        const by = `${REAL_PRODUCT}/${REAL_HOOK.id}`;
+        const holdId = `hld_${ulid()}`;
+        target.onOp = (info) => {
+          const hv = info.proof.hv as { r?: unknown } | undefined;
+          if (info.op === hookOp.id && hv) return { status: 202, body: { status: "held", holdId, expiresAt: new Date(Date.now() + 3600_000).toISOString(), reason: hv.r } };
+          return { status: 200, body: { status: "ok", output: { op: info.op } } };
+        };
+        const schema = hookOp.input ?? { type: "object" };
+        const marked = () => c.call("free", target, hookOp.id, sampleInput(schema, `${REAL_HOOK.marker}-${ulid()}`), hookOp.idempotency === "none" ? null : c.idemKey());
+        /** one marked call: its answer and the forwards that did NOT carry the real hook's verdict (= ungated) */
+        const probe = async () => {
+          const s0 = c.w.seqNow();
+          const a = await marked();
+          const recs = c.since(target, s0, "op").filter((x) => x.name === hookOp.id);
+          const ungated = recs.filter((x) => (x.proof?.hv as { by?: unknown } | undefined)?.by !== by).length;
+          return { a, ungated, gated: recs.length - ungated };
+        };
+        const shown = (x: { a: ToolCallResult; ungated: number }) => `${describeCall(x.a)}${x.ungated ? `, ${x.ungated} UNGATED forward(s)` : ""}`;
+        const refusedNotForwarded = (x: { a: ToolCallResult; ungated: number; gated: number }) => x.a.isError === true && x.ungated === 0 && x.gated === 0;
+        try {
+          await running?.stop();
+          running = null;
+          const down = await probe();
+          c.w.hookState.set(hookEntryId, "absent");
+          const { acked } = await c.apply();
+          const gone = await probe();
+          c.w.hookState.delete(hookEntryId);
+          await c.apply();
+          running = await startRealApp(loaded.sdk, manifest, env, dataDir, [c.w.root.publicJwk]);
+          const restarted = running;
+          const up = (await c.until(async () => restarted.status() === "ok", c.h.timeoutMs)).value;
+          // the bridge may still hold the app as down for a moment: the first gated answer counts, an ungated one fails
+          let ungatedAfter = 0;
+          const back = await c.until(async () => {
+            const x = await probe();
+            ungatedAfter += x.ungated;
+            return !x.a.isError && x.a.structured?.status === "held" && x.gated === 1 ? x : null;
+          }, c.h.timeoutMs, 500);
+          const pass = refusedNotForwarded(down) && acked && refusedNotForwarded(gone) && !!up && !!back.value && ungatedAfter === 0;
+          return verdict(
+            pass,
+            `(1) stopped: ${shown(down)}; (2) stopped + hook absent from config${acked ? "" : " (config NOT acknowledged)"}: ${shown(gone)}; (3) restarted (status ${restarted.status()}): ${back.value ? `${describeCall(back.value.a)} with hv by ${by}` : "the hook never gated again"}${ungatedAfter ? `; ${ungatedAfter} UNGATED forward(s) after the restart` : ""}`,
+          );
+        } finally {
+          target.onOp = null;
+          c.w.hookState.delete(hookEntryId);
+        }
+      },
+    );
   } finally {
     await running?.stop().catch(() => undefined);
     // the app is removed again (Core undeploy): later groups see the original world
