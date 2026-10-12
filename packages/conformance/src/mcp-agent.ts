@@ -130,9 +130,10 @@ export class McpSession {
     return tools ? tools.map((t) => String(t.name)) : null;
   }
 
-  async callTool(name: string, args: Record<string, unknown>, idempotencyKey?: string): Promise<ToolCallResult> {
+  /** `meta`: extra `_meta` entries (v0.1.13: `tealbrick/onBehalfOf`, BRIDGE §8.5) */
+  async callTool(name: string, args: Record<string, unknown>, idempotencyKey?: string, meta?: Record<string, unknown>): Promise<ToolCallResult> {
     const params: Record<string, unknown> = { name, arguments: args };
-    if (idempotencyKey !== undefined) params._meta = { [TOOL_NAME_RULE.idempotencyMetaKey]: idempotencyKey };
+    if (idempotencyKey !== undefined || meta !== undefined) params._meta = { ...(meta ?? {}), ...(idempotencyKey !== undefined ? { [TOOL_NAME_RULE.idempotencyMetaKey]: idempotencyKey } : {}) };
     const { answer, message } = await this.rpc("tools/call", params);
     const err = isObj(message?.error) ? { code: Number(message.error.code), message: String(message.error.message) } : null;
     const r = isObj(message?.result) ? message.result : null;

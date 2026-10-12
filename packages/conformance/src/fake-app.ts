@@ -5,6 +5,7 @@
 // fetch, companion call) with its own Ed25519 key (K8). Behaviour per op / hook / bridge op is set by the checks.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
+  bridgeOpBinding,
   digest,
   type Ed25519KeyPair,
   generateKeyPair,
@@ -282,12 +283,9 @@ export class FakeApp {
       sendError(res, 404, "not_found", "no such bridge op");
       return;
     }
-    const p = verifyBridgeOpProof(
-      proof ?? "",
-      this.trust(),
-      { bop, ...(typeof body.op === "string" ? { op: body.op } : {}), inputDigest: digest(body as Json) },
-      this.#replay,
-    );
+    // C91: THE binding rule (manifest bridgeOpBinding): catalog {bop, op}, resolve {bop, op, in}, mark {bop, in},
+    // scope_summary {bop} — a proof binding more or fewer claims is refused, as the SDK refuses it
+    const p = verifyBridgeOpProof(proof ?? "", this.trust(), bridgeOpBinding(bop, body as Json), this.#replay);
     if (!p.ok) {
       rec.reason = `proof: ${p.code} ${p.reason}`;
       sendError(res, 401, "call_proof_invalid", "bridge-op proof refused");

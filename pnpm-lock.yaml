@@ -17,6 +17,9 @@ importers:
       '@opt2-tealbrick/manifest':
         specifier: workspace:*
         version: link:../manifest
+      '@opt2-tealbrick/miniapp-sdk':
+        specifier: workspace:*
+        version: link:../miniapp-sdk
       '@opt2-tealbrick/spec':
         specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz
         version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz

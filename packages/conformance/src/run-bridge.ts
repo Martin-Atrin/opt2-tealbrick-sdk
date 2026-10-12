@@ -15,6 +15,8 @@ import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dyn
 import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
 import { addressChecks, configChecks, keyChecks, keySetChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
+import { realAppChecks } from "./checks/bridge-real.ts";
+import { spine013Checks } from "./checks/bridge-spine013.ts";
 import { spawnCommand } from "./command.ts";
 import { request } from "./http.ts";
 import { buildReport, type PayloadScan, type Report } from "./report.ts";
@@ -49,6 +51,8 @@ export interface RunBridgeOptions {
   testRoots?: boolean;
   /** C63a strict checks (spec 0.1.12, B20.kss_enrol_missing), default true; `false` (`--keyset-transitional`): not_applicable */
   keysetRequired?: boolean;
+  /** C91 group real_app: module specifier / URL of the SDK to start the real app with (default: the installed @opt2-tealbrick/miniapp-sdk) */
+  sdkModule?: string;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -136,6 +140,8 @@ const RUNNERS: [string[], Group][] = [
   [["hooks"], hookChecks],
   [["dynamic"], dynamicChecks],
   [["companion"], companionChecks],
+  [["spine013"], spine013Checks],
+  [["real_app"], realAppChecks],
   [["claim"], claimChecks],
   [["keys"], keyChecks],
   [["keys_origin"], keysOriginChecks],
@@ -164,6 +170,8 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
   if (world.peer) world.peer.catalog = () => peerCatalog();
   const dataDir = mkdtempSync(join(tmpdir(), "tb-conformance-bridge-"));
   const [pub, int] = [await freePort(), await freePort()];
+  // C91: the real SDK app's listen port is reserved now, so its origin is on the owner allow-list (TB_OWN_INFRA_ORIGINS)
+  world.realAppPort = await freePort();
   let env: Record<string, string> = {
     TB_PORTAL_URL: world.portal.url,
     TB_ENROL_CODE: world.portal.issueEnrolCode(),
@@ -226,6 +234,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
       timeoutMs,
       pauseLatencyMs: opts.pauseLatencyMs ?? 60_000,
       groups: selected,
+      ...(opts.sdkModule ? { sdkModule: opts.sdkModule } : {}),
     };
     const c = new BridgeCtx(harness, s);
     for (const [groups, fn] of RUNNERS) {

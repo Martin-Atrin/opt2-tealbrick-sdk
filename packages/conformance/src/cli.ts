@@ -28,12 +28,13 @@ import type { BridgeStartResult } from "./bridge-world.ts";
 import { spawnCommand } from "./command.ts";
 import { checkStartModule, forkStart } from "./fork-start.ts";
 import { request } from "./http.ts";
-import { applyAllowNotRun, exitCode, type Report, renderMarkdown, resultLabel } from "./report.ts";
+import { applyAllowNotRun, applyWaivers, exitCode, type Report, renderMarkdown, resultLabel, type Waiver } from "./report.ts";
 import { type AppStartResult, loadManifest, runApp } from "./run-app.ts";
 import { runBridgeTarget } from "./run-bridge.ts";
 import { runCoreTarget } from "./run-core.ts";
 import { runRelayTarget } from "./run-relay.ts";
 import { runManifestTarget } from "./targets.ts";
+import { CONFORMANCE_VERSION, loadWaiverFile, parseWaiveFlag, WAIVER_FILE, WaiverError } from "./waivers.ts";
 
 const USAGE = `usage:
   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file>
@@ -47,10 +48,18 @@ const USAGE = `usage:
   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>] [--json] [--report <base>]
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
+      --groups: e.g. spine013 = the spec 0.1.13 checks B22–B24 (hold verdict, reserved context, app-initiated calls); leave it out for a bridge older than 0.1.14;
+        real_app = B25: a REAL @opt2-tealbrick/miniapp-sdk app (started in this process) behind the bridge (C91)
+      --sdk-module <specifier|file URL>: the SDK for real_app (default: the installed @opt2-tealbrick/miniapp-sdk)
       test roots (default): the start module (or --cmd command) passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option
       --no-test-roots: B20 not_run; a spec-0.1.12 bridge then refuses the fake Portal's enrolment and the run fails at boot
   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"] [--timeout <ms>] [--json] [--report <base>]
-  every target: [--allow-not-run]  exit 0 when nothing failed and the only non-passes are not_run (default: not_run fails, CONFORMANCE §6)`;
+  every target: [--allow-not-run]  exit 0 when nothing failed and the only non-passes are not_run (default: not_run fails, CONFORMANCE §6;
+                                   discouraged since v0.1.13: prefer a dated waiver)
+                [--waive <checkId>@<untilVersion>]...  a failing / not_run check reports "waived" (not counted) while this
+                                   conformance version < untilVersion; at or after it the waiver is ignored and noted.
+                                   app / manifest: also ${WAIVER_FILE} next to the manifest {"waivers": [{"id", "until", "reason"}]}.
+                                   Unknown check ids are a usage error.`;
 
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf8"));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -138,6 +147,8 @@ export async function main(argv: string[]): Promise<number> {
       json: { type: "boolean", default: false },
       "allow-not-run": { type: "boolean", default: false },
       report: { type: "string" },
+      waive: { type: "string", multiple: true },
+      "sdk-module": { type: "string" },
       help: { type: "boolean", default: false },
     },
   });
@@ -149,6 +160,16 @@ export async function main(argv: string[]): Promise<number> {
   if (values["test-roots"] && values["no-test-roots"]) throw new Error("use one of --test-roots (the default) and --no-test-roots");
   const testRoots = !values["no-test-roots"];
   const keysetRequired = !values["keyset-transitional"];
+  // waivers are checked before anything runs: an unknown id or a malformed entry is a usage error (exit 2)
+  let waivers: Waiver[];
+  try {
+    const manifestFile = target === "manifest" ? (file ?? values.manifest) : target === "app" ? values.manifest : undefined;
+    waivers = [...(values.waive ?? []).map(parseWaiveFlag), ...(manifestFile ? loadWaiverFile(manifestFile) : [])];
+  } catch (e) {
+    if (!(e instanceof WaiverError)) throw e;
+    process.stderr.write(`tb-conformance: ${e.message}\n${USAGE}\n`);
+    return 2;
+  }
   let report: Report;
   switch (target) {
     case "manifest": {
@@ -225,6 +246,7 @@ export async function main(argv: string[]): Promise<number> {
         ...(pauseLatencyMs !== undefined ? { pauseLatencyMs } : {}),
         ...(values.groups ? { groups: values.groups.split(",").map((g) => g.trim()).filter(Boolean) } : {}),
         echoLogs: values["echo-logs"],
+        ...(values["sdk-module"] ? { sdkModule: values["sdk-module"] } : {}),
         testRoots,
         keysetRequired,
       });
@@ -244,6 +266,7 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown target ${target}\n${USAGE}\n`);
       return 2;
   }
+  applyWaivers(report, waivers, CONFORMANCE_VERSION);
   if (values["allow-not-run"] === true) applyAllowNotRun(report);
   emit(report, values.json, values.report);
   return exitCode(report, { allowNotRun: values["allow-not-run"] === true });

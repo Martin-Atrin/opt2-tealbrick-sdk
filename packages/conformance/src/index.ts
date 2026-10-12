@@ -26,7 +26,23 @@ export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
 export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } from "./fork-start.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
-export { buildReport, type CheckResult, type CheckStatus, exitCode, FAILING_STATUSES, type PayloadScan, type Report, renderMarkdown, specDigest, type Target } from "./report.ts";
+export { loadSdk, REAL_ENTRIES, REAL_OPS, type RealRunningApp, realAppManifest, type SdkModule, startRealApp } from "./real-app.ts";
+export {
+  applyWaivers,
+  buildReport,
+  type CheckResult,
+  type CheckStatus,
+  compareVersions,
+  exitCode,
+  FAILING_STATUSES,
+  type PayloadScan,
+  type Report,
+  renderMarkdown,
+  specDigest,
+  type Target,
+  type Waiver,
+  type WaiverOutcome,
+} from "./report.ts";
 export { type AppStartResult, appEnv, loadManifest, type RunAppOptions, runApp, TEST_ROOTS_ENV } from "./run-app.ts";
 export { freePort, processHarness, type RunBridgeOptions, runBridgeTarget } from "./run-bridge.ts";
 export { type CoreTargetOptions, gatewayOrigin, runCoreTarget } from "./run-core.ts";
@@ -38,3 +54,4 @@ export { type Outcome, Suite } from "./suite.ts";
 export { readTar, type TarEntry } from "./tar.ts";
 export { defaultScanDirs, runManifestTarget, runPendingTarget } from "./targets.ts";
 export { Mint, peek, rawSign } from "./tokens.ts";
+export { CONFORMANCE_VERSION, loadWaiverFile, parseWaiveFlag, WAIVER_FILE, WaiverError } from "./waivers.ts";

@@ -128,6 +128,23 @@ describe("manifest checks", () => {
     assert.equal(r.ok, true, JSON.stringify(r.checks.filter((c) => c.status !== "pass" && c.status !== "not_applicable")));
   });
 
+  it("M2.companion_wildcard (M-CP-3): a valid wildcard companion passes, no companions → not_applicable, a bad wildcard fails M1 and the rule", async () => {
+    const wild = { ...manifest, companions: [...(manifest.companions as unknown[]), { product: "*", operations: ["tb.holds_pending"], crud: ["read"], purpose: "Pending approvals across apps" }] };
+    const ok = (await runManifestChecks(wild)).results;
+    assert.equal(byId(ok, "M2.companion_wildcard"), "pass", checkOf(ok, "M2.companion_wildcard")?.asserted);
+    assert.match(checkOf(ok, "M2.companion_wildcard")?.asserted ?? "", /2 companions \(1 wildcard\) ok/);
+    assert.equal(byId(ok, "M2.companion_wildcard.enforced"), "pass", checkOf(ok, "M2.companion_wildcard.enforced")?.asserted);
+    const { companions: _c, ...noComp } = manifest;
+    const none = (await runManifestChecks(noComp)).results;
+    assert.equal(byId(none, "M2.companion_wildcard"), "not_applicable");
+    assert.equal(byId(none, "M2.companion_wildcard.enforced"), "pass");
+    const badWild = { ...manifest, companions: [{ product: "*", operations: ["item_get"], crud: ["read"], purpose: "Wildcard on another op" }] };
+    const b = await runManifestChecks(badWild);
+    assert.equal(b.manifest, null);
+    assert.equal(byId(b.results, "M1"), "fail");
+    assert.match(checkOf(b.results, "M1")?.asserted ?? "", /companion_invalid/);
+  });
+
   it("M2.hook_ops reports own vs foreign hook counts; foreign hooks are left to Core (M-HK-3)", async () => {
     const own = (manifest.hooks as Record<string, unknown>[])[0] as { match: { products: string[] } };
     assert.deepEqual(own.match.products, ["conf-sample"], "the fixture declares one own-product hook");

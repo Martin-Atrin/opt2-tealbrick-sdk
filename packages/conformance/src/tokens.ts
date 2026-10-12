@@ -22,8 +22,10 @@ import type {
   ConnectionId,
   FreeCaps,
   GrantClaims,
+  HoldVerdictClaim,
   InstanceId,
   PersonId,
+  Sha256Digest,
   WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, HookPhase } from "@opt2-tealbrick/spec/manifest";
@@ -121,6 +123,8 @@ export class Mint {
     iat?: number;
     exp?: number;
     key?: Ed25519KeyPair;
+    /** v0.1.13 (G1): attested before-hook hold verdict `{f, r, by}` */
+    hv?: HoldVerdictClaim;
   }): Promise<string> {
     return signCallProof(
       {
@@ -134,6 +138,7 @@ export class Mint {
         ctx: digest(p.context),
         iat: p.iat ?? nowS(),
         ...(p.exp !== undefined ? { exp: p.exp } : {}),
+        ...(p.hv !== undefined ? { hv: p.hv } : {}),
       },
       p.key ?? this.#w.bridgeKey(),
     );
@@ -156,7 +161,8 @@ export class Mint {
     );
   }
 
-  bridgeOpProof(p: { aud: `tb:ins:${InstanceId}`; bop: BridgeOp; op?: string; body?: Json; key?: Ed25519KeyPair }): Promise<string> {
+  /** `body`: binds `in` = digest(body); `in`: a precomputed digest (bridgeOpProofClaims) */
+  bridgeOpProof(p: { aud: `tb:ins:${InstanceId}`; bop: BridgeOp; op?: string; body?: Json; in?: Sha256Digest; key?: Ed25519KeyPair }): Promise<string> {
     const brg = `tb:brg:${this.#w.bridge}` as const;
     return signBridgeOpProof(
       {
@@ -166,7 +172,7 @@ export class Mint {
         call: newId("call"),
         bop: p.bop,
         ...(p.op !== undefined ? { op: p.op } : {}),
-        ...(p.body !== undefined ? { in: digest(p.body) } : {}),
+        ...(p.body !== undefined ? { in: digest(p.body) } : p.in !== undefined ? { in: p.in } : {}),
         iat: nowS(),
       },
       p.key ?? this.#w.bridgeKey(),

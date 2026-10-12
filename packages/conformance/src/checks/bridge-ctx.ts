@@ -32,6 +32,8 @@ export interface BridgeHarness {
   pauseLatencyMs: number;
   /** check groups to run; null = all (tests select groups; the CLI runs all) */
   groups: ReadonlySet<string> | null;
+  /** C91 group real_app: SDK module to start the real app with (default: the installed @opt2-tealbrick/miniapp-sdk) */
+  sdkModule?: string;
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -214,11 +216,11 @@ export class BridgeCtx {
   }
 
   /** tools/call of `opId` at `app` as `slot` (idempotency key added for ops that require one unless `idem` is null). */
-  async call(slot: KeySlot, app: FakeApp, opId: string, input?: Json, idem?: string | null): Promise<ToolCallResult> {
+  async call(slot: KeySlot, app: FakeApp, opId: string, input?: Json, idem?: string | null, meta?: Record<string, unknown>): Promise<ToolCallResult> {
     const op = this.op(app, opId);
     const key = idem === null ? undefined : (idem ?? (op?.idempotency === "required" ? this.idemKey() : undefined));
     const s = await this.session(slot);
-    return s.callTool(this.tool(app, opId), (input ?? this.input(app, opId)) as Record<string, unknown>, key);
+    return s.callTool(this.tool(app, opId), (input ?? this.input(app, opId)) as Record<string, unknown>, key, meta);
   }
   async callTool(slot: KeySlot, name: string, args: Record<string, unknown>, idem?: string): Promise<ToolCallResult> {
     return (await this.session(slot)).callTool(name, args, idem);

@@ -11,7 +11,7 @@ describe("report", () => {
     const r = buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: s.results });
     assert.equal(r.ok, true);
     assert.equal(exitCode(r), 0);
-    assert.deepEqual(r.counts, { pass: 1, fail: 0, not_applicable: 1, not_run: 0, not_implemented: 0 });
+    assert.deepEqual(r.counts, { pass: 1, fail: 0, not_applicable: 1, not_run: 0, not_implemented: 0, waived: 0 });
   });
 
   for (const status of ["fail", "not_run", "not_implemented"] as const) {
@@ -85,4 +85,30 @@ it("--allow-not-run rewrites the report note so the text matches the exit rule",
   const f = { ok: false, counts: { pass: 1, fail: 1, not_run: 1, not_applicable: 0, not_implemented: 0 }, notes: [] } as never as { notes: string[] };
   applyAllowNotRun(f as never);
   assert.ok(f.notes.some((n) => n.includes("still fails")));
+});
+
+it("waivers (C89): a not_run / fail check under an active waiver is waived and does not fail the run; expired → ignored + note; passing → unused", async () => {
+  const { applyWaivers, compareVersions, renderMarkdown: md } = await import("../src/report.ts");
+  assert.equal(compareVersions("0.1.10", "0.1.9"), 1);
+  assert.equal(compareVersions("0.1.9", "0.1.9"), 0);
+  assert.equal(compareVersions("0.1.9", "0.2.0"), -1);
+  const mk = () => {
+    const s = new Suite();
+    s.record("A1", "a", "e", { pass: true, asserted: "ok" });
+    s.record("A7.backup_roundtrip", "b", "e", { status: "not_run", asserted: "needs backupNow" });
+    return buildReport({ target: "app", subject: "t", startedAt: new Date(), checks: s.results });
+  };
+  const r = mk();
+  applyWaivers(r, [{ id: "A7.backup_roundtrip", until: "0.2.0", reason: "no backup hook in --cmd mode" }, { id: "A1", until: "0.2.0", reason: "x" }], "0.1.9");
+  assert.equal(r.ok, true);
+  assert.equal(exitCode(r), 0);
+  assert.deepEqual([r.counts.waived, r.counts.not_run], [1, 0]);
+  assert.match(r.checks[1]?.asserted ?? "", /^not_run: needs backupNow — waived until 0\.2\.0: no backup hook in --cmd mode$/);
+  assert.deepEqual(r.waivers?.map((w) => w.state), ["applied", "unused"]);
+  assert.match(md(r), /\| A7\.backup_roundtrip b \| waived \|/);
+  const e = mk();
+  applyWaivers(e, [{ id: "A7.backup_roundtrip", until: "0.1.9", reason: "late" }], "0.1.9");
+  assert.equal(e.ok, false);
+  assert.equal(e.checks[1]?.status, "not_run");
+  assert.ok(e.notes.some((n) => n.startsWith("waiver A7.backup_roundtrip@0.1.9 ignored")));
 });

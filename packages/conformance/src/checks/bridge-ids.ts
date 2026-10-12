@@ -102,6 +102,23 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B16.call_depth": "companion chain deeper than 3 → call_depth_exceeded",
     "B16.slice_stale": "app with a slice older than its validity → slice_stale",
   }),
+  // spec 0.1.13 spine additions (bridge 0.1.14+): an older bridge deselects this group (--groups without spine013)
+  spine013: ids({
+    "B22.hold_verdict": "before hook hold verdict: forwarded with hv in the proof; refuse > hold > allow, first hold kept, a later refuse wins",
+    "B22.hold_retry_refused": "the retry re-runs the before chain: a refusal → hook_denied, the app is not called; hold again → hv again",
+    "B22.hv_tamper": "hv is signed inside the op proof: an edited or removed hv fails proof verification at the app",
+    "B23.on_behalf_of": "_meta tealbrick/onBehalfOf → context tb.onBehalfOf (unverified) for hooks and app; invalid → dropped + reported",
+    "B23.reserved_tb_namespace": "a context hook answering a tb.* key → hook_failed; the app is not called",
+    "B24.app_initiated": "companion call without parentCall passes the whole pipeline; hooks see caller type app",
+    "B24.no_grant": "app-initiated call without TB-Grant or for an undeclared op → refused; the target is not called",
+  }),
+  // C91: a REAL @opt2-tealbrick/miniapp-sdk app behind the bridge (the fake apps cannot catch a binding the SDK refuses)
+  real_app: ids({
+    "B25.real_catalog_search": "<product>__<op>_search through the bridge returns the real SDK app's catalog entries",
+    "B25.real_dynamic_call": "_call (resolve + op call) and a list-mode entry tool reach the real SDK app and answer ok",
+    "B25.real_op_call": "a plain op passes the real SDK's proof / grant verification and authorize() and writes its receipt",
+    "B25.real_mark": "a failing after hook marks the real SDK app's receipt after_failed (bridge op mark)",
+  }),
   claim: ids({
     "C1.K6": "claim with a one-time enrolment code",
     "C6.claim_replay": "enrolment code reused → code_invalid",

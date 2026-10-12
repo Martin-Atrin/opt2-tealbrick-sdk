@@ -212,6 +212,13 @@ export class BridgeWorld {
   keySet: { seq: number; jws: string; keys: string } | null = null;
   /** per-instance overrides of the config `apps[]` entry (BSD-07 checks: foreign internalUrl, missing ownInfra) */
   readonly appOverrides = new Map<InstanceId, Record<string, unknown>>();
+  /** C91 (group real_app): port reserved for the real SDK app at boot, so its origin is on TB_OWN_INFRA_ORIGINS */
+  realAppPort: number | null = null;
+  /**
+   * C91: the real SDK app slot. `listed`: in config apps[] with a slice and a free-agent grant; `jwk`: its instance key,
+   * bound (config instanceKeys) once the bridge reported its claim — as Core binds a claimed key.
+   */
+  realApp: { ins: InstanceId; manifest: Manifest; digest: string; url: string; jwk: Ed25519PublicJwk | null; listed: boolean } | null = null;
 
   private constructor(portal: FakePortal, stranger: Ed25519KeyPair) {
     this.portal = portal;
@@ -363,7 +370,7 @@ export class BridgeWorld {
 
   /** Origins of the fake apps (they run on the suite's own host: own infrastructure, BRIDGE §5.7). */
   ownInfraOrigins(): string[] {
-    return this.apps.map((a) => new URL(a.url).origin);
+    return [...this.apps.map((a) => new URL(a.url).origin), ...(this.realAppPort ? [`http://127.0.0.1:${this.realAppPort}`] : [])];
   }
 
   /** The current config grant JWS for (role, app). */
@@ -425,6 +432,8 @@ export class BridgeWorld {
     for (const g of this.grantSpecs) {
       this.grants.set(`${g.role}|${g.app.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents[g.role].agt}`, aud: `tb:ins:${g.app.ins}`, crud: g.crud, mode: g.mode, wf: g.wf, iat: nowS() - 5 }));
     }
+    const real = this.realApp?.listed ? this.realApp : null;
+    if (real) this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", wf: [], iat: nowS() - 5 }));
     this.companionGrants.clear();
     for (const caller of this.apps)
       for (const comp of caller.manifest.companions ?? []) {
@@ -445,7 +454,8 @@ export class BridgeWorld {
     const pause = { workspace: p.pause.workspace, agents: [...p.pause.agents], instances: [...p.pause.instances] };
     const revoked = { jtis: p.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) };
     const apps: AppEntry[] = [];
-    for (const a of this.apps) {
+    const entries: { ins: InstanceId; product: string; manifest: Manifest; digest: string; url: string }[] = [...this.apps, ...(real ? [{ ...real, product: real.manifest.id }] : [])];
+    for (const a of entries) {
       const slice = await signSlice(
         {
           v: 1,
@@ -489,7 +499,7 @@ export class BridgeWorld {
       bridge: { id: p.bridgeId, publicUrl: this.advertisedUrl },
       portalKeys,
       ...(portalKeySet ? { portalKeySet } : {}),
-      instanceKeys: this.apps.map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })),
+      instanceKeys: [...this.apps.map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })), ...(this.realApp?.jwk ? [{ ins: this.realApp.ins, jwk: this.realApp.jwk }] : [])],
       grants: [...this.grants.values()],
       apps,
       hooks: this.hookEntries(),

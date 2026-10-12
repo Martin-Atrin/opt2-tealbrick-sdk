@@ -1,23 +1,34 @@
 // Minimal deployed bridge for the bridge target's sensitivity tests (NOT a product bridge): enrolment, signed config
 // pull + ack, jwt-bearer K5, MCP initialize / tools/list / tools/call with gate() and forward (grant + call proof).
 // Key page on its own origin (BRIDGE §3.1 / §9.3 v0.1.10, C59): keys-ticket POST → form + session, session GET.
+// v0.1.13 (spine013): before / context / after hooks with the hold-verdict chain (hv in the op proof), the reserved
+// `tb.` context namespace + `_meta` tealbrick/onBehalfOf, and the companion path /tb/v1/call (app-initiated calls).
 // Flags break exactly one rule each so a test can assert the matching check flips from pass to fail.
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
+  bridgeOpProofClaims,
   digest,
+  dynamicToolNames,
   type Ed25519KeyPair,
   gate,
   generateKeyPair,
+  holdVerdictClaim,
+  hookResponseProblem,
   isPrivateInternalUrl,
   keySetFrom,
   keySetFromPortalKeys,
   mcpToolName,
+  onBehalfOfFromMeta,
   opaqueDigest,
   portalRootKeys,
+  reduceBeforeChain,
   signAgentSession,
   signAssertion,
+  signBridgeOpProof,
   signCallProof,
+  signHookProof,
+  TYP,
   trustedPortalKeys,
   ulid,
   validateInput,
@@ -28,10 +39,10 @@ import {
   verifyKeysTicket,
   withStandardOps,
 } from "@opt2-tealbrick/manifest";
-import type { EnrolResponse, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
-import type { PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { Json } from "@opt2-tealbrick/spec/sdk";
+import type { ClaimRecord, EnrolResponse, HookEntry, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
+import { BRIDGE_OP_PATH, type BridgeOp, type Ed25519PublicJwk, type HoldVerdictClaim, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
+import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 
 export interface MiniFlags {
   skipPause?: boolean;
@@ -55,6 +66,22 @@ export interface MiniFlags {
   acceptStrippedReenrol?: boolean;
   /** a spec-0.1.11 build: accepts a first enrolment without a statement (fails B20.kss_enrol_missing) */
   keysetTransitional?: boolean;
+  /** v0.1.13: a kept hold stops the before chain (a later refuse cannot win; fails B22.hold_verdict) */
+  holdStopsChain?: boolean;
+  /** v0.1.13: the verdict travels in a separate header, not signed in the proof (fails B22.hold_verdict, B22.hv_tamper) */
+  hvOutsideProof?: boolean;
+  /** v0.1.13: a hold verdict is cached per (caller, op, input); the retry skips the before chain (fails B22.hold_retry_refused) */
+  cacheHoldVerdict?: boolean;
+  /** v0.1.13: ignores _meta tealbrick/onBehalfOf (fails B23.on_behalf_of) */
+  noOnBehalfOf?: boolean;
+  /** v0.1.13: lets a context hook write tb.* keys (fails B23.reserved_tb_namespace) */
+  allowTbContext?: boolean;
+  /** v0.1.13: app-initiated companion calls skip the hooks (fails B24.app_initiated) */
+  appCallsSkipHooks?: boolean;
+  /** v0.1.13: companion calls are not gated by the grant's workflow (fails B24.no_grant) */
+  companionNoWfCheck?: boolean;
+  /** C91 (QA S1): signs catalog bridge-op proofs with `in` (the SDK binds {bop, op} only; fails B25.real_catalog_search) */
+  catalogWithIn?: boolean;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -71,6 +98,7 @@ export interface MiniState {
 }
 
 const nowS = () => Math.floor(Date.now() / 1000);
+const ON_BEHALF_OF = "tealbrick/onBehalfOf";
 const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
   res.writeHead(status, { "content-type": "application/json", ...headers });
   res.end(JSON.stringify(body));
@@ -81,6 +109,14 @@ const read = async (req: IncomingMessage) => {
   return Buffer.concat(chunks);
 };
 const listen = (srv: Server, port: number) => new Promise<void>((r) => srv.listen(port, "127.0.0.1", () => r()));
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const peekJwt = (t: string): Record<string, unknown> => {
+  try {
+    return JSON.parse(Buffer.from(t.split(".")[1] ?? "", "base64url").toString()) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+};
 
 export async function startMiniBridge(env: Record<string, string>, flags: MiniFlags = {}, root: MiniState = {}) {
   root.byDir ??= {};
@@ -131,9 +167,12 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
   let trusted: PortalKeyEntry[] = state.trusted ?? enrol.portalKeys;
   const brg = `tb:brg:${enrol.bridgeId}` as const;
   const rejected = new Map<string, number>();
-  const reject = (code: string) => rejected.set(code, (rejected.get(code) ?? 0) + 1);
+  const reject = (code: string, kind = "config") => rejected.set(`${kind}|${code}`, (rejected.get(`${kind}|${code}`) ?? 0) + 1);
   const routable = (a: { internalUrl: string; ownInfra?: boolean }) => flags.noAddressCheck || isPrivateInternalUrl(a.internalUrl, { ownInfra: a.ownInfra === true, allowList });
   let cfg: WorkspaceConfig | null = null;
+  const verdictCache = new Map<string, HoldVerdictClaim>();
+  const claimsSeen: ClaimRecord[] = [];
+  const usedCodes = new Set<string>();
   const manifests = new Map<string, Manifest>();
   const boot = randomUUID();
   let stopped = false;
@@ -155,8 +194,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       scopeSummaries: [],
       connectionsCreated: [],
       connectionsRevoked: [],
-      claims: [],
-      rejected: [...rejected].map(([code, count]) => ({ kind: "config", code, count })),
+      claims: claimsSeen,
+      rejected: [...rejected].map(([k, count]) => ({ kind: k.split("|")[0], code: k.split("|")[1], count })),
       toolsOmitted: [],
       ...extra,
     }).catch(() => undefined);
@@ -176,9 +215,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
           if (body && body.ws === enrol.workspaceId && (!cfg || body.rev > cfg.rev)) {
             for (const a of body.apps as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean })[]) {
               if (!routable(a)) reject("internal_url_refused");
-              else if (!manifests.has(a.ins)) manifests.set(a.ins, (await (await fetch(`${a.internalUrl}/tb/v1/manifest`)).json()) as Manifest);
+              else if (!manifests.has(a.ins)) await fetchManifest(a);
             }
             cfg = body;
+            await refreshCatalogs();
             if (t.ok && !t.legacy) {
               pinned = { seq: t.seq, kss: t.kss };
               trusted = t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
@@ -194,13 +234,55 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
   })();
 
+  /** an app that is not up yet (a real SDK app deployed before it claims) is fetched again later */
+  async function fetchManifest(a: { ins: string; internalUrl: string }): Promise<void> {
+    try {
+      const r = await fetch(`${a.internalUrl}/tb/v1/manifest`, { signal: AbortSignal.timeout(3000) });
+      if (r.status === 200) manifests.set(a.ins, (await r.json()) as Manifest);
+    } catch {
+      // not reachable yet
+    }
+  }
+  const ensureManifests = async () => {
+    for (const a of (cfg?.apps ?? []) as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean })[]) if (routable(a) && !manifests.has(a.ins)) await fetchManifest(a);
+  };
+  /** bridge op call (C16 B5) with THE binding rule (bridgeOpProofClaims, C91) */
+  const bridgeOp = async (ins: string, bop: BridgeOp, body: Json): Promise<{ status: number; body: unknown }> => {
+    const app = (cfg as WorkspaceConfig).apps.find((a) => a.ins === ins);
+    const claims = bridgeOpProofClaims(bop, body);
+    const proof = await signBridgeOpProof({ iss: brg, sub: brg, aud: `tb:ins:${ins}` as never, call: `call_${ulid()}` as never, ...claims, ...(flags.catalogWithIn && bop === "catalog" ? { in: digest(body) } : {}), iat: nowS() }, key);
+    try {
+      const r = await fetch(`${app?.internalUrl}/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, { method: "POST", headers: { "content-type": "application/json", "TB-Call": proof }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    } catch {
+      return { status: 0, body: null };
+    }
+  };
+  /** list-mode dynamic ops: catalog entries per `<ins>/<op>`, read at every applied config (BRIDGE §7.2) */
+  const listEntries = new Map<string, DynamicCatalogEntry[]>();
+  async function refreshCatalogs(): Promise<void> {
+    for (const a of cfg?.apps ?? []) {
+      const m = manifests.get(a.ins);
+      for (const o of m?.operations ?? []) {
+        if (o.dynamic?.mode !== "list") continue;
+        const r = await bridgeOp(a.ins, "catalog", { op: o.id });
+        if (r.status === 200 && Array.isArray(r.body)) listEntries.set(`${a.ins}/${o.id}`, r.body as DynamicCatalogEntry[]);
+      }
+    }
+  }
+  const RANK: Record<string, number> = { read: 0, write: 1, outward: 2, destructive: 2, money: 3 };
+  const inCeiling = (o: Operation, x: { crud: string[]; effect: string }) => {
+    const d = o.dynamic;
+    return !!d && x.crud.every((c) => (d.crudCeiling as string[]).includes(c)) && (RANK[x.effect] ?? 9) <= (RANK[d.effectCeiling] ?? 0);
+  };
+
   const grantsOf = (agt: string) => {
     const c = cfg as WorkspaceConfig;
     return c.grants.map((g) => verifyGrant(g, { now: nowS(), self: `tb:ins:${JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString()).aud.slice(7)}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) })).flatMap((v, i) => (v.ok && v.claims.sub === `tb:agt:${agt}` ? [{ jws: c.grants[i] as string, claims: v.claims }] : []));
   };
   const tools = (agt: string) => {
     const c = cfg as WorkspaceConfig;
-    const out: { name: string; ins: string; op: string; inputSchema: unknown }[] = [];
+    const out: { name: string; ins: string; op: string; inputSchema: unknown; kind?: "search" | "call" | "entry"; entry?: DynamicCatalogEntry }[] = [];
     if (!flags.skipPause && (c.pause.workspace || c.pause.agents.includes(agt as never))) return out;
     for (const g of grantsOf(agt)) {
       const ins = g.claims.aud.slice(7);
@@ -208,6 +290,16 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       const entry = c.apps.find((a) => a.ins === ins) as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean }) | undefined;
       if (!m || !entry || !routable(entry)) continue;
       for (const o of withStandardOps(m)) {
+        if (!o.standard && o.dynamic) {
+          if (!o.crud.every((x) => g.claims.crud.includes(x)) || (g.claims.mode === "bound" && !g.claims.wf.includes(o.id))) continue;
+          if (o.dynamic.mode === "search") {
+            const d = dynamicToolNames(m.id, o.id);
+            out.push({ name: d.search, ins, op: o.id, inputSchema: { type: "object" }, kind: "search" }, { name: d.call, ins, op: o.id, inputSchema: { type: "object" }, kind: "call" });
+          } else
+            for (const e of listEntries.get(`${ins}/${o.id}`) ?? [])
+              if (inCeiling(o, e) && e.crud.every((x) => g.claims.crud.includes(x))) out.push({ name: mcpToolName(m.id, e.name), ins, op: o.id, inputSchema: e.inputSchema, kind: "entry", entry: e });
+          continue;
+        }
         if (o.standard || o.dynamic) continue;
         if (o.audience !== "agent" && !flags.listPerson) continue;
         if (!o.crud.every((x) => g.claims.crud.includes(x)) || (g.claims.mode === "bound" && !g.claims.wf.includes(o.id))) continue;
@@ -219,29 +311,134 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
   };
   const toolError = (code: string) => ({ isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code, message: code, requestId: "req_mini" } }) }], structuredContent: { error: { code, message: code, requestId: "req_mini" } } });
 
-  const callTool = async (agt: string, name: string, args: Json, idem?: string): Promise<unknown> => {
+  /** one hook call (hook proof, BRIDGE §8.1 steps 6/7/12); null on transport failure or timeout */
+  const hookCall = async (h: HookEntry, phase: "before" | "context" | "after", sub: string, callId: string, call: Record<string, Json>, context: Record<string, Json>, output?: Json): Promise<{ status: number; body: unknown } | null> => {
+    const app = (cfg as WorkspaceConfig).apps.find((a) => a.ins === h.ins);
+    if (!app) return null;
+    const proof = await signHookProof({ iss: brg, sub: sub as never, aud: `tb:ins:${h.ins}` as never, call: callId as never, hook: h.hookId, phase, ctx: digest(context), in: digest(call.input ?? null), iat: nowS() }, key);
+    try {
+      const r = await fetch(`${app.internalUrl}/tb/v1/hooks/${h.hookId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "TB-Call": proof },
+        body: JSON.stringify({ phase, call, context, ...(phase === "after" ? { output: output ?? null } : {}) }),
+        signal: AbortSignal.timeout(h.timeoutMs + 200),
+      });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    } catch {
+      return null;
+    }
+  };
+  /**
+   * The call pipeline after gate(): before chain (refuse > hold > allow, first hold kept: reduceBeforeChain), context
+   * hooks (namespace + reserved tb.), the op call with grant + op proof (hv when a hold is kept), after hooks.
+   */
+  const pipeline = async (o: { caller: { type: "agent" | "app"; id: string; mode?: string }; grant: string; grantJti: string; ins: string; m: Manifest; op: OperationView; input: Json; context: Record<string, Json>; idem?: string; hooks: boolean }): Promise<{ error: string } | { status: number; body: Record<string, unknown> }> => {
+    const c = cfg as WorkspaceConfig;
+    const sub = `tb:${o.caller.type === "agent" ? "agt" : "ins"}:${o.caller.id}`;
+    const callId = `call_${ulid()}`;
+    const op = o.op;
+    const call: Record<string, Json> = { id: callId, ws: c.ws, caller: o.caller as unknown as Json, target: { instance: o.ins, product: o.m.id, op: op.id, crud: op.crud, effect: op.effect }, input: o.input };
+    const matching = (phase: string) =>
+      (o.hooks ? (c.hooks ?? []) : [])
+        .filter((h) => h.phase === phase && (h.match.products.includes("*") || h.match.products.includes(o.m.id)) && (!h.match.operations || h.match.operations.includes(op.id)) && (!h.match.effects || h.match.effects.includes(op.effect)))
+        .sort((a, b) => a.order - b.order || (a.product < b.product ? -1 : a.product > b.product ? 1 : 0));
+    let context = { ...o.context };
+    const cacheKey = `${sub}|${op.id}|${digest(o.input)}`;
+    let hv: HoldVerdictClaim | undefined = flags.cacheHoldVerdict ? verdictCache.get(cacheKey) : undefined;
+    if (!hv) {
+      const answers: { by: string; answer: { allow: boolean; reason?: string; hold?: never } }[] = [];
+      for (const h of matching("before")) {
+        const r = await hookCall(h, "before", sub, callId, call, context);
+        if (r?.status !== 200 || hookResponseProblem("before", r.body, h.product)) return { error: "hook_failed" };
+        const answer = r.body as { allow: boolean; reason?: string; hold?: never };
+        answers.push({ by: `${h.product}/${h.hookId}`, answer });
+        if (!answer.allow && !answer.hold) break;
+        if (flags.holdStopsChain && answer.hold) break;
+      }
+      const red = reduceBeforeChain(answers);
+      if (red.kind === "refuse") return { error: "hook_denied" };
+      if (red.kind === "hold") {
+        hv = holdVerdictClaim(red) as HoldVerdictClaim;
+        verdictCache.set(cacheKey, hv);
+      }
+    }
+    for (const h of matching("context")) {
+      const r = await hookCall(h, "context", sub, callId, call, context);
+      if (r?.status !== 200 || !isObj(r.body) || !isObj(r.body.add)) return { error: "hook_failed" };
+      const add = r.body.add as Record<string, Json>;
+      const checked = flags.allowTbContext ? { add: Object.fromEntries(Object.entries(add).filter(([k]) => !k.startsWith("tb."))) } : r.body;
+      if (hookResponseProblem("context", checked, h.product)) return { error: "hook_failed" };
+      context = { ...context, ...add };
+    }
+    const app = c.apps.find((a) => a.ins === o.ins);
+    const proof = await signCallProof({ iss: brg, sub: sub as never, aud: `tb:ins:${o.ins}` as never, call: callId as never, gjti: o.grantJti, op: op.id, in: digest(o.input), ctx: digest(context), iat: nowS(), ...(hv && !flags.hvOutsideProof ? { hv } : {}) }, key);
+    const r = await fetch(`${app?.internalUrl}/tb/v1/ops/${op.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${o.grant}`, ...(flags.noProof ? {} : { "TB-Call": proof }), ...(hv && flags.hvOutsideProof ? { "TB-Hold-Verdict": JSON.stringify(hv) } : {}) },
+      body: JSON.stringify({ input: o.input, context, ...(o.idem ? { idempotencyKey: o.idem } : {}) }),
+    });
+    let body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    if (r.status === 200) {
+      for (const h of matching("after")) {
+        const a = await hookCall(h, "after", sub, callId, call, context, (body.output ?? null) as Json);
+        if (a?.status !== 200 || hookResponseProblem("after", a.body, h.product)) {
+          // the op ran: its receipt is marked after_failed (bridge op mark, BRIDGE §8.1 step 12)
+          await bridgeOp(o.ins, "mark", { call: callId, mark: "after_failed" });
+          return { error: "after_failed" };
+        }
+        if (isObj(a.body) && "output" in a.body) body = { ...body, output: a.body.output };
+      }
+    }
+    return { status: r.status, body };
+  };
+
+  const callTool = async (agt: string, name: string, args: Json, idem?: string, meta?: Record<string, unknown>): Promise<unknown> => {
     const c = cfg as WorkspaceConfig;
     const t = tools(agt).find((x) => x.name === name);
     if (!t) return toolError(flags.skipPause ? "unknown_tool" : c.pause.workspace || c.pause.agents.includes(agt as never) ? "paused" : "unknown_tool");
     const m = manifests.get(t.ins) as Manifest;
-    const op = withStandardOps(m).find((o) => o.id === t.op);
+    const declared = withStandardOps(m).find((o) => o.id === t.op);
     const g = grantsOf(agt).find((x) => x.claims.aud === `tb:ins:${t.ins}`);
-    if (!op || !g) return toolError("no_grant");
-    if (!op.standard && !validateInput(op, args).ok) return toolError("input_invalid");
-    if (!op.standard && op.idempotency === "required" && !idem) return toolError("input_invalid");
+    if (!declared || !g) return toolError("no_grant");
+    if (!t.kind && !declared.standard && !validateInput(declared, args).ok) return toolError("input_invalid");
+    if (!t.kind && !declared.standard && declared.idempotency === "required" && !idem) return toolError("input_invalid");
+    // dynamic ops (BRIDGE §7.2 / §8): _search answers from the catalog bridge op; _call resolves first; a list entry
+    // carries its catalog crud / effect; gate() runs on the effective op
+    let op = declared;
+    if (t.kind === "search") {
+      const q = isObj(args) ? args : {};
+      const r = await bridgeOp(t.ins, "catalog", { op: t.op, query: String(q.query ?? ""), ...(typeof q.limit === "number" ? { limit: q.limit } : {}) });
+      if (r.status !== 200 || !Array.isArray(r.body)) return toolError((isObj(r.body) && isObj(r.body.error) ? String(r.body.error.code) : null) ?? "app_unavailable");
+      return { content: [{ type: "text", text: JSON.stringify(r.body) }], structuredContent: { entries: r.body } };
+    }
+    if (t.kind === "call" || t.kind === "entry") {
+      const a = isObj(args) ? args : {};
+      const tool = t.kind === "entry" ? (t.entry as DynamicCatalogEntry).name : String(a.tool ?? "");
+      let eff: { crud: string[]; effect: string } | null = t.kind === "entry" ? (t.entry as DynamicCatalogEntry) : null;
+      if (t.kind === "call") {
+        const r = await bridgeOp(t.ins, "resolve", { op: t.op, tool });
+        eff = r.status === 200 && isObj(r.body) && Array.isArray(r.body.crud) ? (r.body as { crud: string[]; effect: string }) : null;
+        if (!eff) return toolError("unknown_tool");
+      }
+      if (!inCeiling(declared as Operation, eff as { crud: string[]; effect: string })) return toolError("dynamic_ceiling_exceeded");
+      op = { ...declared, crud: (eff as { crud: string[] }).crud, effect: (eff as { effect: string }).effect } as OperationView;
+      args = { tool, arguments: (t.kind === "entry" ? args : (a.arguments ?? {})) as Json };
+    }
     const trust = { now: nowS(), self: `tb:ins:${t.ins}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) };
     const paused = flags.skipPause ? { workspace: false, agent: false, connection: false, instance: false } : { workspace: c.pause.workspace, agent: c.pause.agents.includes(agt as never), connection: false, instance: c.pause.instances.includes(t.ins as never) };
     const d = gate({ paused, grant: g.jws, trust, op, declaredScopeTypes: (m.scopes ?? []).map((x) => x.type) });
     if (d.decision === "refuse") return toolError(d.reason);
-    const context = {};
-    const app = c.apps.find((a) => a.ins === t.ins);
-    const proof = await signCallProof({ iss: brg, sub: `tb:agt:${agt}` as never, aud: `tb:ins:${t.ins}` as never, call: `call_${ulid()}` as never, gjti: g.claims.jti, op: op.id, in: digest(args), ctx: digest(context), iat: nowS() }, key);
-    const r = await fetch(`${app?.internalUrl}/tb/v1/ops/${op.id}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${g.jws}`, ...(flags.noProof ? {} : { "TB-Call": proof }) },
-      body: JSON.stringify({ input: args, context, ...(idem ? { idempotencyKey: idem } : {}) }),
-    });
-    const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    const context: Record<string, Json> = {};
+    // BRIDGE §8.5: the claim lands in tb.onBehalfOf before the hooks; an invalid one is dropped and reported
+    if (meta && ON_BEHALF_OF in meta && !flags.noOnBehalfOf) {
+      const obo = onBehalfOfFromMeta(meta[ON_BEHALF_OF]);
+      if (obo) context["tb.onBehalfOf"] = obo as unknown as Json;
+      else reject("on_behalf_of_invalid", "claim");
+    }
+    const fwd = await pipeline({ caller: { type: "agent", id: agt, mode: g.claims.mode }, grant: g.jws, grantJti: g.claims.jti, ins: t.ins, m, op, input: args, context, ...(idem ? { idem } : {}), hooks: true });
+    if ("error" in fwd) return toolError(fwd.error);
+    const r = fwd;
+    const body = r.body;
     if (flags.leakToPortal) await ack({ lastCall: { name, input: args, output: body } });
     if (r.status === 200) return { content: [{ type: "text", text: JSON.stringify(body.output) }], structuredContent: body.output };
     if (r.status === 202) return { content: [{ type: "text", text: "held" }], structuredContent: { status: "held", holdId: body.holdId, expiresAt: body.expiresAt, checkWith: mcpToolName(m.id, "tb_hold_status") } };
@@ -325,29 +522,88 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         const paused = c.pause.workspace || c.pause.agents.includes(agt as never);
         return send(res, 200, { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "mini", version: "0.0.0" }, instructions: paused ? "paused by the owner" : "" } }, { "mcp-session-id": randomUUID() });
       }
+      if (msg.method === "tools/list" || msg.method === "tools/call") await ensureManifests();
       if (msg.method === "tools/list") result = { tools: tools(agt).map((t) => ({ name: t.name, inputSchema: t.inputSchema })) };
       if (msg.method === "tools/call") {
         const meta = msg.params?._meta as Record<string, unknown> | undefined;
-        result = await callTool(agt, String(msg.params?.name), (msg.params?.arguments ?? {}) as Json, typeof meta?.["tealbrick/idempotencyKey"] === "string" ? (meta["tealbrick/idempotencyKey"] as string) : undefined);
+        result = await callTool(agt, String(msg.params?.name), (msg.params?.arguments ?? {}) as Json, typeof meta?.["tealbrick/idempotencyKey"] === "string" ? (meta["tealbrick/idempotencyKey"] as string) : undefined, meta);
       }
       return send(res, 200, { jsonrpc: "2.0", id: msg.id, result });
     }
     send(res, 404, { error: { code: "not_found", message: "not found", requestId: "req_mini" } });
   };
+  /** the asserting instance (TB-Assert verified against config instanceKeys), else null */
+  const instanceOf = (req: IncomingMessage, raw: Buffer): string | null => {
+    const token = String(req.headers["tb-assert"] ?? "");
+    const ins = String(peekJwt(token).iss ?? "").replace(/^tb:ins:/, "");
+    const ik = (cfg?.instanceKeys ?? []).find((k) => k.ins === ins);
+    const v = ik ? verifyAssertion(token, keySetFrom({ keys: [ik.jwk] }, `tb:ins:${ins}` as never), { typ: TYP.instanceAssertion, aud: brg, now: nowS(), method: req.method ?? "POST", pathAndQuery: req.url ?? "/", ...(raw.length ? { body: new Uint8Array(raw) } : {}) } as never) : null;
+    return v?.ok ? ins : null;
+  };
   const internalServer = createServer(async (req, res) => {
     const raw = await read(req);
     const path = new URL(req.url ?? "/", "http://x").pathname;
-    if (path === "/tb/v1/status") return void res.writeHead(204).end();
-    // neighbour claims only (BSD-07 address rule); other claim kinds are not implemented by this minimal bridge
+    // status push + slice long-poll (BRIDGE §10.3): the instance's slice once Core bound its key
+    if (path === "/tb/v1/status" && req.method === "POST") {
+      const ins = instanceOf(req, raw);
+      if (!ins) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion refused", requestId: "req_mini" } });
+      const pushed = (JSON.parse(raw.toString() || "{}") as { sliceRevision?: number }).sliceRevision;
+      const wait = Math.min(10, Number(new URL(req.url ?? "/", "http://x").searchParams.get("wait") ?? 0) || 0);
+      const end = Date.now() + wait * 1000;
+      for (;;) {
+        const a = cfg?.apps.find((x) => x.ins === ins);
+        const rev = a ? Number(peekJwt(a.slice).rev) : 0;
+        if (a && rev !== pushed) return send(res, 200, { slice: a.slice, sliceRevision: rev, keysRev: 0 });
+        if (Date.now() >= end || stopped || res.destroyed) return void res.writeHead(204).end();
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
     if (path === "/tb/v1/claim" && req.method === "POST") {
-      const b = JSON.parse(raw.toString() || "{}") as { code?: string; internalUrl?: string };
+      const b = JSON.parse(raw.toString() || "{}") as { code?: string; internalUrl?: string; instancePublicKey?: Ed25519PublicJwk; manifestDigest?: string; version?: string };
       const d = opaqueDigest(String(b.code ?? ""));
+      // instance claim (K6): one-time code of the config, reported (digest only) in the next status report
+      const inst = cfg?.enrolCodes.find((e) => e.digest === d && e.kind === "instance");
+      if (inst && !usedCodes.has(d) && b.instancePublicKey) {
+        usedCodes.add(d);
+        claimsSeen.push({ kind: "instance", ins: inst.ins, publicKey: b.instancePublicKey, manifestDigest: b.manifestDigest as never, version: String(b.version ?? "0.0.0") as never, codeDigest: d, claimedAt: new Date().toISOString() as never });
+        void ack();
+        const app = cfg?.apps.find((a) => a.ins === inst.ins);
+        const bound = cfg?.instanceKeys.some((k) => k.ins === inst.ins);
+        return send(res, 200, { ins: inst.ins, bridge: { id: enrol.bridgeId, publicKey: key.publicJwk, internalUrl: `http://127.0.0.1:${env.TB_INTERNAL_PORT}` }, ...(app && bound ? { slice: app.slice } : {}) });
+      }
+      // neighbour claims (BSD-07 address rule); service claims are not implemented by this minimal bridge
       const entry = cfg?.enrolCodes.find((e) => e.digest === d && e.kind === "neighbour");
       if (!entry) return send(res, 400, { error: { code: "code_invalid", message: "code_invalid", requestId: "req_mini" } });
       if (!flags.noAddressCheck && !isPrivateInternalUrl(String(b.internalUrl ?? ""), { ownInfra: true, allowList }))
         return send(res, 403, { error: { code: "internal_url_refused", message: "internal_url_refused", requestId: "req_mini" } });
       if (flags.noAddressCheck && b.internalUrl) await fetch(`${b.internalUrl}/tb/v1/manifest`).catch(() => undefined);
       return send(res, 503, { error: { code: "app_unavailable", message: "not implemented", requestId: "req_mini" } });
+    }
+    // companion path (BRIDGE §8.3; v0.1.13 C85: app-initiated calls without parentCall take the same pipeline)
+    if (path === "/tb/v1/call" && req.method === "POST") {
+      const c = cfg;
+      const err = (status: number, code: string) => send(res, status, { error: { code, message: code, requestId: "req_mini" } });
+      if (!c) return err(503, "config_expired");
+      const ins = instanceOf(req, raw);
+      if (!ins) return err(401, "unauthenticated");
+      const env = JSON.parse(raw.toString() || "{}") as { target?: string; op?: string; input?: Json; idempotencyKey?: string };
+      const grant = String(req.headers["tb-grant"] ?? "");
+      if (!grant || peekJwt(grant).sub !== `tb:ins:${ins}`) return err(403, "grant_invalid");
+      const target = c.apps.find((a) => a.product === env.target);
+      const m = target ? manifests.get(target.ins) : undefined;
+      const op = m ? withStandardOps(m).find((o) => o.id === env.op) : undefined;
+      if (!target || !m || !op) return err(404, "unknown_tool");
+      const trust = { now: nowS(), self: `tb:ins:${target.ins}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) };
+      const paused = { workspace: c.pause.workspace, agent: false, connection: false, instance: c.pause.instances.includes(ins as never) || c.pause.instances.includes(target.ins) };
+      const g = verifyGrant(grant, trust);
+      if (!g.ok) return err(403, g.code);
+      if (!flags.companionNoWfCheck) {
+        const d = gate({ paused, grant, trust, op, declaredScopeTypes: (m.scopes ?? []).map((x) => x.type) });
+        if (d.decision === "refuse") return err(403, d.reason);
+      }
+      const fwd = await pipeline({ caller: { type: "app", id: ins }, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: {}, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks });
+      if ("error" in fwd) return err(fwd.error === "hook_denied" ? 403 : 502, fwd.error);
+      return send(res, fwd.status, fwd.body);
     }
     // key fetch is not implemented by this minimal bridge: every caller is unauthenticated
     if (path.startsWith("/tb/v1/keys/")) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion required", requestId: "req_mini" } });

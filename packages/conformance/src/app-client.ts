@@ -1,9 +1,9 @@
 // Drives an app the way the bridge does (CORE §8, BRIDGE §8.1 step 10, §9.1): op calls with a grant + `TB-Call` op
 // proof, hook calls with a hook proof, bridge ops with a bridge-op proof, and person launch (K11) + session + person
 // ops. Every call can be tampered with in one named way so negative cases stay one line in the checks.
-import { type Ed25519KeyPair, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
+import { bridgeOpProofClaims, type Ed25519KeyPair, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS } from "@opt2-tealbrick/spec/bridge";
-import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type FreeCaps, type InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type FreeCaps, type HoldVerdictClaim, type InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, HookPhase } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { FakeBridge } from "./fake-bridge.ts";
@@ -52,6 +52,8 @@ export interface CallOptions {
   headers?: Record<string, string>;
   /** grant signing key override (key rotation cases) */
   grantKey?: Ed25519KeyPair;
+  /** v0.1.13 (G1): the op proof carries this before-hook hold verdict (`hv`) */
+  hv?: HoldVerdictClaim;
 }
 
 export interface SentRequest {
@@ -199,6 +201,7 @@ export class AppClient {
         context,
         ...(t === "proof_key" ? { key: b.stranger } : {}),
         ...(t === "proof_expired" ? { iat: now - 200, exp: now - 140 } : {}),
+        ...(opts.hv ? { hv: opts.hv } : {}),
       };
       proof = await m.callProof(p);
       if (t === "proof_aud_missing") {
@@ -274,16 +277,15 @@ export class AppClient {
       if (t === "op_proof") proof = await b.mint.callProof({ sub: `tb:agt:${b.ids.agents[0].id}`, aud, gjti: ulid(), op: opts.op ?? bop, input: body, context: {} });
       else if (t === "hook_proof") proof = await b.mint.hookProof({ sub: `tb:agt:${b.ids.agents[0].id}`, aud, hook: bop, phase: "before", context: {} });
       else {
-        // SPEC-GAP: CREDENTIALS §10 lists `op?`/`in?` generically; the bound claims follow the SDK-API §3.2 rows:
-        // catalog {op}, resolve {op, in}, mark {in}, scope_summary {} (the reading the SDK implements).
+        // C91: THE binding rule (manifest bridgeOpProofClaims): catalog {op}, resolve {op, in}, mark {in},
+        // scope_summary {}; `bop_mismatch` signs another bop with this bop's claims, `body` binds a tampered body
         const signedBop: BridgeOp = t === "bop_mismatch" ? (bop === "mark" ? "catalog" : "mark") : bop;
-        const withOp = bop === "catalog" || bop === "resolve";
-        const withIn = bop === "resolve" || bop === "mark";
+        const claims = bridgeOpProofClaims(bop, t === "body" ? tamperValue(body) : body);
         proof = await b.mint.bridgeOpProof({
           aud,
           bop: signedBop,
-          ...(withOp && opts.op !== undefined ? { op: opts.op } : {}),
-          ...(withIn ? { body: t === "body" ? tamperValue(body) : body } : {}),
+          ...(claims.op !== undefined ? { op: claims.op } : opts.op !== undefined && (bop === "catalog" || bop === "resolve") ? { op: opts.op } : {}),
+          ...(claims.in !== undefined ? { in: claims.in } : {}),
           ...(t === "proof_key" ? { key: b.stranger } : {}),
         });
       }

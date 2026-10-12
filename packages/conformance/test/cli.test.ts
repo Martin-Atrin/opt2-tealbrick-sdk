@@ -35,6 +35,39 @@ describe("tb-conformance CLI", () => {
     assert.equal(run(["app", "--start", startModule, "--manifest", manifest, "--test-roots", "--no-test-roots"]).status, 2, "--test-roots (the default) and --no-test-roots exclude each other");
   });
 
+  it("waivers (C89): --waive and tealbrick-conformance.json turn a failing check into waived until the version; unknown ids exit 2", () => {
+    const wrong = `sha256:${"1".repeat(64)}`;
+    const failing = run(["manifest", manifest, "--expect-digest", wrong, "--json"]);
+    assert.equal(failing.status, 1);
+    const waived = run(["manifest", manifest, "--expect-digest", wrong, "--waive", "M3@99.0.0", "--json"]);
+    assert.equal(waived.status, 0, waived.stderr);
+    const r = JSON.parse(waived.stdout) as { ok: boolean; counts: Record<string, number>; checks: { id: string; status: string; asserted: string }[]; waivers: { id: string; state: string; realStatus: string }[] };
+    const m3 = r.checks.find((c) => c.id === "M3");
+    assert.equal(m3?.status, "waived");
+    assert.match(m3?.asserted ?? "", /^fail: .*waived until 99\.0\.0: --waive \(command line\)$/);
+    assert.equal(r.counts.waived, 1);
+    assert.deepEqual(r.waivers.map((w) => [w.id, w.state, w.realStatus]), [["M3", "applied", "fail"]]);
+    const expired = run(["manifest", manifest, "--expect-digest", wrong, "--waive", "M3@0.1.9"]);
+    assert.equal(expired.status, 1, "at or after `until` the waiver is ignored");
+    assert.match(expired.stdout, /waiver M3@0\.1\.9 ignored: conformance 0\.1\.9 ≥ 0\.1\.9/);
+    assert.match(expired.stdout, /## Waivers/);
+    assert.equal(run(["manifest", manifest, "--waive", "Z9.nope@1.0.0"]).status, 2, "unknown check id");
+    assert.equal(run(["manifest", manifest, "--waive", "M3"]).status, 2, "missing @until");
+    const dir = mkdtempSync(join(tmpdir(), "tbconf-waive-"));
+    try {
+      const copy = join(dir, "app.manifest.json");
+      writeFileSync(copy, readFileSync(manifest, "utf8"));
+      writeFileSync(join(dir, "tealbrick-conformance.json"), JSON.stringify({ waivers: [{ id: "M3", until: "9.9.9", reason: "digest pinned by the release record (Fleet)" }] }));
+      const f = run(["manifest", copy, "--expect-digest", wrong, "--json"]);
+      assert.equal(f.status, 0, f.stderr);
+      assert.match((JSON.parse(f.stdout) as { checks: { id: string; asserted: string }[] }).checks.find((c) => c.id === "M3")?.asserted ?? "", /waived until 9\.9\.9: digest pinned by the release record \(Fleet\)/);
+      writeFileSync(join(dir, "tealbrick-conformance.json"), JSON.stringify({ waivers: [{ id: "A99.unknown", until: "9.9.9", reason: "x" }] }));
+      assert.equal(run(["manifest", copy]).status, 2, "unknown id in the file");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("app --start <module> runs every check (restart + backup round-trip included) and exits 0 (--test-roots: accepted no-op, the default)", () => {
     const r = run(["app", "--start", startModule, "--manifest", manifest, "--timeout", "8000", "--test-roots", "--json"]);
     const report = JSON.parse(r.stdout) as { ok: boolean; checks: { id: string; status: string }[] };

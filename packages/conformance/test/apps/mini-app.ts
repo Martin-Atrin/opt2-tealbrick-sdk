@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { join } from "node:path";
 import {
   authorize,
+  bridgeOpBinding,
   digest,
   type Ed25519KeyPair,
   exportPrivateKey,
@@ -63,6 +64,20 @@ export interface MiniAppFaults {
   keysetTransitional?: boolean;
   /** keeps a refused identity even when TB_ENROL_CODE changed (fails A1.reclaim_on_new_code, SDK-API §13 v0.1.12) */
   noReclaim?: boolean;
+  /** v0.1.13: ignores the proof's hook hold verdict `hv` (fails A14.hook_hold) */
+  ignoreHoldVerdict?: boolean;
+  /** v0.1.13: an approval never satisfies a hook verdict (fails A14.hold_retry_once) */
+  hvIgnoresApproval?: boolean;
+  /** v0.1.13: holds on a verdict before the scope checks (fails A14.scope_wins) */
+  hvBeforeScope?: boolean;
+  /** v0.1.13: tb.holds_pending shows an agent every hold (fails A15.holds_pending) */
+  holdsPendingAll?: boolean;
+  /** v0.1.13: its app-initiated companion call presents no TB-Grant (fails A16.call_outside_handler) */
+  appInitiatedNoGrant?: boolean;
+  /** v0.1.13: no status push when a hold changes (fails A17.status_changed) */
+  noStatusChanged?: boolean;
+  /** v0.1.13: status pendingHolds always 0 (fails A17.pending_count) */
+  pendingHoldsZero?: boolean;
 }
 
 interface Receipt {
@@ -72,6 +87,10 @@ interface Receipt {
   op: string;
   effect: string;
   holdFamily: string | null;
+  /** v0.1.13: `<product>/<hookId>` of the holding before hook, else null */
+  heldBy: string | null;
+  /** v0.1.13: the hook verdict reason or the SDK hold reason */
+  reason: string | null;
   status: string;
   inputDigest: string;
   summary: string;
@@ -88,6 +107,8 @@ interface Receipt {
 
 interface State {
   claimed: boolean;
+  /** v0.1.13 (C85): the one app-initiated companion call of this data dir was made */
+  bgCallDone?: boolean;
   /** v0.1.12: sha256 of the enrolment code the claim was made with */
   codeDigest?: string;
   bridgeId: string | null;
@@ -242,18 +263,43 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
   if (!st.claimed) await claim(false);
   let reclaimTried = false;
 
-  // status push + long-poll
+  // status push + long-poll; statusChanged() (SDK-API v0.1.13 C86) ends the current long-poll so the next push carries
+  // the new pendingHolds at once
   const stop = new AbortController();
-  const pending = () => st.receipts.filter((x) => x.status === "held").length;
+  const pending = () => (faults.pendingHoldsZero ? 0 : st.receipts.filter((x) => x.status === "held").length);
+  let poll = new AbortController();
+  let dirty = false;
+  const statusChanged = () => {
+    if (faults.noStatusChanged) return;
+    dirty = true;
+    poll.abort();
+  };
+  let bgTried = false;
+  /** v0.1.13 (C85): one app-initiated companion call (no parentCall) once a slice with grants is installed */
+  const background = () => {
+    if (bgTried || st.bgCallDone || !slice || (slice.grants ?? []).length === 0 || !manifest.companions?.length) return;
+    bgTried = true;
+    void callCompanion(null).then(
+      () => {
+        st.bgCallDone = true;
+        save();
+      },
+      () => undefined,
+    );
+  };
   const loop = (async () => {
     let first = true;
     while (!stop.signal.aborted) {
       try {
+        background();
+        poll = new AbortController();
+        const now = first || dirty;
+        dirty = false;
         const r = await bridge(
           "POST",
-          `/tb/v1/status?wait=${first ? 0 : 60}`,
+          `/tb/v1/status?wait=${now ? 0 : 60}`,
           { readiness: "ready", version: manifest.version, sdkVersion: `${manifest.sdkMajor}.0.0`, scopesRev: 0, sliceRevision: slice?.rev ?? 0, keysRev, pendingHolds: pending() },
-          stop.signal,
+          AbortSignal.any([stop.signal, poll.signal]),
         );
         first = false;
         if (r.status === 401 && !faults.noReclaim && !reclaimTried && env.TB_ENROL_CODE && sha(env.TB_ENROL_CODE) !== st.codeDigest) {
@@ -271,7 +317,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         }
       } catch {
         if (stop.signal.aborted) break;
-        await new Promise((res) => setTimeout(res, 200));
+        if (!poll.signal.aborted) await new Promise((res) => setTimeout(res, 200));
       }
     }
   })();
@@ -285,7 +331,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       const grant = (slice?.grants ?? []).find((g) => [...((peek(g).wf as string[]) ?? [])].sort().join(",") === want);
       if (!grant) throw new E(403, "no_grant");
       const env = { target: c.product, op: c.operations[0], input: {}, ...(parentCall ? { parentCall } : {}) };
-      const r = await bridge("POST", "/tb/v1/call", env, undefined, { "TB-Grant": grant });
+      const r = await bridge("POST", "/tb/v1/call", env, undefined, parentCall === null && faults.appInitiatedNoGrant ? {} : { "TB-Grant": grant });
       if (r.status === 200 || r.status === 202) return r.body as Json;
       const code = String(((r.body as { error?: { code?: string } } | null)?.error?.code) ?? "app_error");
       if (attempt === 0 && code === "grant_stale" && !faults.noCompanionRetry) {
@@ -323,17 +369,21 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     const proof = String(req.headers["tb-call"] ?? "");
     const g0 = peek(grant);
     let callId: string | null = null;
+    let hv: { f: string; r: string; by: string } | null = null;
     if (!faults.skipProofVerify) {
       const p = verifyCallProof(proof, t, { op: opId, inputDigest: digest(body.input), contextDigest: digest(body.context ?? {}), grantJti: String(g0.jti ?? ""), grantSub: String(g0.sub ?? "") }, faults.noProofReplayGuard ? undefined : replay);
       if (!p.ok) throw new E(401, "call_proof_invalid");
       callId = p.claims.call;
+      hv = p.claims.hv ?? null;
     }
     let callerId: string;
+    let callerType: "agent" | "app" = "agent";
     let held: string[] = [];
     if (!faults.skipGrantVerify) {
       const g = verifyGrant(grant, t);
       if (!g.ok) throw new E(g.code.startsWith("grant_") ? 401 : 403, g.code);
       callerId = g.caller.id;
+      callerType = g.caller.type;
       held = g.claims.held;
     } else {
       callerId = String(g0.sub ?? "tb:agt:unknown").split(":")[2] ?? "unknown";
@@ -343,10 +393,32 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     if (!op) throw new E(404, "unknown_tool");
     if (op.audience !== "agent") throw new E(403, "audience_not_agent");
     if (op.standard) {
+      if (op.id === "tb.holds_pending") {
+        // SDK-API v0.1.13 G4: summaries only; an agent sees its own held receipts, an app caller all; oldest first
+        const q = (body.input ?? {}) as { limit?: number; cursor?: string };
+        const limit = Math.min(100, Math.max(1, q.limit ?? 50));
+        const from = q.cursor ? Number(Buffer.from(q.cursor, "base64url").toString()) || 0 : 0;
+        const mine = st.receipts.filter((x) => x.status === "held" && (callerType === "app" || faults.holdsPendingAll || x.caller.id === callerId)).sort((x, y) => x.createdAt - y.createdAt);
+        const items = mine.slice(from, from + limit).map((x) => ({
+          id: x.id,
+          product,
+          op: x.op,
+          family: x.holdFamily,
+          reason: x.reason ?? "held",
+          heldBy: x.heldBy,
+          summary: x.summary,
+          caller: x.caller,
+          createdAt: new Date(x.createdAt).toISOString(),
+          ageS: Math.floor((Date.now() - x.createdAt) / 1000),
+          decidePath: `/holds/${x.id}`,
+        }));
+        const nextCursor = from + limit < mine.length ? Buffer.from(String(from + limit)).toString("base64url") : null;
+        return json(res, 200, { status: "ok", output: { items, nextCursor } as unknown as Json });
+      }
       if (op.id !== "tb.hold_status") throw new E(403, "audience_not_agent");
       const h = st.receipts.find((x) => x.id === String((body.input as Record<string, unknown>)?.holdId) && x.caller.id === callerId);
       if (!h) throw new E(404, "hold_not_found");
-      return json(res, 200, { status: "ok", output: { status: h.status, expiresAt: h.expiresAt ? new Date(h.expiresAt).toISOString() : null } });
+      return json(res, 200, { status: "ok", output: { status: h.status, expiresAt: h.expiresAt ? new Date(h.expiresAt).toISOString() : null, family: h.holdFamily, reason: h.reason } });
     }
     if (!validateInput(op, body.input).ok) throw new E(400, "input_invalid");
     ensureAgent(callerId);
@@ -365,8 +437,9 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     const scoped = op.standard ? undefined : op.scopeType;
     let access: { level: string; crud: typeof op.crud } | null = null;
     if (scoped) {
-      const req0 = (op.standard ? [] : ((op.input?.required as string[]) ?? [])).find((k) => typeof (body.input as Record<string, unknown>)[k] === "string");
-      const sid = req0 ? String((body.input as Record<string, unknown>)[req0]) : "";
+      // the scope instance: the first required string naming one of the caller's scope rows (else the first string)
+      const strs = (op.standard ? [] : ((op.input?.required as string[]) ?? [])).map((k) => (body.input as Record<string, unknown>)[k]).filter((v): v is string => typeof v === "string");
+      const sid = strs.find((v) => st.scopes.some((r) => r.agent === callerId && r.type === scoped && r.instanceId === v)) ?? strs[0] ?? "";
       const row = st.scopes.find((r) => r.agent === callerId && r.type === scoped && r.instanceId === sid);
       access = row ? { level: row.access, crud: levelCrud(scoped, row.access) } : null;
     }
@@ -374,14 +447,18 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       ? st.receipts.find((x) => x.caller.id === callerId && x.op === op.id && (x.status === "approved" || x.status === "run"))
       : st.receipts.find((x) => x.caller.id === callerId && x.op === op.id && x.inputDigest === inputDigest && x.status === "approved" && !x.consumed);
     const eff = op as Extract<OperationView, { standard: false }>;
-    const d = authorize({
+    const holdVerdict = hv && !faults.ignoreHoldVerdict ? { family: hv.f as never, reason: hv.r, by: hv.by } : null;
+    const d = faults.hvBeforeScope && holdVerdict && !pausedFor(callerId).workspace
+      ? ({ decision: "hold", reason: "held_by_hook", holdFamily: holdVerdict.family, heldBy: holdVerdict.by } as const)
+      : authorize({
       paused: pausedFor(callerId),
       grant,
       trust: t,
       op: { id: op.id, crud: op.crud, effect: op.effect, ...(eff.holdFamily ? { holdFamily: eff.holdFamily } : {}), ...(scoped ? { scopeType: scoped } : {}) },
       access,
       usage: {},
-      approval: approved ? "approved" : "none",
+      approval: approved && !(faults.hvIgnoresApproval && holdVerdict) ? "approved" : "none",
+      holdVerdict,
     });
     if (faults.skipGrantVerify && d.decision === "refuse" && d.reason.startsWith("grant_")) {
       // a broken app that never verifies the grant runs anyway
@@ -401,10 +478,11 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       ...(faults.storesRawInput ? { input: body.input } : {}),
     };
     if (d.decision === "hold") {
-      const h: Receipt = { ...base, id: newId("hld"), holdFamily: d.holdFamily ?? null, status: "held", expiresAt: Date.now() + 15 * 60_000, view: op.title };
+      const h: Receipt = { ...base, id: newId("hld"), holdFamily: d.holdFamily ?? null, heldBy: d.heldBy ?? null, reason: d.heldBy && holdVerdict ? holdVerdict.reason : d.reason, status: "held", expiresAt: Date.now() + 15 * 60_000, view: op.title };
       st.receipts.push(h);
       if (ik) st.idem[ik] = { inputDigest, kind: "held", holdId: h.id };
       save();
+      statusChanged();
       return json(res, 202, { status: "held", holdId: h.id, expiresAt: new Date(h.expiresAt ?? 0).toISOString() });
     }
     // read ops also read the companion product (app→app through the bridge)
@@ -416,7 +494,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       approved.consumed = true; // the receipt keeps the held call's id (accepted rule, SDK-API §4.3)
       receiptId = approved.id;
     } else if (op.receipt) {
-      const r: Receipt = { ...base, id: newId("rcp"), holdFamily: null, status: "run", expiresAt: null };
+      const r: Receipt = { ...base, id: newId("rcp"), holdFamily: null, heldBy: null, reason: null, status: "run", expiresAt: null };
       st.receipts.push(r);
       receiptId = r.id;
     }
@@ -455,6 +533,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         h.decidedAt = Date.now();
         h.decidedBy = s.per;
         st.audit.push({ id: newId("aud"), at: Date.now(), actor: s.per, action: "hold.decide", target: h.id });
+        statusChanged();
         out = h as unknown as Json;
         break;
       }
@@ -515,9 +594,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const name = path.slice(14);
         const bop = name === "scope-summary" ? "scope_summary" : name;
         const b = JSON.parse(raw || "{}") as Record<string, Json>;
-        const op = typeof b.op === "string" ? b.op : "";
-        const bind = bop === "catalog" ? { bop, op } : bop === "resolve" ? { bop, op, inputDigest: digest(b) } : bop === "mark" ? { bop, inputDigest: digest(b) } : { bop };
-        const p = verifyBridgeOpProof(String(req.headers["tb-call"] ?? ""), t, bind as never, replay);
+        const p = verifyBridgeOpProof(String(req.headers["tb-call"] ?? ""), t, bridgeOpBinding(bop as never, b), replay);
         if (!p.ok) throw new E(401, "call_proof_invalid");
         if (bop === "scope_summary") return json(res, 200, (slice?.agents ?? []).map((a) => ({ agent: a.id, label: `${st.scopes.filter((r) => r.agent === a.id).length} spaces` })));
         if (bop === "mark") {

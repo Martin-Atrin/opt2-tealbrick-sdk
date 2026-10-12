@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { digest, manifestDigest, mcpToolName, toolNameFits, validateAppFiles, validateManifest } from "@opt2-tealbrick/manifest";
+import { digest, HOLDS_PENDING_OP, manifestDigest, mcpToolName, toolNameFits, validateAppFiles, validateManifest } from "@opt2-tealbrick/manifest";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { codeLiterals, literalNamesId } from "../code-literals.ts";
@@ -205,6 +205,33 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     const off = own.filter((h) => (h.match.operations ?? []).some((o) => !agentOps.has(o))).map((h) => h.id);
     const counts = `own ${own.length} (ops checked), foreign ${foreign}: checked by Core at chain resolution (M-HK-3)`;
     return verdict(off.length === 0, off.length ? `violations: ${off.join(",")}; ${counts}` : counts);
+  });
+  // M-CP-3 (v0.1.13, G4/C82): the wildcard companion ("*") names exactly tb.holds_pending with crud [read]; no other
+  // standard op may be a companion op (the schema refuses the others' names; the validator owns the wildcard shape)
+  await s.run("M2.companion_wildcard", "wildcard companion is only tb.holds_pending / read (M-CP-3)", "a companion with product \"*\" has operations [tb.holds_pending] and crud [read]; tb.holds_pending is the only tb.* companion op", () => {
+    if (!m) return bad("manifest invalid");
+    const comps = m.companions ?? [];
+    if (comps.length === 0) return na("no companions declared");
+    const off: string[] = [];
+    for (const c of comps) {
+      const std = c.operations.filter((o) => o.startsWith("tb."));
+      if (std.some((o) => o !== HOLDS_PENDING_OP)) off.push(`${c.product}: standard op ${std.join(",")}`);
+      if (c.product === "*" && (c.operations.length !== 1 || c.operations[0] !== HOLDS_PENDING_OP || c.crud.length !== 1 || c.crud[0] !== "read")) off.push(`*: operations ${c.operations.join(",")} crud ${c.crud.join(",")}`);
+    }
+    const wild = comps.filter((c) => c.product === "*").length;
+    return verdict(off.length === 0, off.length ? `violations: ${off.join("; ")}` : `${comps.length} companions (${wild} wildcard) ok`);
+  });
+  await s.run("M2.companion_wildcard.enforced", "validator enforces M-CP-3", "validateManifest refuses a wildcard companion naming another op, or with crud beyond read (companion_invalid, rule M-CP-3); accepts the valid wildcard", () => {
+    if (!m) return bad("manifest invalid");
+    const withComp = (c: Record<string, unknown>) => validateManifest({ ...clone(m), companions: [...clone(m.companions ?? []).filter((x) => x.product !== "*"), c] });
+    const purpose = "Conformance probe of the wildcard companion rule";
+    const own = m.operations.find((o) => o.audience === "agent")?.id ?? "conformance_probe";
+    const cpRule = (r: ReturnType<typeof validateManifest>) => !r.ok && r.errors.some((e) => e.rule === "M-CP-3" && e.code === "companion_invalid");
+    const otherOp = withComp({ product: "*", operations: [own], crud: ["read"], purpose });
+    const wideCrud = withComp({ product: "*", operations: [HOLDS_PENDING_OP], crud: ["read", "update"], purpose });
+    const valid = withComp({ product: "*", operations: [HOLDS_PENDING_OP], crud: ["read"], purpose });
+    const show = (r: ReturnType<typeof validateManifest>) => (r.ok ? "accepted" : codes(r).join(","));
+    return verdict(cpRule(otherOp) && cpRule(wideCrud) && valid.ok, `other op: ${show(otherOp)}; crud read+update: ${show(wideCrud)}; valid wildcard: ${show(valid)}`);
   });
   await s.run("M2.when_settings", "`when` references declared settings (M-ST-3)", "every when key names an enum/boolean field", () => {
     if (!m) return bad("manifest invalid");

@@ -5,7 +5,7 @@
 
 export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   // @opt2-tealbrick/manifest
-  authorize: ["A3.run", "A3.crud_ceiling", "A3.hold", "A3.held_family", "A3.money", "A3.caps", "A3.no_standing_approval", "P1.workspace", "P1.agent", "P1.instance"],
+  authorize: ["A3.run", "A3.crud_ceiling", "A3.hold", "A3.held_family", "A3.money", "A3.caps", "A3.no_standing_approval", "A14.hook_hold", "A14.hold_retry_once", "A14.scope_wins", "P1.workspace", "P1.agent", "P1.instance"],
   canonicalize: ["M3", "B8.tampered_input", "A4.receipt_digest"],
   digest: ["M3", "A4.receipt_digest", "A2.tampered_context"],
   gate: ["B5.paused_first", "B5.bound_outside_wf", "B5.grant_revoked"],
@@ -40,11 +40,11 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   // @opt2-tealbrick/miniapp-sdk (server)
   CSRF_HEADER: ["A6.csrf"],
   decideHold: ["A4.decide_person_only", "A10"],
-  defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route"], // gitleaks:allow (check ids, not secrets)
+  defineApp: ["A1.manifest_served", "M4.openapi", "A1.no_claim_route", "A17.pending_count"], // gitleaks:allow (check ids, not secrets)
   getKey: ["C8.keys_via_bridge"],
   onKeysChanged: ["C8.keys_via_bridge"],
   SESSION_COOKIE: ["A6"],
-  startApp: ["A1", "A1.health", "A7.restart"],
+  startApp: ["A1", "A1.health", "A7.restart", "A16.call_outside_handler", "A17.status_changed"],
   TB_EXEC_CONTROL_PORT: ["B11.set_and_fetch"],
   TbError: ["A5", "A5.required", "A6.session_required"],
   // @opt2-tealbrick/miniapp-sdk/client (thin wrappers over the person API routes)

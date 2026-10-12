@@ -11,11 +11,15 @@ import { type MiniFlags, type MiniState, startMiniBridge } from "./mini-bridge.t
 
 const status = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.status;
 /** `keyset`: runBridgeTarget's key-set options (default: test roots + strict, as the CLI) */
+/** C91 group real_app: the workspace SDK source (no build needed: node strips the types outside node_modules) */
+const SDK_MODULE = new URL("../../../miniapp-sdk/src/server/index.ts", import.meta.url).href;
 const run = (flags: MiniFlags, groups: string[], state: MiniState = {}, keyset: { testRoots?: boolean; keysetRequired?: boolean; bootTimeoutMs?: number } = {}) =>
-  runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, ...keyset });
+  runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, sdkModule: SDK_MODULE, ...keyset });
 const ADDRESS_IDS = ["B21.own_infra_allowed", "B21.internal_url_external", "B21.own_infra_flag_required", "B21.neighbour_url_refused"];
 const KEYSET_IDS = ["B20.kss_enrolled", "B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise", "B20.kss_reenrol_missing"];
 
+const SPINE013_IDS = ["B22.hold_verdict", "B22.hold_retry_refused", "B22.hv_tamper", "B23.on_behalf_of", "B23.reserved_tb_namespace", "B24.app_initiated", "B24.no_grant"];
+const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark"];
 const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"];
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
@@ -84,6 +88,24 @@ describe("bridge target", () => {
     for (const id of ["B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise"]) assert.equal(status(r, id), "fail", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
   });
 
+  it("spec 0.1.13 spine (spine013): a correct bridge passes every B22–B24 check", async () => {
+    const r = await run({}, ["spine013"]);
+    for (const id of SPINE013_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
+    assert.equal(status(r, "B6.order"), "not_run", "an older bridge deselects spine013 the same way");
+  });
+
+  it("real SDK app behind the bridge (C91, group real_app): a correct bridge passes every B25 check against @opt2-tealbrick/miniapp-sdk", async () => {
+    const r = await run({}, ["real_app"]);
+    for (const id of REAL_APP_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
+  });
+
+  it("QA S1 regression (C91): a bridge that signs catalog proofs with `in` fails B25.real_catalog_search (real SDK) and B16.search_uses_catalog (fake app)", async () => {
+    const r = await run({ catalogWithIn: true }, ["real_app", "dynamic"]);
+    for (const id of ["B25.real_catalog_search", "B16.search_uses_catalog"]) assert.equal(status(r, id), "fail", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
+    assert.match(r.checks.find((c) => c.id === "B25.real_catalog_search")?.asserted ?? "", /call_proof_invalid/);
+    assert.equal(status(r, "B25.real_op_call"), "pass", "only the catalog binding is broken");
+  });
+
   it("cspFormActionSelf accepts exactly form-action 'self'", () => {
     assert.equal(cspFormActionSelf("default-src 'none'; form-action 'self'; frame-ancestors 'none'"), true);
     assert.equal(cspFormActionSelf("default-src 'self'"), false);
@@ -103,6 +125,14 @@ describe("bridge target", () => {
     ["serves the key page without CSP form-action (C59)", { noKeysCsp: true }, ["keys_origin"], ["B11.keys_origin_csp"]],
     ["answers 404 instead of 503 when the keys origin is unset (C59)", { noUnset503: true }, ["keys_origin"], ["B11.keys_origin_unset_503"]],
     ["routes to any internalUrl (BSD-07)", { noAddressCheck: true }, ["addresses"], ["B21.internal_url_external", "B21.own_infra_flag_required", "B21.neighbour_url_refused"]],
+    // spec 0.1.13 (spine013)
+    ["stops the before chain at a hold (a later refuse cannot win)", { holdStopsChain: true }, ["spine013"], ["B22.hold_verdict"]],
+    ["sends the hold verdict outside the signed proof", { hvOutsideProof: true }, ["spine013"], ["B22.hold_verdict", "B22.hv_tamper"]],
+    ["caches a hold verdict instead of re-running the chain on the retry", { cacheHoldVerdict: true }, ["spine013"], ["B22.hold_retry_refused"]],
+    ["ignores _meta tealbrick/onBehalfOf", { noOnBehalfOf: true }, ["spine013"], ["B23.on_behalf_of"]],
+    ["lets a context hook write tb.* keys", { allowTbContext: true }, ["spine013"], ["B23.reserved_tb_namespace"]],
+    ["skips the hooks for app-initiated calls", { appCallsSkipHooks: true }, ["spine013"], ["B24.app_initiated"]],
+    ["does not gate companion calls by the grant's workflow", { companionNoWfCheck: true }, ["spine013"], ["B24.no_grant"]],
   ];
   for (const [name, flags, groups, ids] of broken) {
     it(`fails a bridge that ${name}`, async () => {

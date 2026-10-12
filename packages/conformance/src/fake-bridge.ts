@@ -131,6 +131,15 @@ export class FakeBridge {
   /** companion calls refused on purpose by `control.refuseNextCompanionCalls` (the SDK's refresh-and-retry path) */
   readonly companionRefusals: { envelope: CallEnvelope; caller: InstanceId; code: string; at: number }[] = [];
   companionRefuseQueue: { status: number; code: string }[] = [];
+  /**
+   * v0.1.13 (C85, A16): EVERY `/tb/v1/call` attempt, refused ones included: the envelope (best-effort parse), the
+   * asserting instance (null when the instance assertion was refused), the presented TB-Grant and the refusal code.
+   */
+  readonly callAttempts: { envelope: Partial<CallEnvelope> | null; caller: InstanceId | null; grant: string; code: string | null; status: number; at: number }[] = [];
+  /** windows in which `control.forgetInstanceKey` had dropped the instance key (A16 ignores calls refused then) */
+  readonly forgotten: { from: number; to: number | null }[] = [];
+  /** every companion grant a slice of this run carried (A16: an app-initiated call must present one of them) */
+  readonly sliceGrants = new Set<string>();
   /** the first K6 for the app instance (`TB_ENROL_CODE`) */
   readonly enrolCode: string;
   url = "";
@@ -317,6 +326,7 @@ export class FakeBridge {
       grants: await this.companionGrants(),
       agents: this.agentEntries(),
     };
+    for (const g of body.grants) this.sliceGrants.add(g);
     const signedSlice = await signSlice(body, over?.signer ?? this.activePortalKey());
     this.slice = signedSlice;
     this.sliceRev = rev;
@@ -494,7 +504,35 @@ export class FakeBridge {
   }
 
   async #call(req: IncomingMessage, pathAndQuery: string, raw: Buffer, res: ServerResponse): Promise<void> {
+    let parsed: unknown = null;
+    try {
+      parsed = parseJson(raw);
+    } catch {
+      // recorded with a null envelope; #callInner refuses it
+    }
+    const attempt = {
+      envelope: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Partial<CallEnvelope>) : null,
+      caller: null as InstanceId | null,
+      grant: header(req, BRIDGE_HEADERS.companionGrant) ?? "",
+      code: null as string | null,
+      status: 200,
+      at: Date.now(),
+    };
+    this.callAttempts.push(attempt);
+    try {
+      await this.#callInner(req, pathAndQuery, raw, res, (ins) => {
+        attempt.caller = ins;
+      });
+    } catch (e) {
+      attempt.code = e instanceof HttpError ? e.code : "internal";
+      attempt.status = e instanceof HttpError ? e.status : 500;
+      throw e;
+    }
+  }
+
+  async #callInner(req: IncomingMessage, pathAndQuery: string, raw: Buffer, res: ServerResponse, asserted: (ins: InstanceId) => void): Promise<void> {
     const who = this.#verifyInstance(req, pathAndQuery, raw);
+    asserted(who.ins);
     const env = parseJson(raw) as Partial<CallEnvelope> | undefined;
     if (!env || typeof env.target !== "string" || typeof env.op !== "string" || !("input" in env)) throw new HttpError(400, "input_invalid", "CallEnvelope shape");
     const target = this.ids.peers[env.target];
@@ -583,7 +621,10 @@ export class FakeBridgeControl {
     const slot = svc ? `${this.#b.ids.ins}/${svc}` : this.#b.ids.ins;
     const jwk = this.#b.instanceKeys.get(slot);
     this.#b.instanceKeys.delete(slot);
+    const window = { from: Date.now(), to: null as number | null };
+    this.#b.forgotten.push(window);
     return () => {
+      window.to = Date.now();
       if (jwk && !this.#b.instanceKeys.has(slot)) this.#b.instanceKeys.set(slot, jwk);
     };
   }

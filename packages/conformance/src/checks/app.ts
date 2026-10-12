@@ -4,8 +4,8 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, manifestDigest, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
-import { TYP } from "@opt2-tealbrick/spec/credentials";
+import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, manifestDigest, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { type HoldVerdictClaim, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Hook, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { AppClient, CallOptions, OpAnswer, PersonSession } from "../app-client.ts";
@@ -231,6 +231,12 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   const inputFor = (op: Operation, agent: string = agentA.id): Json => ctx.inputs[op.id] ?? sampleInput(op.input, fillFor(op, agent) ?? "conformance");
   /** Schema-valid inputs that differ from `input` in one place (optional property added, or one string changed). */
   const variants = (op: Operation, input: Json): Json[] => {
+    const out = schemaVariants(op, input);
+    if (out.length === 0) out.push(tamperValue(input));
+    return out.slice(0, 4);
+  };
+  /** Like `variants`, but only schema-valid ones (no blind fallback). */
+  const schemaVariants = (op: Operation, input: Json): Json[] => {
     const out: Json[] = [];
     const valid = (x: Json) => validateInput({ ...op, standard: false }, x).ok;
     if (isObj(input) && isObj(op.input)) {
@@ -248,8 +254,32 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
         if (valid(cand)) out.push(cand);
       }
     }
-    if (out.length === 0) out.push(tamperValue(input));
     return out.slice(0, 4);
+  };
+  /**
+   * A5 (v0.1.13, Inbox): the "other input" for the 409 probe. A free-text string field (its schema has no enum,
+   * pattern, format or const) changed, else a schema-valid variant of another field, else null (n/a). Never the first
+   * string blindly: an enum / pattern field would make the app answer input_invalid instead of 409.
+   */
+  const otherInput = (op: Operation, input: Json): { input: Json; how: string } | null => {
+    const valid = (x: Json) => validateInput({ ...op, standard: false }, x).ok;
+    if (isObj(input) && isObj(op.input)) {
+      const props = isObj(op.input.properties) ? (op.input.properties as Record<string, unknown>) : {};
+      for (const k of Object.keys(input).reverse()) {
+        const v = (input as Record<string, Json>)[k];
+        const sch = props[k];
+        if (typeof v !== "string" || !isObj(sch) || ["enum", "pattern", "format", "const"].some((x) => x in sch)) continue;
+        const types = Array.isArray(sch.type) ? sch.type : [sch.type ?? "string"];
+        if (!types.includes("string")) continue;
+        const last = v.slice(-1) === "x" ? "y" : "x";
+        for (const changed of [`${v}-tampered`, `${v.slice(0, -1)}${last}`]) {
+          const cand = { ...(input as Record<string, Json>), [k]: changed };
+          if (changed !== v && valid(cand)) return { input: cand, how: `free-text field ${k}` };
+        }
+      }
+    }
+    const alt = schemaVariants(op, input).find((x) => digest(x) !== digest(input));
+    return alt === undefined ? null : { input: alt, how: "schema-valid variant" };
   };
   const reachable = (op: Operation) => ctx.inputs[op.id] !== undefined || fillFor(op, agentA.id) !== null;
   const holdable = (op: Operation) => op.effect === "money" || op.holdFamily !== undefined || CAPPABLE.has(op.effect);
@@ -409,29 +439,15 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       ...(h.phase === "after" ? { output: { probe: "tb-conformance" } } : {}),
     };
   };
-  /** The phase's response shape (BRIDGE §8.2, spec bridge.ts HookResponseByPhase) or the first violation. */
-  const hookShapeProblem = (h: Hook, body: unknown): string | null => {
-    if (!isObj(body)) return "not an object";
-    const keys = Object.keys(body);
-    const allowed = h.phase === "before" ? ["allow", "reason"] : h.phase === "context" ? ["add"] : ["output", "redactions"];
-    const extra = keys.filter((k) => !allowed.includes(k));
-    if (extra.length) return `unexpected keys ${extra.join(",")}`;
-    if (h.phase === "before") return typeof body.allow !== "boolean" ? "allow not boolean" : body.reason !== undefined && typeof body.reason !== "string" ? "reason not a string" : null;
-    if (h.phase === "context") {
-      if (!isObj(body.add)) return "add not an object";
-      const off = Object.keys(body.add).filter((k) => !k.startsWith(`${product}.`));
-      return off.length ? `context keys without "${product}.": ${off.join(",")}` : null;
-    }
-    const r = body.redactions;
-    return r !== undefined && !(Array.isArray(r) && r.every((x) => typeof x === "string" && (x === "" || x.startsWith("/")))) ? "redactions not JSON pointers" : null;
-  };
-  await s.run("A2.hook_valid", "every declared hook answers a valid hook call", "each hook: 200 with its phase shape (before {allow, reason?}, context {add} keys `<product>.`, after {output?, redactions?: JSON pointers})", async () => {
+  // v0.1.13: the ONE shape rule (manifest hookResponseProblem): before answers may carry a hold verdict, context keys
+  // must be `<product>.` and never the bridge's reserved `tb.` namespace
+  await s.run("A2.hook_valid", "every declared hook answers a valid hook call", "each hook: 200 with its phase shape (before {allow, reason?, hold?: {family, reason} only with allow false}, context {add} keys `<product>.` never `tb.`, after {output?, redactions?: JSON pointers})", async () => {
     if (hooks.length === 0) return na("manifest declares no hooks");
     const seen: string[] = [];
     let pass = true;
     for (const h of hooks) {
       const a = await c().callHook(h.id, h.phase, hookReq(h));
-      const problem = a.status !== 200 ? show(a) : hookShapeProblem(h, a.body);
+      const problem = a.status !== 200 ? show(a) : hookResponseProblem(h.phase, a.body, product);
       pass &&= problem === null;
       seen.push(`${h.id} (${h.phase}, order ${h.order}): ${problem ?? `200 ${JSON.stringify(Object.keys(a.body as object))}`}`);
     }
@@ -557,16 +573,18 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   });
 
   // ── A5 idempotency ──
-  await s.run("A5", "idempotency: same key + same input → same result; different input → 409", "replay → same holdId/output; other input with the same key → 409 idempotency_conflict", async () => {
+  await s.run("A5", "idempotency: same key + same input → same result; different input → 409", "replay → same holdId/output; other input (a free-text field changed, else a schema-valid variant; else n/a) with the same key → 409 idempotency_conflict", async () => {
     if (!idemOp) return na("no holdable agent op with idempotency required|supported");
     const key = `conf-${ulid()}`;
     const input = inputFor(idemOp);
     const o = holdOpts(idemOp);
+    const other = otherInput(idemOp, input);
+    if (!other) return na(`${idemOp.id}: no free-text string field and no schema-valid variant of its input (A5 never tampers an enum / pattern / format / const field)`);
     const a1 = track(await c().callOp(idemOp.id, input, { ...o, idempotencyKey: key }));
     const a2 = track(await c().callOp(idemOp.id, input, { ...o, idempotencyKey: key }));
-    const a3 = await c().callOp(idemOp.id, tamperValue(input), { ...o, idempotencyKey: key });
+    const a3 = await c().callOp(idemOp.id, other.input, { ...o, idempotencyKey: key });
     const same = (isHeld(a1) && isHeld(a2) && holdIdOf(a1) === holdIdOf(a2)) || (isOk(a1) && isOk(a2) && JSON.stringify((a1.body as Record<string, unknown>).output) === JSON.stringify((a2.body as Record<string, unknown>).output));
-    return verdict(same && a3.status === 409 && a3.code === "idempotency_conflict", `first ${show(a1)}; replay ${show(a2)}; other input ${show(a3)}`);
+    return verdict(same && a3.status === 409 && a3.code === "idempotency_conflict", `first ${show(a1)}; replay ${show(a2)}; other input (${other.how}) ${show(a3)}`);
   });
   await s.run("A5.required", "idempotency required and missing → 400", "an op with idempotency required called without a key → 400 idempotency_key_required", async () => {
     const op = byRank(agentOps.filter((o) => o.idempotency === "required"))[0];
@@ -578,14 +596,16 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   // SPEC-GAP: CONFORMANCE §4.5 has no app-side companion check (A1–A11); A12 asserts the SDK-API §9 rules on the calls
   // the app makes while the checks above run its agent ops (or, if none did, one call per reachable agent op).
   const companions = m.companions ?? [];
+  // v0.1.13 (C85): a companion call WITHOUT parentCall is app-initiated by definition (A16); A12 covers in-handler calls
+  const handlerCalls = () => b.companionCalls.filter((k) => k.envelope.parentCall !== undefined);
   let companionOp: { op: Operation; input: Json } | null = null;
   const findCompanionOp = async (): Promise<void> => {
     if (companionOp || companions.length === 0) return;
     for (const op of byRank(agentOps.filter((o) => o.effect !== "money"))) {
-      const before = b.companionCalls.length;
+      const before = handlerCalls().length;
       const input = inputFor(op);
       const a = track(await c().callOp(op.id, input, { idempotencyKey: idemKey(op) }));
-      if (b.companionCalls.length > before && isOk(a)) {
+      if (handlerCalls().length > before && isOk(a)) {
         companionOp = { op, input };
         return;
       }
@@ -602,10 +622,11 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run("A12.companion_call", "app→app call through the bridge with the companion grant", "POST /tb/v1/call: TB-Assert valid, TB-Grant = the slice's companion grant (sub self, aud target, mode bound, wf = declared ops), target/op declared in companions[], parentCall = the running call's id; the op answers ok", async () => {
     if (companions.length === 0) return na("manifest declares no companions");
     await findCompanionOp();
-    if (b.companionCalls.length === 0) return na("no agent op made a companion call with the generated inputs (companion use from person ops or jobs is not observable here); supply an inputs fixture");
+    const calls = handlerCalls();
+    if (calls.length === 0) return na("no agent op made a companion call with the generated inputs (companion use from person ops or jobs is not observable here; calls without parentCall are app-initiated, A16); supply an inputs fixture");
     const parents = new Set(okAnswers.map((a) => a.callId).filter((x): x is string => !!x));
     const problems: string[] = [];
-    for (const k of b.companionCalls) {
+    for (const k of calls) {
       const decl = companions.find((x) => x.product === k.envelope.target);
       const g = peek(k.grant) as { sub?: string; aud?: string; mode?: string; wf?: string[] } | null;
       const where = `${k.envelope.target}.${k.envelope.op}`;
@@ -615,10 +636,10 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       if (decl && [...(g?.wf ?? [])].sort().join(",") !== [...decl.operations].sort().join(",")) problems.push(`${where} grant wf ${String(g?.wf)}`);
       if (!k.envelope.parentCall || !parents.has(k.envelope.parentCall)) problems.push(`${where} parentCall ${String(k.envelope.parentCall)} is not a call the app answered ok`);
     }
-    const first = b.companionCalls[0];
+    const first = calls[0];
     return verdict(
       problems.length === 0,
-      problems.length ? problems.slice(0, 4).join("; ") : `${b.companionCalls.length} calls, e.g. ${first.envelope.target}.${first.envelope.op} (parentCall ${first.envelope.parentCall}, idempotencyKey ${first.envelope.idempotencyKey ? "sent" : "none"}); grants and envelopes ok`,
+      problems.length ? problems.slice(0, 4).join("; ") : `${calls.length} calls, e.g. ${first.envelope.target}.${first.envelope.op} (parentCall ${first.envelope.parentCall}, idempotencyKey ${first.envelope.idempotencyKey ? "sent" : "none"}); grants and envelopes ok`,
     );
   });
   await s.run("A12.companion_refresh_retry", "companion grant_stale → re-read the slice once and retry", "bridge refuses once with grant_stale → the SDK retries once and the op answers ok; refused twice → the op fails after exactly 2 attempts (no loop)", async () => {
@@ -689,7 +710,11 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const held = hold as { answer: OpAnswer } | null;
     const r0 = retry as OpAnswer | null;
     if (held && r0 && isOk(r0) && isObj(r0.body) && r0.body.receiptId === holdIdOf(held.answer)) targets.push({ rid: holdIdOf(held.answer), call: String(held.answer.callId), kind: "post-approval retry (held call id)" });
-    if (targets.length === 0) return notRun("no call ran ok with a receipt (supply an inputs fixture for a receipt op)");
+    if (targets.length === 0) {
+      // Fleet (v0.1.13): nothing to mark when no agent op writes a receipt
+      if (!agentOps.some((o) => o.receipt)) return na("no agent op has receipt: true");
+      return notRun("no call ran ok with a receipt (supply an inputs fixture for a receipt op)");
+    }
     const seen: string[] = [];
     for (const t of targets) {
       const a = await c().callBridgeOp("mark", { call: t.call, mark: "after_failed" });
@@ -704,6 +729,130 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       seen.push(`${t.kind} ${t.rid}: ${String(row?.status ?? "missing")}`);
     }
     return verdict(pass, seen.join("; "));
+  });
+
+  // ── A14 hook hold verdict at the app (SDK-API v0.1.13 authorize step 2b; CREDENTIALS v0.1.13 `hv`) ──
+  // The fake bridge signs `hv` into the op proof as a bridge with a holding before hook would. The probe op prefers a
+  // non-money op that is NOT holdable on its own (read), so the hold can only come from the verdict.
+  const ownBefore = hooks.find((h) => h.phase === "before");
+  const HV_BY = `${ownBefore ? product : "tbconf-rules"}/${ownBefore?.id ?? "conformance_policy"}`;
+  const hvClaim = (r: string): HoldVerdictClaim => ({ f: "policy", r, by: HV_BY });
+  const hvOp = byRank(agentOps.filter((o) => o.effect !== "money")).sort((x, y) => rank(x) - rank(y) || Number(holdable(x)) - Number(holdable(y)))[0];
+  const NO_HV_OP = "no agent op other than money (a money op is always held, so a verdict hold is not observable)";
+  const hvCall = (input: Json, reason: string, opts: CallOptions = {}) => c().callOp((hvOp as Operation).id, input, { hv: hvClaim(reason), idempotencyKey: idemKey(hvOp), ...opts });
+  const listHolds = async (): Promise<Record<string, unknown>[]> => {
+    if (!sess) return [];
+    const r = await c().personOp(sess, "tb.holds_list", {});
+    return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
+  };
+  const openHolds = async () => (await listHolds()).filter((x) => x.status === "held").length;
+  let hvHold: { op: Operation; input: Json; id: string } | null = null;
+  await s.run("A14.hook_hold", "op proof with a hook hold verdict (hv) → held, heldBy recorded", `proof hv {f: policy, r, by: "${HV_BY}"} on an op the grant would run → 202 held; tb.holds_list row holdFamily policy, heldBy = hv.by (tb.hold_status family / reason accepted, not required)`, async () => {
+    if (!hvOp) return na(NO_HV_OP);
+    if (!sess) return bad("no person session");
+    const input = inputFor(hvOp);
+    const reason = `conformance policy hold ${ulid()}`;
+    const a = track(await hvCall(input, reason));
+    if (!isHeld(a)) return bad(`${hvOp.id} (${hvOp.effect}) with hv: ${show(a)}${reachable(hvOp) ? "" : " — no scope instance found; supply inputs fixture"}`);
+    const id = holdIdOf(a);
+    hvHold = { op: hvOp, input, id };
+    const row = (await listHolds()).find((x) => x.id === id);
+    const st = await c().callOp("tb.hold_status", { holdId: id });
+    const out = isObj(st.body) && isObj(st.body.output) ? st.body.output : {};
+    const extra = `${out.family !== undefined ? `, family ${String(out.family)}` : ""}${out.reason !== undefined ? `, reason ${out.reason === reason ? "= hv.r" : String(out.reason)}` : ""}`;
+    return verdict(row?.holdFamily === "policy" && row.heldBy === HV_BY, `${hvOp.id}: ${show(a)}; holds_list ${row ? `holdFamily ${String(row.holdFamily)}, heldBy ${String(row.heldBy)}` : "row missing"}; hold_status ${show(st)} ${String(out.status)}${extra}`);
+  });
+  await s.run("A14.hold_retry_once", "approved verdict hold runs once on the same input; another input → new hold", "after approval: other input + hv → new hold; same input + hv → runs (not held); same input + hv again → held again (new holdId)", async () => {
+    if (!hvOp) return na(NO_HV_OP);
+    if (!hvHold || !sess) return bad("A14.hook_hold created no hold");
+    const h = hvHold as { op: Operation; input: Json; id: string };
+    const d = await decide(h.id, "approve");
+    if (d?.status !== 200) return bad(`approve ${d ? show(d) : "no session"}`);
+    const alt = schemaVariants(h.op, h.input)[0];
+    const other = alt === undefined ? null : await hvCall(alt, "conformance other input");
+    const otherOk = other === null || (isHeld(other) && holdIdOf(other) !== h.id);
+    const once = track(await hvCall(h.input, "conformance retry"));
+    const twice = track(await hvCall(h.input, "conformance retry again"));
+    const pass = otherOk && isOk(once) && isHeld(twice) && holdIdOf(twice) !== h.id;
+    return verdict(pass, `other input: ${other ? show(other) : "n/a (no schema-valid variant)"}; same input: ${show(once)}; again: ${show(twice)}`);
+  });
+  await s.run("A14.scope_wins", "a scope refusal beats a hook hold verdict", "op whose crud exceeds grant.crud, proof with hv → refused scope_denied (not held)", async () => {
+    const op = agentOps.find((o) => o.crud.some((x) => x !== "read")) ?? agentOps[0];
+    if (!op) return na("no agent op");
+    const narrower: CrudAction[] = (["create", "read", "update", "delete"] as CrudAction[]).filter((x) => !op.crud.includes(x)).slice(0, 1);
+    const a = await c().callOp(op.id, inputFor(op), { crud: narrower, hv: hvClaim("conformance scope probe"), idempotencyKey: idemKey(op) });
+    const o = refusedWith(a, ["scope_denied", "crud_exceeds_grant"]);
+    return { ...o, asserted: `${op.id} (grant crud [${narrower.join(",")}]) + hv: ${o.asserted}` };
+  });
+
+  // ── A15 tb.holds_pending (SDK-API v0.1.13 G4): summaries only; agent → own holds; companion app → all; paging ──
+  await s.run("A15.holds_pending", "tb.holds_pending: summaries only, agent sees own holds, companion app sees all, paging", "holds by agents A and B: A sees its hold and not B's; an app caller (grant wf [tb.holds_pending]) sees both; no item has input / view / meta; limit 1 + cursor pages without repeats", async () => {
+    if (!hvOp) return na(NO_HV_OP);
+    const hA = await hvCall(inputFor(hvOp, agentA.id), "conformance pending A", { agent: agentA.id });
+    const hB = await hvCall(inputFor(hvOp, agentB.id), "conformance pending B", { agent: agentB.id });
+    if (!isHeld(hA) || !isHeld(hB)) return bad(`holds not created: A ${show(hA)}; B ${show(hB)}`);
+    const [idA, idB] = [holdIdOf(hA), holdIdOf(hB)];
+    const peerIns = newId("ins") as `ins_${string}`;
+    /** every page of tb.holds_pending for one caller; null on a non-ok answer */
+    const all = async (opts: CallOptions, limit?: number): Promise<{ items: Record<string, unknown>[]; pages: number; shown: string } | null> => {
+      const items: Record<string, unknown>[] = [];
+      let cursor: string | null = null;
+      for (let pages = 1; pages <= 200; pages++) {
+        const a = await c().callOp(HOLDS_PENDING_OP, { ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) }, opts);
+        const out = isObj(a.body) && isObj(a.body.output) ? a.body.output : null;
+        if (!isOk(a) || !out || !Array.isArray(out.items)) return { items, pages, shown: show(a) };
+        if (limit !== undefined && out.items.length > limit) return { items, pages, shown: `page ${pages}: ${out.items.length} items > limit ${limit}` };
+        items.push(...out.items.filter(isObj));
+        cursor = typeof out.nextCursor === "string" ? out.nextCursor : null;
+        if (!cursor) return { items, pages, shown: "ok" };
+      }
+      return { items, pages: 200, shown: "more than 200 pages" };
+    };
+    const asA = await all({ agent: agentA.id });
+    const asApp = await all({ caller: peerIns });
+    const paged = await all({ caller: peerIns }, 1);
+    if (!asA || !asApp || !paged) return bad("no answer");
+    const problems: string[] = [];
+    const ids = (x: { items: Record<string, unknown>[] }) => x.items.map((i) => String(i.id));
+    if (asA.shown !== "ok") problems.push(`agent: ${asA.shown}`);
+    if (!ids(asA).includes(idA)) problems.push("agent A misses its own hold");
+    if (ids(asA).includes(idB)) problems.push("agent A sees agent B's hold");
+    const foreign = asA.items.filter((i) => isObj(i.caller) && i.caller.id !== agentA.id).length;
+    if (foreign) problems.push(`agent A sees ${foreign} items of other callers`);
+    if (asApp.shown !== "ok" || !ids(asApp).includes(idA) || !ids(asApp).includes(idB)) problems.push(`app caller: ${asApp.shown}, sees A ${ids(asApp).includes(idA)}, B ${ids(asApp).includes(idB)}`);
+    const leaky = [...asA.items, ...asApp.items].filter((i) => ["input", "view", "meta"].some((k) => k in i)).length;
+    if (leaky) problems.push(`${leaky} items carry input / view / meta`);
+    const pIds = ids(paged);
+    if (paged.shown !== "ok" || paged.pages < 2 || new Set(pIds).size !== pIds.length || !pIds.includes(idA) || !pIds.includes(idB)) problems.push(`paging (limit 1): ${paged.shown}, ${paged.pages} pages, ${pIds.length} items, ${new Set(pIds).size} distinct`);
+    return verdict(problems.length === 0, problems.length ? problems.join("; ") : `agent A: ${asA.items.length} items (own only); app caller: ${asApp.items.length} items; limit 1: ${paged.pages} pages, no repeats; summaries only`);
+  });
+
+  // ── A17 pending count + status push (SDK-API v0.1.13 C86 + clarification: statusChanged on every hold change) ──
+  await s.run("A17.status_changed", "a new hold is pushed to the bridge within 2 s", "after a hold is created, a status push with pendingHolds ≥ the open holds arrives within 2 s (no slice change in between)", async () => {
+    if (!hvOp) return na(NO_HV_OP);
+    if (!sess) return bad("no person session");
+    const t0 = Date.now();
+    const a = await hvCall(inputFor(hvOp), "conformance status push probe");
+    if (!isHeld(a)) return bad(`no hold: ${show(a)}`);
+    const tHeld = Date.now();
+    const open = await openHolds();
+    const seen = await b.control.waitForStatus((x) => x.at >= t0 && x.status.pendingHolds >= open, Math.max(0, tHeld + 2000 - Date.now())).catch(() => null);
+    const last = b.statuses.at(-1);
+    return verdict(!!seen, seen ? `push ${seen.at - tHeld} ms after the hold answer, pendingHolds ${seen.status.pendingHolds} (open holds ${open})` : `no push with pendingHolds ≥ ${open} within 2 s (last push ${last ? `${last.status.pendingHolds} at ${last.at - tHeld} ms` : "none"})`);
+  });
+  await s.run("A17.pending_count", "status pendingHolds counts the open holds and drops after a decision", "after a new hold: the next status push (slice republished) has pendingHolds ≥ the open holds (tb.holds_list); after denying it the next push is lower", async () => {
+    if (!hvOp) return na(NO_HV_OP);
+    if (!sess) return bad("no person session");
+    const a = await hvCall(inputFor(hvOp), "conformance pending count probe");
+    if (!isHeld(a)) return bad(`no hold: ${show(a)}`);
+    const open1 = await openHolds();
+    const st1 = await b.control.waitForSliceRevision(await b.control.republish(), T);
+    const d = await decide(holdIdOf(a), "deny");
+    if (d?.status !== 200) return bad(`deny ${d ? show(d) : "no session"}`);
+    const open2 = await openHolds();
+    const st2 = await b.control.waitForSliceRevision(await b.control.republish(), T);
+    const [n1, n2] = [st1.status.pendingHolds, st2.status.pendingHolds];
+    return verdict(n1 >= open1 && n2 < n1 && n2 >= open2, `with the hold: pendingHolds ${n1} (open ${open1}); after deny: ${n2} (open ${open2})`);
   });
 
   // ── P1 pause cells for the app (A refuses ≤ 60 s after B) ──
@@ -939,6 +1088,22 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
 
   // ── A13 key-set statements on slices (CREDENTIALS §9.5, v0.1.11) ──
   await keySetChecks(s, ctx, hs);
+
+  // ── A16 app-initiated calls (SDK-API v0.1.13 C85; observed only) ──
+  await s.run("A16.call_outside_handler", "app-initiated companion calls carry a valid assertion and the app's companion grant", "every /tb/v1/call without parentCall seen by the fake bridge: instance assertion accepted, TB-Grant = a companion grant of this app's slice (sub tb:ins:<self>), no auth refusal; n/a when none is seen", () => {
+    const forgotten = (at: number) => b.forgotten.some((w) => at >= w.from && (w.to === null || at <= w.to));
+    const seen = b.callAttempts.filter((x) => x.envelope !== null && x.envelope.parentCall === undefined && !forgotten(x.at));
+    if (seen.length === 0) return na("no app-initiated call (no parentCall) seen during the run (observed only)");
+    const problems: string[] = [];
+    for (const x of seen) {
+      const where = `${String(x.envelope?.target)}.${String(x.envelope?.op)}`;
+      if (x.caller !== b.ids.ins) problems.push(`${where}: instance assertion ${x.caller ? `of ${x.caller}` : `refused (${x.code})`}`);
+      else if (!x.grant) problems.push(`${where}: no TB-Grant`);
+      else if (!b.sliceGrants.has(x.grant) || peek(x.grant)?.sub !== `tb:ins:${b.ids.ins}`) problems.push(`${where}: TB-Grant is not a companion grant of this app's slice`);
+      else if (x.code && AUTH_CODES.has(x.code)) problems.push(`${where}: refused ${x.code}`);
+    }
+    return verdict(problems.length === 0, problems.length ? problems.slice(0, 4).join("; ") : `${seen.length} app-initiated calls (e.g. ${String(seen[0]?.envelope?.target)}.${String(seen[0]?.envelope?.op)}), assertion and slice companion grant ok`);
+  });
 
   // ── A11 SDK coverage ──
   await s.run("A11", "every exported function of types/sdk.ts has a check", "each generated SDK export maps to ≥ 1 catalogued check id", () => coverageOutcome());

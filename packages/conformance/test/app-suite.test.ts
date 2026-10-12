@@ -49,6 +49,14 @@ describe("app target", () => {
     ["ignores portalKeySet (pre-v0.1.11 trust rule)", { ignoreKeySet: true }, ["A13.portal_keys_ignored", "A13.kss_unknown_root", "A13.kss_rollback", "A13.kss_missing", "A13.kss_compromise"]],
     ["loses its instance key on restart", { newKeyOnRestart: true }, ["A1.key_persisted", "A7.restart"], 2000],
     ["keeps a refused identity although the enrolment code changed", { noReclaim: true }, ["A1.reclaim_on_new_code"]],
+    // v0.1.13 (spec 0.1.13, conformance 0.1.9)
+    ["ignores the proof's hook hold verdict (hv)", { ignoreHoldVerdict: true }, ["A14.hook_hold"]],
+    ["never lets an approval satisfy a hook verdict", { hvIgnoresApproval: true }, ["A14.hold_retry_once"]],
+    ["holds on a verdict before the scope checks", { hvBeforeScope: true }, ["A14.scope_wins"]],
+    ["shows an agent every pending hold", { holdsPendingAll: true }, ["A15.holds_pending"]],
+    ["makes an app-initiated call without its companion grant", { appInitiatedNoGrant: true }, ["A16.call_outside_handler"]],
+    ["does not push its status when a hold changes", { noStatusChanged: true }, ["A17.status_changed"]],
+    ["reports pendingHolds 0", { pendingHoldsZero: true }, ["A17.pending_count"]],
   ];
   it("--no-test-roots: a strict app refuses every fake-bridge slice, the run fails at boot with the pinned-roots note", async () => {
     const r = await run({}, { testRoots: false, bootTimeoutMs: 3000 });
@@ -98,6 +106,30 @@ describe("app target", () => {
       assert.equal(r.checks.find((c) => c.id === id)?.status, "not_applicable", id);
     }
     for (const id of ["P1.workspace", "P1.agent", "P1.instance", "A7.restart", "A1.key_persisted", "A7.backup_roundtrip"]) assert.equal(r.checks.find((c) => c.id === id)?.status, "pass", id);
+  });
+
+  it("A5 tampers a free-text field, never an enum first field (Inbox); no receipt op → A4.mark_after_failed not_applicable (Fleet)", async () => {
+    const m = structuredClone(manifest) as Manifest;
+    for (const o of m.operations) {
+      if (o.id !== "item_create") continue;
+      const inp = o.input as unknown as { required: string[]; properties: Record<string, unknown> };
+      inp.properties = { kind: { type: "string", enum: ["task", "idea"] }, code: { type: "string", pattern: "^[A-Za-z0-9_-]+$" }, ...inp.properties };
+      inp.required = ["kind", "code", ...inp.required];
+    }
+    const r = await runApp({ manifest: m, start: (env) => startMiniApp(m, env), timeoutMs: 8000 });
+    const a5 = r.checks.find((c) => c.id === "A5");
+    assert.equal(a5?.status, "pass", a5?.asserted);
+    assert.match(a5?.asserted ?? "", /other input \(free-text field (title|space)\) 409 idempotency_conflict/);
+    const noReceipt = structuredClone(manifest) as Manifest;
+    noReceipt.operations = noReceipt.operations.map((o) => {
+      if (o.audience !== "agent") return o;
+      const { holdFamily: _h, ...rest } = o as typeof o & { holdFamily?: string };
+      return { ...rest, effect: "read", crud: ["read"], idempotency: "none", receipt: false } as typeof o;
+    });
+    const n = await runApp({ manifest: noReceipt, start: (env) => startMiniApp(noReceipt, env), timeoutMs: 8000 });
+    const mark = n.checks.find((c) => c.id === "A4.mark_after_failed");
+    assert.equal(mark?.status, "not_applicable", mark?.asserted);
+    assert.match(mark?.asserted ?? "", /no agent op has receipt: true/);
   });
 
   for (const [name, faults, expected, timeoutMs] of cases) {
