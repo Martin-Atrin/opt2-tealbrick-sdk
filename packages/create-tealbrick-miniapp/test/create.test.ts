@@ -126,7 +126,7 @@ describe("createMiniapp", () => {
     assert.match(pkg.packageManager, /^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/, "ci-v8: packageManager pinned by hash");
     assert.match(readFileSync(join(dir, "Dockerfile"), "utf8"), /RUN pnpm install --frozen-lockfile --ignore-scripts/, "ci-v8: image installs never run scripts");
     for (const s of ["typecheck", "lint", "test", "conformance", "build", "gen"]) assert.equal(typeof pkg.scripts[s], "string", `script ${s}`);
-    assert.equal(pkg.scripts.conformance, "node --run kit && tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json");
+    assert.equal(pkg.scripts.conformance, "node --run kit && tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json --test-roots");
     // BSA-12: op ids and I/O types come from the generated kit, generated before every step that compiles or runs src
     assert.equal(pkg.scripts.kit, "tb-gen kit && tsc -p gen/kit/tasks-kit --outDir dist/kit");
     assert.deepEqual(pkg.imports, { "#kit": "./dist/kit/index.js" });
@@ -142,7 +142,7 @@ describe("createMiniapp", () => {
     // the conformance harness the script names: default-exports start(env) with backupNow (A7 round-trip)
     const harness = read(dir, "conformance.start.ts");
     assert.match(harness, /export default async function start\(env/);
-    assert.match(harness, /startApp\(app, env\)/);
+    assert.match(harness, /startApp\(app, env, harness\)/);
     assert.match(harness, /backupNow/);
     const tb = Object.entries<string>({ ...pkg.dependencies, ...pkg.devDependencies }).filter(([n]) => n.startsWith("@opt2-tealbrick/"));
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);

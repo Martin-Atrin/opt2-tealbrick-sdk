@@ -9,12 +9,15 @@ import {
   type Ed25519KeyPair,
   gate,
   generateKeyPair,
+  isPrivateInternalUrl,
   keySetFrom,
   keySetFromPortalKeys,
   mcpToolName,
+  opaqueDigest,
   signAgentSession,
   signAssertion,
   signCallProof,
+  trustedPortalKeys,
   ulid,
   validateInput,
   verifyAgentSession,
@@ -43,6 +46,14 @@ export interface MiniFlags {
   noKeysCsp?: boolean;
   /** answers 404 instead of 503 when TB_KEYS_PUBLIC_URL is unset (C59) */
   noUnset503?: boolean;
+  /** routes to any internalUrl (no BSD-07 check) */
+  noAddressCheck?: boolean;
+  /** ignores portalKeySet: portalKeys replace the trusted set (pre-v0.1.11 rule) */
+  ignoreKeySet?: boolean;
+  /** accepts a re-enrolment whose EnrolResponse carries no valid portalKeySet (drops its pin) */
+  acceptStrippedReenrol?: boolean;
+  /** NOT a fault: a spec-0.1.12 build (first enrolment needs a statement, C63a) */
+  keysetRequired?: boolean;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -50,6 +61,12 @@ export interface MiniState {
   key?: Ed25519KeyPair;
   enrol?: EnrolResponse;
   usedJtis?: Set<string>;
+  pinned?: { seq: number; kss: string } | null;
+  trusted?: PortalKeyEntry[];
+  /** the enrolment code S1 was made with (a different TB_ENROL_CODE at boot = re-enrolment, BRIDGE §4.3) */
+  code?: string;
+  /** one volume per TB_DATA_DIR (a fresh data dir is a fresh bridge) */
+  byDir?: Record<string, MiniState>;
 }
 
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -64,27 +81,57 @@ const read = async (req: IncomingMessage) => {
 };
 const listen = (srv: Server, port: number) => new Promise<void>((r) => srv.listen(port, "127.0.0.1", () => r()));
 
-export async function startMiniBridge(env: Record<string, string>, flags: MiniFlags = {}, state: MiniState = {}) {
-  const key = state.key ?? (await generateKeyPair());
-  state.key = key;
+export async function startMiniBridge(env: Record<string, string>, flags: MiniFlags = {}, root: MiniState = {}) {
+  root.byDir ??= {};
+  root.byDir[env.TB_DATA_DIR as string] ??= {};
+  const state = root.byDir[env.TB_DATA_DIR as string] as MiniState;
   const portal = env.TB_PORTAL_URL as string;
   const pub = env.TB_PUBLIC_URL as string;
   const keysHost = env.TB_KEYS_PUBLIC_URL ? new URL(env.TB_KEYS_PUBLIC_URL).hostname : null;
   const usedJtis = state.usedJtis ?? new Set<string>();
   state.usedJtis = usedJtis;
   const keySessions = new Set<string>();
-  const enrol =
-    state.enrol ??
-    ((await (
+  // v0.1.11: roots come from the harness-only TBCONF_PORTAL_ROOT_KEYS (a product bridge takes them through its
+  // programmatic start option); BSD-07 allow-list from the owner-set TB_OWN_INFRA_ORIGINS
+  const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : [];
+  const allowList = (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  // enrolment (first start) or re-enrolment (new TB_ENROL_CODE): a new key; S1 changes only if the response passes
+  // the key-set rule (CREDENTIALS §9.5: a pinned bridge needs a valid statement; strict builds need one at first enrolment)
+  if (!state.enrol || state.code !== env.TB_ENROL_CODE) {
+    const key = await generateKeyPair();
+    const enrol = (await (
       await fetch(`${portal}/api/v1/bridge/enrol`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code: env.TB_ENROL_CODE, publicKey: key.publicJwk, version: "0.0.0", sdkMajors: [1, 0], form: "deployed", publicOrigin: pub }),
       })
-    ).json()) as EnrolResponse);
-  state.enrol = enrol;
+    ).json()) as EnrolResponse;
+    const lax = flags.ignoreKeySet || (flags.acceptStrippedReenrol && !!state.enrol);
+    const t = lax ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(enrol as { portalKeySet?: string }, state.pinned ?? null, roots, { required: flags.keysetRequired === true });
+    if (!t.ok) {
+      if (!state.enrol) throw new Error(`enrolment refused: ${t.code}`);
+      // re-enrolment refused: keep S1 (old key, identity, pin)
+    } else {
+      state.key = key;
+      state.enrol = enrol;
+      state.code = env.TB_ENROL_CODE;
+      if (!t.legacy) {
+        state.pinned = { seq: t.seq, kss: t.kss };
+        state.trusted = t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
+      } else {
+        if (flags.acceptStrippedReenrol) state.pinned = null;
+        state.trusted = enrol.portalKeys;
+      }
+    }
+  }
+  const key = state.key as Ed25519KeyPair;
+  const enrol = state.enrol as EnrolResponse;
+  let pinned = state.pinned ?? null;
+  let trusted: PortalKeyEntry[] = state.trusted ?? enrol.portalKeys;
   const brg = `tb:brg:${enrol.bridgeId}` as const;
-  let trusted: PortalKeyEntry[] = enrol.portalKeys;
+  const rejected = new Map<string, number>();
+  const reject = (code: string) => rejected.set(code, (rejected.get(code) ?? 0) + 1);
+  const routable = (a: { internalUrl: string; ownInfra?: boolean }) => flags.noAddressCheck || isPrivateInternalUrl(a.internalUrl, { ownInfra: a.ownInfra === true, allowList });
   let cfg: WorkspaceConfig | null = null;
   const manifests = new Map<string, Manifest>();
   const boot = randomUUID();
@@ -108,7 +155,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       connectionsCreated: [],
       connectionsRevoked: [],
       claims: [],
-      rejected: [],
+      rejected: [...rejected].map(([code, count]) => ({ kind: "config", code, count })),
       toolsOmitted: [],
       ...extra,
     }).catch(() => undefined);
@@ -119,12 +166,24 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         const path = `${enrol.configPath}?after=${cfg?.rev ?? 0}&wait=1`;
         const r = await portalCall("GET", path);
         if (r.status === 200) {
-          const v = verifyConfig(await r.text(), { now: nowS(), self: brg, issuers: keySetFromPortalKeys(trusted) });
-          const body = v.ok ? (v.body as WorkspaceConfig) : null;
+          const jws = await r.text();
+          const peeked = JSON.parse(Buffer.from(jws.split(".")[1] ?? "", "base64url").toString() || "{}") as { portalKeySet?: string };
+          const t = flags.ignoreKeySet ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(peeked, pinned, roots);
+          const signers = !t.ok ? null : t.legacy ? keySetFromPortalKeys(trusted) : t.signers;
+          const v = signers ? verifyConfig(jws, { now: nowS(), self: brg, issuers: signers }) : null;
+          const body = v?.ok ? (v.body as WorkspaceConfig) : null;
           if (body && body.ws === enrol.workspaceId && (!cfg || body.rev > cfg.rev)) {
-            for (const a of body.apps) if (!manifests.has(a.ins)) manifests.set(a.ins, (await (await fetch(`${a.internalUrl}/tb/v1/manifest`)).json()) as Manifest);
+            for (const a of body.apps as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean })[]) {
+              if (!routable(a)) reject("internal_url_refused");
+              else if (!manifests.has(a.ins)) manifests.set(a.ins, (await (await fetch(`${a.internalUrl}/tb/v1/manifest`)).json()) as Manifest);
+            }
             cfg = body;
-            trusted = body.portalKeys;
+            if (t.ok && !t.legacy) {
+              pinned = { seq: t.seq, kss: t.kss };
+              trusted = t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
+            } else trusted = body.portalKeys;
+            state.pinned = pinned;
+            state.trusted = trusted;
             await ack();
           }
         }
@@ -145,7 +204,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     for (const g of grantsOf(agt)) {
       const ins = g.claims.aud.slice(7);
       const m = manifests.get(ins);
-      if (!m) continue;
+      const entry = c.apps.find((a) => a.ins === ins) as (WorkspaceConfig["apps"][number] & { ownInfra?: boolean }) | undefined;
+      if (!m || !entry || !routable(entry)) continue;
       for (const o of withStandardOps(m)) {
         if (o.standard || o.dynamic) continue;
         if (o.audience !== "agent" && !flags.listPerson) continue;
@@ -274,9 +334,20 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     send(res, 404, { error: { code: "not_found", message: "not found", requestId: "req_mini" } });
   };
   const internalServer = createServer(async (req, res) => {
-    await read(req);
+    const raw = await read(req);
     const path = new URL(req.url ?? "/", "http://x").pathname;
     if (path === "/tb/v1/status") return void res.writeHead(204).end();
+    // neighbour claims only (BSD-07 address rule); other claim kinds are not implemented by this minimal bridge
+    if (path === "/tb/v1/claim" && req.method === "POST") {
+      const b = JSON.parse(raw.toString() || "{}") as { code?: string; internalUrl?: string };
+      const d = opaqueDigest(String(b.code ?? ""));
+      const entry = cfg?.enrolCodes.find((e) => e.digest === d && e.kind === "neighbour");
+      if (!entry) return send(res, 400, { error: { code: "code_invalid", message: "code_invalid", requestId: "req_mini" } });
+      if (!flags.noAddressCheck && !isPrivateInternalUrl(String(b.internalUrl ?? ""), { ownInfra: true, allowList }))
+        return send(res, 403, { error: { code: "internal_url_refused", message: "internal_url_refused", requestId: "req_mini" } });
+      if (flags.noAddressCheck && b.internalUrl) await fetch(`${b.internalUrl}/tb/v1/manifest`).catch(() => undefined);
+      return send(res, 503, { error: { code: "app_unavailable", message: "not implemented", requestId: "req_mini" } });
+    }
     // key fetch is not implemented by this minimal bridge: every caller is unauthenticated
     if (path.startsWith("/tb/v1/keys/")) return send(res, 401, { error: { code: "unauthenticated", message: "instance assertion required", requestId: "req_mini" } });
     send(res, 404, { error: { code: "not_found", message: "not found", requestId: "req_mini" } });

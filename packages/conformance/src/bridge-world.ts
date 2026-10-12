@@ -17,6 +17,7 @@ import {
   opaqueValue,
   resolveSettings,
   type SettingValues,
+  signKeySetStatement,
   signPairingCode,
   signSlice,
   signTicket,
@@ -168,6 +169,10 @@ export function withServiceKeys(m: Manifest): Manifest {
 
 export interface WorldOptions {
   manifests?: Manifest[];
+  /** v0.1.11: the bridge under test pins the world's TEST root pair (start module honours TBCONF_PORTAL_ROOT_KEYS); enrolment, configs and slices then carry `portalKeySet` */
+  testRoots?: boolean;
+  /** C63a strict checks (spec 0.1.12 behaviour): the bridge must refuse a first enrolment without a statement */
+  keysetRequired?: boolean;
 }
 
 /** The fake counterparts of one bridge run and the state the signed config is built from. */
@@ -199,6 +204,14 @@ export class BridgeWorld {
   env: Record<string, string> = {};
   #seq = 0;
   #sliceRev = 0;
+  /** v0.1.11 (C62/C63): TEST Portal Root Key pair; statements are emitted only when `testRoots` */
+  readonly root!: Ed25519KeyPair;
+  testRoots = false;
+  keysetRequired = false;
+  /** current statement: `seq`, the JWS and the key list it signs (re-signed by publish() when the Portal keys change) */
+  keySet: { seq: number; jws: string; keys: string } | null = null;
+  /** per-instance overrides of the config `apps[]` entry (BSD-07 checks: foreign internalUrl, missing ownInfra) */
+  readonly appOverrides = new Map<InstanceId, Record<string, unknown>>();
 
   private constructor(portal: FakePortal, stranger: Ed25519KeyPair) {
     this.portal = portal;
@@ -209,6 +222,10 @@ export class BridgeWorld {
 
   static async create(o: WorldOptions = {}): Promise<BridgeWorld> {
     const w = new BridgeWorld(await FakePortal.create({ maxWaitS: 60 }), await generateKeyPair());
+    (w as { root: Ed25519KeyPair }).root = await generateKeyPair();
+    w.testRoots = o.testRoots === true;
+    w.keysetRequired = o.keysetRequired === true;
+    if (w.testRoots) await w.ensureKeySet();
     const manifests = o.manifests ?? exampleManifests();
     if (manifests.length === 0) throw new Error("bridge target: no example manifests");
     const adapter = w.#adapter();
@@ -319,6 +336,33 @@ export class BridgeWorld {
     if (this.peer) this.grantSpecs.push({ role: "free", app: this.peer, crud: [...ALL_CRUD], mode: "free", wf: [] });
   }
 
+  /** Public JWKs of the TEST root pair (value of TBCONF_PORTAL_ROOT_KEYS). */
+  testRootJwks(): Ed25519PublicJwk[] {
+    return [this.root.publicJwk];
+  }
+
+  /** Statement `seq` over `keys` (default: the fake Portal's keys) signed by `root` (default: the test root). */
+  signKeySet(seq: number, keys = this.portal.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), root: Ed25519KeyPair = this.root): Promise<string> {
+    return signKeySetStatement({ iss: "tb:portal-root", aud: "tb:portal-keys", seq, iat: nowS(), keys }, root);
+  }
+
+  /** The current statement; a new one (`seq` + 1) whenever the fake Portal's key list changed since the last one. */
+  async ensureKeySet(): Promise<string> {
+    const keys = JSON.stringify(this.portal.keys.map((k) => [k.key.kid, k.status]));
+    if (!this.keySet || this.keySet.keys !== keys) {
+      const seq = (this.keySet?.seq ?? 0) + 1;
+      this.keySet = { seq, jws: await this.signKeySet(seq), keys };
+      // Core embeds the CURRENT statement in every enrolment response too (re-enrolment of a pinned bridge)
+      if (this.testRoots) this.portal.enrolKeySet = this.keySet.jws;
+    }
+    return this.keySet.jws;
+  }
+
+  /** Origins of the fake apps (they run on the suite's own host: own infrastructure, BRIDGE §5.7). */
+  ownInfraOrigins(): string[] {
+    return this.apps.map((a) => new URL(a.url).origin);
+  }
+
   /** The current config grant JWS for (role, app). */
   grantFor(role: AgentRole, app: FakeApp): string | undefined {
     return this.grants.get(`${role}|${app.ins}`);
@@ -386,6 +430,7 @@ export class BridgeWorld {
         this.companionGrants.set(caller.ins, await this.mint.grant({ sub: `tb:ins:${caller.ins}`, aud: `tb:ins:${target.ins}`, crud: comp.crud, mode: "bound", wf: comp.operations, held: ["money"] }));
       }
     const portalKeys = o.standalone ? [] : p.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
+    const portalKeySet = this.testRoots && !o.standalone && !this.standalone ? await this.ensureKeySet() : undefined;
     if (o.standalone && !this.standalone) {
       const ownerKey = await generateKeyPair();
       this.standalone = { issuer: brg, kid: thumbprint(jwk), ownerKeys: [ownerKey.publicJwk], ownerKey, owner: this.person };
@@ -408,6 +453,7 @@ export class BridgeWorld {
           ins: a.ins,
           product: a.product,
           portalKeys,
+          ...(portalKeySet ? { portalKeySet } : {}),
           bridge: { id: p.bridgeId, keys: [jwk] },
           pause,
           revoked,
@@ -418,12 +464,26 @@ export class BridgeWorld {
         },
         p.activeKey(),
       );
-      apps.push({ ins: a.ins, product: a.product, version: a.manifest.version, sdkMajor: a.manifest.sdkMajor, manifestDigest: a.digest as AppEntry["manifestDigest"], internalUrl: a.url, entitled: true, slice });
+      // BSD-07: the fake apps listen on the suite's host, so they are own-infrastructure entries the bridge accepts only
+      // through its local TB_OWN_INFRA_ORIGINS allow-list (set by the runner)
+      apps.push({
+        ins: a.ins,
+        product: a.product,
+        version: a.manifest.version,
+        sdkMajor: a.manifest.sdkMajor,
+        manifestDigest: a.digest as AppEntry["manifestDigest"],
+        internalUrl: new URL(a.url).origin,
+        ownInfra: true,
+        entitled: true,
+        slice,
+        ...(this.appOverrides.get(a.ins) ?? {}),
+      } as AppEntry);
     }
     const files = this.skillFiles();
     const extra: Partial<Omit<WorkspaceConfig, "iat" | "exp" | "jti">> = {
       bridge: { id: p.bridgeId, publicUrl: this.advertisedUrl },
       portalKeys,
+      ...(portalKeySet ? { portalKeySet } : {}),
       instanceKeys: this.apps.map((a) => ({ ins: a.ins, jwk: a.key.publicJwk })),
       grants: [...this.grants.values()],
       apps,

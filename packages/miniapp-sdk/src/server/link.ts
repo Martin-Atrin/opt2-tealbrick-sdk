@@ -101,9 +101,11 @@ export class BridgeLink {
     };
   }
 
-  async #apply(r: AppStatusResponse): Promise<void> {
-    if (typeof r?.slice === "string") await installSlice(this.#rt, r.slice);
+  /** Returns false when the answered slice was refused (the bridge would answer the same slice again at once). */
+  async #apply(r: AppStatusResponse): Promise<boolean> {
+    const installed = typeof r?.slice === "string" ? await installSlice(this.#rt, r.slice) : true;
     if (typeof r?.keysRev === "number") await this.#rt.keys.onKeysRev(r.keysRev);
+    return installed;
   }
 
   async #claim(): Promise<boolean> {
@@ -156,9 +158,12 @@ export class BridgeLink {
           {},
           AbortSignal.any([this.#stop.signal, this.#poll.signal]),
         );
-        if (r.status === 200) await this.#apply(r.body as AppStatusResponse);
+        let refused = false;
+        if (r.status === 200) refused = !(await this.#apply(r.body as AppStatusResponse));
         else if (r.status !== 204) throw errorFrom(r, "status_failed");
         backoff = BACKOFF_MIN_MS;
+        // a refused slice (e.g. keyset_rollback) is answered again at once: never a busy loop
+        if (refused) await sleep(BACKOFF_MIN_MS, this.#stop.signal);
         // a bridge that answers a long-poll at once with 204 must not turn this loop into a busy loop
         if (wait > 0 && r.status === 204 && Date.now() - sentAt < BACKOFF_MIN_MS) await sleep(BACKOFF_MIN_MS, this.#stop.signal);
       } catch (e) {

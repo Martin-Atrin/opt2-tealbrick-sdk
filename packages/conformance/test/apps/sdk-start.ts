@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 
 interface SdkModule {
   defineApp(def: unknown): unknown;
-  startApp(app: unknown, env: Record<string, string>): Promise<{ stop(): Promise<void>; backups: { runNow(): Promise<unknown> } }>;
+  startApp(app: unknown, env: Record<string, string>, harness?: { portalRootKeys?: unknown[] }): Promise<{ stop(): Promise<void>; backups: { runNow(): Promise<unknown> } }>;
 }
 
 // computed specifier: the SDK source stays out of this package's typecheck graph
@@ -26,7 +26,8 @@ export default async function start(env: Record<string, string>) {
     handlers: Object.fromEntries(manifest.operations.map((o) => [o.id, stub])),
     hooks: Object.fromEntries((manifest.hooks ?? []).map((h) => [h.id, async () => ({})])),
   });
-  const running = await sdk.startApp(app, env);
+  // v0.1.11 (C63): test roots reach the SDK only through the harness option, never through env (CONFORMANCE §7)
+  const running = await sdk.startApp(app, env, env.TBCONF_PORTAL_ROOT_KEYS ? { portalRootKeys: JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as unknown[] } : undefined);
   return {
     url: `http://127.0.0.1:${manifest.runtime.port}`,
     stop: () => running.stop(),

@@ -1,7 +1,19 @@
-// Trust state of the instance (SDK-API §9 Slice, §12, CREDENTIALS §9.2): the last good instance slice, the trusted
-// issuer set (bootstrap TB_PORTAL_KEYS → slice portalKeys → standalone issuer, or the own key in app-alone mode), call-proof
-// keys, revoked jtis and pause state. Verification itself is `@opt2-tealbrick/manifest` (verifyJws + verifySlice).
-import { keySetAnnounce, keySetFrom, keySetFromPortalKeys, thumbprint, verifyJws, verifySlice } from "@opt2-tealbrick/manifest";
+// Trust state of the instance (SDK-API §9 Slice, §12, CREDENTIALS §9.2 + §9.5): the last good instance slice, the trusted
+// issuer set (v0.1.11: the keys of the newest root-signed key-set statement → standalone issuer; transition path:
+// bootstrap TB_PORTAL_KEYS → slice portalKeys; or the own key in app-alone mode), the pinned statement, call-proof keys,
+// revoked jtis and pause state. Verification itself is `@opt2-tealbrick/manifest` (trustedPortalKeys, verifyJws, verifySlice).
+import {
+  keySetAnnounce,
+  keySetFrom,
+  keySetFromPortalKeys,
+  type PinnedKeySet,
+  type PortalRootChannel,
+  portalRootKeys,
+  thumbprint,
+  trustedPortalKeys,
+  verifyJws,
+  verifySlice,
+} from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
 import { type BridgeId, type Ed25519PublicJwk, type InstanceId, type InstanceRef, LIFETIME_S, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
@@ -10,9 +22,23 @@ import { metaGet, metaSet, type RawDb } from "./store.ts";
 interface StoredSlice {
   token: string;
   slice: InstanceSlice;
-  /** the issuer set the slice established (portalKeys + standalone issuer) */
+  /** the issuer set the slice established (key-set statement keys, or transition: portalKeys; + standalone issuer) */
   issuers: KeySet;
+  /** v0.1.11 (C62/C63): the pinned key-set statement; once set, every later slice must carry a newer-or-equal one */
+  kss?: PinnedKeySet;
 }
+
+/**
+ * Root set this SDK build pins (C63): miniapp-sdk 0.1.x is a DEV-channel build until the cutover release, which
+ * switches this constant to "prod" (production roots from the ceremony). A build constant, never read from env.
+ */
+export const PORTAL_ROOT_CHANNEL: PortalRootChannel = "dev";
+
+/**
+ * Spec 0.1.11 transition: false (fallback to the pre-v0.1.11 rule while nothing is pinned). Spec 0.1.12 (cut when Core
+ * emits `portalKeySet`) sets it true: a first slice without a valid statement is refused. A build constant, never env.
+ */
+export const KEYSET_REQUIRED: boolean = false;
 
 export interface SliceChange {
   added: SliceAgent[];
@@ -30,14 +56,41 @@ export class TrustState {
   #alone: { ws: WorkspaceId; ownKey: Ed25519PublicJwk } | null;
   #stored: StoredSlice | null;
   #bridge: BridgeId | null = null;
+  #roots: Ed25519PublicJwk[];
+  #warn: (msg: string, fields: Record<string, string>) => void;
+  #warned = false;
+  #required: boolean;
 
-  constructor(db: RawDb, instanceId: InstanceId, opts: { bootstrap: KeySet | null; alone?: { ws: WorkspaceId; ownKey: Ed25519PublicJwk } }) {
+  /**
+   * `roots`: test-harness hook only (startApp `harness.portalRootKeys`); production uses the build-pinned roots of
+   * {@link PORTAL_ROOT_CHANNEL}. `warn` receives the one transition-path warning (CREDENTIALS §9.5 rule c).
+   */
+  constructor(
+    db: RawDb,
+    instanceId: InstanceId,
+    opts: {
+      bootstrap: KeySet | null;
+      alone?: { ws: WorkspaceId; ownKey: Ed25519PublicJwk };
+      roots?: Ed25519PublicJwk[];
+      warn?: (msg: string, fields: Record<string, string>) => void;
+      /** unit tests only: override {@link KEYSET_REQUIRED} */
+      required?: boolean;
+    },
+  ) {
     this.#db = db;
     this.instanceId = instanceId;
     this.self = `tb:ins:${instanceId}`;
     this.#bootstrap = opts.bootstrap;
     this.#alone = opts.alone ?? null;
     this.#stored = metaGet<StoredSlice>(db, "slice");
+    this.#roots = opts.roots ?? portalRootKeys(PORTAL_ROOT_CHANNEL);
+    this.#warn = opts.warn ?? (() => undefined);
+    this.#required = opts.required ?? KEYSET_REQUIRED;
+  }
+
+  /** The pinned key-set statement's `seq`, or null (transition path / nothing pinned yet). */
+  get keySetSeq(): number | null {
+    return this.#stored?.kss?.seq ?? null;
   }
 
   get slice(): InstanceSlice | null {
@@ -103,29 +156,54 @@ export class TrustState {
   }
 
   /**
-   * Verifies and installs a slice (`rev` must increase). The first slice teaches `ws` (ClaimResponse carries none):
-   * verifyJws with the trusted issuers authenticates it, then verifySlice runs the kind checks with that `ws`.
+   * Verifies and installs a slice (`rev` must increase). The first slice teaches `ws` (ClaimResponse carries none).
+   * Key-set rule first (CREDENTIALS §9.5, `trustedPortalKeys`): a slice carrying `portalKeySet` is verified against the
+   * statement's active | pending keys and the statement is pinned with it; once pinned, a slice without one is refused
+   * (`keyset_missing`). Transition (nothing pinned and no `portalKeySet`, or no roots in this build): the pre-v0.1.11
+   * rule — the trusted issuers authenticate it and its `portalKeys` replace them (keySetAnnounce) — with one warning.
+   * After a `standalone` slice only the standalone issuer is trusted and `portalKeySet` is ignored.
    */
   install(token: string, nowMs: number): { ok: true; changed: SliceChange | null } | Refusal {
     const bridge = this.bridgeId;
     if (!bridge) return { ok: false, code: "slice_invalid", reason: "bridge unknown before claim" };
-    const issuers = this.issuers();
-    const issList = [...new Set(issuers.keys.map((k) => k.issuer as string))];
-    const pre = verifyJws<InstanceSlice>(token, issuers, { typ: TYP.slice, aud: this.self, iss: issList, now: nowS(nowMs), maxLifetimeS: LIFETIME_S.configOrSlice });
+    const pinned = this.#stored?.kss ?? null;
+    let issuers = this.issuers();
+    let signers = issuers;
+    let kss: PinnedKeySet | undefined = pinned ?? undefined;
+    let legacy = true;
+    if (!this.#stored?.slice.standalone) {
+      const t = trustedPortalKeys(peekPayload(token) ?? {}, pinned, this.#roots, { required: this.#required });
+      if (!t.ok) return t;
+      if (t.legacy) {
+        if (!this.#warned) {
+          this.#warned = true;
+          this.#warn("slice_keyset_transition", { reason: t.reason });
+        }
+      } else {
+        legacy = false;
+        issuers = t.keys;
+        signers = t.signers;
+        kss = { seq: t.seq, kss: t.kss };
+      }
+    }
+    const issList = [...new Set(signers.keys.map((k) => k.issuer as string))];
+    const pre = verifyJws<InstanceSlice>(token, signers, { typ: TYP.slice, aud: this.self, iss: issList, now: nowS(nowMs), maxLifetimeS: LIFETIME_S.configOrSlice });
     if (!pre.ok) return pre;
     const ws = this.ws ?? pre.claims.ws;
-    const v = verifySlice(token, { now: nowS(nowMs), self: this.self, ws, bridge, issuers });
+    const v = verifySlice(token, { now: nowS(nowMs), self: this.self, ws, bridge, issuers: signers });
     if (!v.ok) return v;
     const slice = v.slice;
     const prev = this.#stored?.slice ?? null;
     if (prev && slice.rev <= prev.rev) return { ok: true, changed: null };
-    // CORE §4: the slice's portalKeys replace the trusted set only because a trusted key signed it.
-    let next = keySetAnnounce(issuers, keySetFromPortalKeys(slice.portalKeys), { kid: pre.header.kid });
+    // KSS rule: the statement's keys ARE the trusted set. Transition: CORE §4 (pre-v0.1.11) — the slice's portalKeys
+    // replace the trusted set only because a trusted key signed it.
+    let next = legacy ? keySetAnnounce(issuers, keySetFromPortalKeys(slice.portalKeys), { kid: pre.header.kid }) : issuers;
     if (slice.standalone) {
+      // BRIDGE §11: from the final Portal-signed slice on, only the standalone issuer is trusted
       const key = slice.bridge.keys.find((k) => thumbprint(k) === slice.standalone?.kid);
-      if (key) next = { keys: [...next.keys, ...keySetFrom({ keys: [key] }, slice.standalone.issuer).keys] };
+      next = key ? keySetFrom({ keys: [key] }, slice.standalone.issuer) : { keys: [] };
     }
-    this.#stored = { token, slice, issuers: next };
+    this.#stored = { token, slice, issuers: next, ...(kss ? { kss } : {}) };
     metaSet(this.#db, "slice", this.#stored);
     const before = new Map((prev?.agents ?? []).map((a) => [a.id, a]));
     const after = new Map(slice.agents.map((a) => [a.id, a]));
@@ -139,5 +217,17 @@ export class TrustState {
         pausedNow: isPaused && !wasPaused,
       },
     };
+  }
+}
+
+/** Unverified JWS payload (only to read `portalKeySet`, which is self-authenticating: root-signed). */
+function peekPayload(token: string): Record<string, unknown> | null {
+  const part = typeof token === "string" ? token.split(".")[1] : undefined;
+  if (!part) return null;
+  try {
+    const v = JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as unknown;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
   }
 }

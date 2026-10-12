@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
-import type { InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { Ed25519PublicJwk, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { App, AppDefinition, HealthStatus, HoldDecideInput, OperationView, PersonPrincipal, Receipt, RunningApp, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import { createAppSecrets } from "./app-secrets.ts";
@@ -96,11 +96,17 @@ function listen(server: Server, port: number): Promise<void> {
 
 /** Reads only the TB_* names of `env`; refuses to boot on an invalid manifest, handler set or migration set. */
 /**
- * `harness` is for in-process test harnesses only (not part of types/sdk.ts): `privilegeProc` replaces the real process
- * facade of the privilege drop so a root test runner is not dropped to uid 1000 by an app it starts in-process.
- * Production and the conformance CLI (which forks the app) never pass it.
+ * `harness` is for test harnesses only, never read from env and never set by Portal: `privilegeProc` (not part of
+ * types/sdk.ts) replaces the real process facade of the privilege drop so a root test runner is not dropped to uid 1000
+ * by an app it starts in-process; `portalRootKeys` (types/sdk.ts v0.1.11 `StartHooks`, C63) replaces the build-pinned
+ * Portal Root Keys so a conformance start module can sign key-set statements with a test root pair. Production never
+ * passes it.
  */
-export async function startApp(app: App, env: Record<string, string | undefined>, harness?: { privilegeProc?: PrivilegeProc }): Promise<RunningApp> {
+export async function startApp(
+  app: App,
+  env: Record<string, string | undefined>,
+  harness?: { privilegeProc?: PrivilegeProc; portalRootKeys?: Ed25519PublicJwk[] },
+): Promise<RunningApp> {
   const def = definitions.get(app);
   if (!def) throw new TbError("app_invalid", "startApp needs the value returned by defineApp", 500);
   const v = validateManifest(def.manifest);
@@ -166,6 +172,8 @@ export async function startApp(app: App, env: Record<string, string | undefined>
   const trust = new TrustState(db, instanceId, {
     bootstrap: cfg.portalKeys ? keySetFrom(cfg.portalKeys, "tb:portal") : null,
     ...(aloneWs ? { alone: { ws: aloneWs, ownKey: instanceKey.publicJwk } } : {}),
+    ...(harness?.portalRootKeys ? { roots: harness.portalRootKeys } : {}),
+    warn: (msg, fields) => log.warn(msg, fields),
   });
 
   const ops = new Map(withStandardOps(manifest).map((o) => [o.id, o]));

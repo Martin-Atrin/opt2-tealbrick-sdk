@@ -18,7 +18,7 @@
     "typecheck": "node --run kit && tsc --noEmit",
     "lint": "biome check .",
     "test": "node --run kit && node --test 'test/**/*.test.ts'",
-    "conformance": "node --run kit && tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json",
+    "conformance": "node --run kit && tb-conformance app --start conformance.start.ts --manifest tealbrick.manifest.json --test-roots",
     "build": "node --run kit && tsc -p tsconfig.build.json && node scripts/build-ui.ts",
     "gen": "tb-gen all"
   },

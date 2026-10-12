@@ -1,6 +1,6 @@
 // Manifest validator (MANIFEST.md §13): manifest.schema.json (ajv, draft 2020-12) + every cross-field rule M-*.
 // The one implementation; Core, SDK, bridge, CLI and conformance call it. Warnings do not exist.
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type {
   Condition,
@@ -836,31 +836,56 @@ const HAND_WRITTEN = new Set(["openapi.json", "openapi.yaml", "openapi.yml", "ma
 const FRONTMATTER_KEYS = new Set(["name", "description"]);
 
 /**
- * CI / CLI only, the one export that reads files (M-SK-2, M-ST-7 with skill bodies, M-AR-1 digest format, §14):
- * each skill file exists under `repoDir`, frontmatter is exactly `{name = id, description}`, only allowed variables,
- * `{{settings.<key>}}` names a declared field, `{{scope.<type>.<kind>}}` a declared default grant, text sanitized, ≤ 64 KiB;
- * no hand-written OpenAPI / manifest.json / recipe.json beside the manifest.
+ * CI / CLI only, the one export that reads files (M-SK-2, M-RT-9, M-ST-7 with skill bodies, M-AR-1 digest format, §14).
+ * Path bases (MANIFEST §3, v0.1.11 (C70)):
+ * - `repoDir` is the repository root. Build paths are REPO-relative: `runtime.build.context` and `runtime.services[].build.context`
+ *   must be directories, the matching `dockerfile` files, all under `repoDir` (`build_path_invalid`).
+ * - `manifestDir` is the directory that contains the manifest file (default `repoDir`: a single-app repo keeps the manifest
+ *   at its root). Skill files and every other app file are MANIFEST-relative and resolve from it; so does the hand-written
+ *   artifact scan ("beside the manifest").
+ * Skill checks: each skill file exists under `manifestDir`, frontmatter is exactly `{name = id, description}`, only allowed
+ * variables, `{{settings.<key>}}` names a declared field, `{{scope.<type>.<kind>}}` a declared default grant, text
+ * sanitized, ≤ 64 KiB; no hand-written OpenAPI / manifest.json / recipe.json beside the manifest.
  */
-export async function validateAppFiles(manifest: Manifest, repoDir: string): Promise<ManifestValidation> {
+export async function validateAppFiles(manifest: Manifest, repoDir: string, manifestDir: string = repoDir): Promise<ManifestValidation> {
   const { errors, add } = collector();
-  const root = resolve(repoDir);
+  const repoRoot = resolve(repoDir);
+  const root = resolve(manifestDir);
   const idx = indexSettings(manifest);
   const scopeKinds = new Map((manifest.scopes ?? []).map((s) => [s.type, new Set<string>(s.defaultGrants.map((g) => g.kind))]));
   const settingRefs = new Set<string>();
+
+  const builds: { p: string; context: string; dockerfile: string }[] = [
+    { p: ptr("runtime", "build"), ...manifest.runtime.build },
+    ...(manifest.runtime.services ?? []).flatMap((svc, i) => (svc.build ? [{ p: ptr("runtime", "services", i, "build"), ...svc.build }] : [])),
+  ];
+  for (const b of builds) {
+    const bad = (field: "context" | "dockerfile", msg: string): void => add("M-RT-9", "build_path_invalid", `${b.p}/${field}`, `${b[field]}: ${msg}`);
+    for (const [field, kind] of [["context", "directory"], ["dockerfile", "file"]] as const) {
+      const target = resolve(repoRoot, b[field]);
+      if (target !== repoRoot && !target.startsWith(repoRoot + sep)) {
+        bad(field, "path escapes the repository (build paths are repo-relative)");
+        continue;
+      }
+      const st = await stat(target).catch(() => null);
+      if (!st) bad(field, `not found under the repository root ${repoDir} (build paths are repo-relative)`);
+      else if (kind === "directory" ? !st.isDirectory() : !st.isFile()) bad(field, `not a ${kind}`);
+    }
+  }
 
   for (const [i, skill] of (manifest.skills ?? []).entries()) {
     const p = ptr("skills", i, "file");
     const bad = (msg: string): void => add("M-SK-2", "skill_file_invalid", p, `${skill.file}: ${msg}`);
     const file = resolve(root, skill.file);
     if (!file.startsWith(root + sep)) {
-      bad("path escapes the repository");
+      bad("path escapes the manifest directory (skill files are manifest-relative)");
       continue;
     }
     let bytes: Buffer;
     try {
       bytes = await readFile(file);
     } catch {
-      bad("file not found");
+      bad("file not found (skill files are manifest-relative)");
       continue;
     }
     if (bytes.length > MAX_SKILL_BYTES) {
@@ -906,7 +931,7 @@ export async function validateAppFiles(manifest: Manifest, repoDir: string): Pro
   try {
     entries = await readdir(root);
   } catch {
-    add("§14", "hand_written_artifact", "", `repository directory ${repoDir} not readable`);
+    add("§14", "hand_written_artifact", "", `manifest directory ${manifestDir} not readable`);
   }
   for (const name of entries) {
     if (HAND_WRITTEN.has(name.toLowerCase())) add("§14", "hand_written_artifact", "", `hand-written ${name} beside the manifest is forbidden`);

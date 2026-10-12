@@ -185,6 +185,22 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B3.bad_grant_dropped": "bad grant entry dropped and reported",
     "C5.portal_key_rotation": "Portal key rotation",
   }),
+  addresses: ids({
+    "B21.internal_url_external": "config app entry with a foreign internalUrl (ownInfra, not allow-listed) → not routed, nothing sent there (BSD-07)",
+    "B21.own_infra_flag_required": "allow-listed origin without ownInfra: true → not routed (BSD-07)",
+    "B21.own_infra_allowed": "ownInfra + TB_OWN_INFRA_ORIGINS origin → routed (BSD-07)",
+    "B21.neighbour_url_refused": "neighbour claim with a foreign internalUrl → 403 internal_url_refused (BSD-07)",
+  }),
+  keyset: ids({
+    "B20.kss_enrolled": "enrolment response + configs carry a test-root-signed portalKeySet; configs applied (C62/C63)",
+    "B20.portal_keys_ignored": "a key added only to config portalKeys cannot sign the next config",
+    "B20.kss_unknown_root": "config whose statement is signed by an unknown root dropped",
+    "B20.kss_rollback": "config with a lower-seq statement dropped",
+    "B20.kss_missing": "config without portalKeySet after a pin dropped",
+    "B20.kss_compromise": "compromise rotation: config signed by the dropped kid refused, fresh key applied",
+    "B20.kss_reenrol_missing": "re-enrolment of a pinned bridge without a valid portalKeySet refused; old key + pin kept (C63a)",
+    "B20.kss_enrol_missing": "strict (--keyset-required): first enrolment without portalKeySet refused (spec 0.1.12)",
+  }),
   "pause.workspace": ids({
     "P1.workspace.mcp": "kill switch: tools/call refused paused",
     "P1.workspace.no_app_traffic": "kill switch: no hook / op call reaches an app",

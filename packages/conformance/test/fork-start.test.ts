@@ -39,7 +39,7 @@ describe("CLI --start runs the app in a child process", () => {
       const reportDir = join(dir, "out");
       mkdirSync(reportDir);
       const pids = join(dir, "pids.jsonl");
-      const r = spawnSync(process.execPath, [cli, "app", "--start", probe, "--manifest", manifest, "--timeout", "8000", "--report", "out/r"], {
+      const r = spawnSync(process.execPath, [cli, "app", "--start", probe, "--manifest", manifest, "--timeout", "8000", "--test-roots", "--report", "out/r"], {
         cwd: dir, // relative --report: the child's chdir must not move it
         encoding: "utf8",
         timeout: 120_000,

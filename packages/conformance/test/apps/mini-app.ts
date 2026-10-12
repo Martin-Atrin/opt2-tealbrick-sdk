@@ -21,6 +21,7 @@ import {
   seal,
   sealAad,
   signInstanceAssertion,
+  trustedPortalKeys,
   unseal,
   validateInput,
   verifyBridgeOpProof,
@@ -55,6 +56,10 @@ export interface MiniAppFaults {
   noCompanionRetry?: boolean;
   /** before hook answers an extra key (phase shape, BRIDGE §8.2) */
   badHookShape?: boolean;
+  /** ignores portalKeySet: keeps the pre-v0.1.11 rule (portalKeys replace the trusted set; CREDENTIALS §9.5) */
+  ignoreKeySet?: boolean;
+  /** NOT a fault: a spec-0.1.12 build (statement required for the first slice, C63a) */
+  keysetRequired?: boolean;
 }
 
 interface Receipt {
@@ -82,6 +87,8 @@ interface State {
   claimed: boolean;
   bridgeId: string | null;
   slice: string | null;
+  /** v0.1.11: pinned key-set statement + its keys */
+  kss?: { seq: number; kss: string; keys: InstanceSlice["portalKeys"] } | null;
   receipts: Receipt[];
   idem: Record<string, { inputDigest: string; kind: "held" | "result"; holdId?: string; output?: Json }>;
   scopes: { agent: string; type: string; instanceId: string; access: string }[];
@@ -161,7 +168,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
           self: `tb:ins:${ins}`,
           ws: slice.ws as WorkspaceId,
           bridge: st.bridgeId as BridgeId,
-          issuers: keySetFromPortalKeys(slice.portalKeys),
+          issuers: keySetFromPortalKeys(st.kss ? st.kss.keys : slice.portalKeys),
           bridgeKeys: keySetFrom({ keys: slice.bridge.keys }, `tb:brg:${st.bridgeId as BridgeId}`),
           revokedJtis: new Set(slice.revoked.jtis.map((j) => j.jti)),
         }
@@ -176,15 +183,24 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     }
   };
 
-  function installSlice(token: string): void {
-    const issuers = slice ? keySetFromPortalKeys(slice.portalKeys) : keySetFrom(JSON.parse(env.TB_PORTAL_KEYS) as never, "tb:portal");
+  // v0.1.11 key-set rule (CREDENTIALS §9.5): roots from the harness-only TBCONF_PORTAL_ROOT_KEYS (a test app; the SDK
+  // gets them through startApp's harness option)
+  const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : [];
+  /** false when the slice was refused */
+  function installSlice(token: string): boolean {
+    const t = faults.ignoreKeySet ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(peek(token), st.kss ? { seq: st.kss.seq, kss: st.kss.kss } : null, roots, { required: faults.keysetRequired === true });
+    if (!t.ok) return false;
+    const issuers = !t.legacy ? t.signers : slice ? keySetFromPortalKeys(slice.portalKeys) : keySetFrom(JSON.parse(env.TB_PORTAL_KEYS) as never, "tb:portal");
     const r = verifySlice(token, { now: nowS(), self: `tb:ins:${ins}`, ws: (slice?.ws ?? peek(token).ws) as WorkspaceId, bridge: st.bridgeId as BridgeId, issuers });
-    if (!r.ok || (slice && r.slice.rev <= slice.rev)) return;
+    if (!r.ok) return false;
+    if (slice && r.slice.rev <= slice.rev) return true;
+    if (!t.legacy) st.kss = { seq: t.seq, kss: t.kss, keys: t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status })) };
     slice = r.slice;
     st.slice = token;
     for (const a of slice.agents) ensureAgent(a.id);
     if (slice.pause.workspace || slice.pause.instances.includes(ins)) keyCache.clear();
     save();
+    return true;
   }
 
   async function bridge(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal, extra: Record<string, string> = {}): Promise<{ status: number; body: unknown }> {
@@ -229,7 +245,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         );
         first = false;
         if (r.status === 200 && isObj(r.body)) {
-          if (typeof r.body.slice === "string") installSlice(r.body.slice);
+          if (typeof r.body.slice === "string" && !installSlice(r.body.slice)) await new Promise((res) => setTimeout(res, 300));
           if (typeof r.body.keysRev === "number" && r.body.keysRev !== keysRev) {
             keysRev = r.body.keysRev;
             await fetchKeys();

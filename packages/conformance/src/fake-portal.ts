@@ -73,7 +73,10 @@ export class FakePortal {
   offline = false;
   readonly devices: DeviceReq[] = [];
   /** extra config fields merged into every minted revision (bridge target: apps, grants, hooks, skills, …) */
-  configExtra: Partial<Omit<WorkspaceConfig, "iat" | "exp" | "jti">> = {};
+  // SPEC-GAP: @opt2-tealbrick/spec 0.1.10 types lack v0.1.11 `portalKeySet` (CREDENTIALS §9.5); typed here until 0.1.11.
+  configExtra: Partial<Omit<WorkspaceConfig, "iat" | "exp" | "jti">> & { portalKeySet?: string } = {};
+  /** v0.1.11: key-set statement returned in the enrolment response (`portalKeySet`); null = omitted (transition) */
+  enrolKeySet: string | null = null;
   /** public origin of the bridge under test (config `bridge.publicUrl`, device-flow `mcp_url` / `token_endpoint`) */
   bridgePublicUrl = "https://bridge.conformance.test";
   /** every request with headers and raw body, recorded after it was read (bridge target B9 scan) */
@@ -236,6 +239,7 @@ export class FakePortal {
       bridgeId: this.bridgeId,
       workspaceId: this.ws,
       portalKeys: this.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })),
+      ...(this.enrolKeySet ? { portalKeySet: this.enrolKeySet } : {}),
       configPath: `${API}/bridge/config`,
       ackPath: `${API}/bridge/ack`,
       waitMaxS: 60,

@@ -30,7 +30,10 @@ export const CLOCK_SKEW_S = LEEWAY_S;
 /** Config / slice JWS carry their whole body (BRIDGE S2: ≤ 4 MB); every other kind is ≤ MAX_JWS_BYTES. */
 export const MAX_DOCUMENT_JWS_BYTES = 4 * 1024 * 1024;
 const DOCUMENT_TYPS: ReadonlySet<string> = new Set([TYP.config, TYP.slice]);
-const ALL_TYPS: ReadonlySet<string> = new Set(Object.values(TYP));
+/** v0.1.11 (C62/C63): the key-set statement has its own signer/verifier (keyset.ts: no exp/sub/jti, root keys). */
+export const KEYSET_TYP = "tb-keyset+jws";
+type ClaimTyp = Exclude<Typ, typeof KEYSET_TYP>;
+const ALL_TYPS: ReadonlySet<string> = new Set(Object.values(TYP as Record<string, string>).filter((t) => t !== KEYSET_TYP));
 
 // ── claim checks (step 5: closed claim set + types) ──────────────────────────
 type Check = (v: unknown) => boolean;
@@ -97,7 +100,7 @@ const BASE = ["iss", "sub", "aud", "iat", "exp", "jti"];
 
 const sha256C: Check = (v) => typeof v === "string" && /^sha256:[0-9a-f]{64}$/.test(v);
 const countC: Check = (v) => int(v) && (v as number) >= 0;
-const CLAIM_SPECS: Record<Typ, ClaimSpec> = {
+const CLAIM_SPECS: Record<ClaimTyp, ClaimSpec> = {
   [TYP.releaseIndex]: {
     iss: (v) => v === "tb:releases",
     sub: (v) => v === undefined,
@@ -155,7 +158,8 @@ const CLAIM_SPECS: Record<Typ, ClaimSpec> = {
 };
 /** Step 5–6 shape check of a claim set for `typ`; returns the failure reason or null. */
 function claimsProblem(typ: Typ, c: unknown): string | null {
-  const spec = CLAIM_SPECS[typ];
+  const spec = CLAIM_SPECS[typ as ClaimTyp];
+  if (!spec) return "typ has no claim set";
   if (!c || typeof c !== "object" || Array.isArray(c)) return "claims not an object";
   const o = c as Record<string, unknown>;
   if (Array.isArray(o.aud)) return "aud is an array";
@@ -202,13 +206,17 @@ function b64json(part: string): unknown {
   }
 }
 
-/** CREDENTIALS §3 V0 steps 1–8 (kind-specific step 9 and one-time step 10 belong to the callers). */
-export function verifyV0<C extends object>(token: string, keys: KeySet, expect: JwsExpect): V0Success<C> | V0Failure {
-  const fail = (step: number, reason: string, expired?: boolean): V0Failure => ({ ok: false, step, reason, ...(expired ? { expired } : {}) });
+const fail = (step: number, reason: string, expired?: boolean): V0Failure => ({ ok: false, step, reason, ...(expired ? { expired } : {}) });
+
+/**
+ * V0 steps 1–4 for any `typ` (shared with the key-set statement verifier): size ≤ `maxBytes`, three base64url parts,
+ * header exactly `{alg: EdDSA, typ, kid}` (no jku/jwk/x5u/x5c/crit), `typ` equal, `kid` ∈ `keys`, Ed25519 signature;
+ * then the decoded payload (unchecked: claim rules belong to the caller).
+ */
+export function verifySignedCompact(token: string, keys: KeySet, typ: string, maxBytes: number): { ok: true; kid: string; entry: KeySet["keys"][number]; payload: unknown } | V0Failure {
   // (1) size + 3 parts
   if (typeof token !== "string") return fail(1, "not a string");
-  const max = DOCUMENT_TYPS.has(expect.typ) ? MAX_DOCUMENT_JWS_BYTES : MAX_JWS_BYTES;
-  if (token.length > max) return fail(1, "too large");
+  if (token.length > maxBytes) return fail(1, "too large");
   const parts = token.split(".");
   if (parts.length !== 3 || !B64URL.test(parts[2])) return fail(1, "not a compact JWS");
   // (2) header exact, alg, typ
@@ -217,7 +225,7 @@ export function verifyV0<C extends object>(token: string, keys: KeySet, expect: 
   if (FORBIDDEN_HEADERS.some((h) => has(header, h))) return fail(2, "forbidden header");
   const hk = Object.keys(header);
   if (hk.length !== 3 || header.alg !== "EdDSA" || typeof header.kid !== "string" || typeof header.typ !== "string") return fail(2, "header members");
-  if (!ALL_TYPS.has(expect.typ) || header.typ !== expect.typ) return fail(2, "typ");
+  if (header.typ !== typ) return fail(2, "typ");
   // (3) kid in the trusted set
   const entry = findKey(keys, header.kid);
   if (!entry) return fail(3, "unknown kid");
@@ -231,8 +239,18 @@ export function verifyV0<C extends object>(token: string, keys: KeySet, expect: 
     good = false;
   }
   if (!good) return fail(4, "signature");
+  return { ok: true, kid: header.kid, entry, payload: b64json(parts[1]) };
+}
+
+/** CREDENTIALS §3 V0 steps 1–8 (kind-specific step 9 and one-time step 10 belong to the callers). */
+export function verifyV0<C extends object>(token: string, keys: KeySet, expect: JwsExpect): V0Success<C> | V0Failure {
+  if (!ALL_TYPS.has(expect.typ)) return fail(2, "typ");
+  const sv = verifySignedCompact(token, keys, expect.typ, DOCUMENT_TYPS.has(expect.typ) ? MAX_DOCUMENT_JWS_BYTES : MAX_JWS_BYTES);
+  if (!sv.ok) return sv;
+  const { entry } = sv;
+  const header = { kid: sv.kid };
   // (5) closed claim set, types
-  const claims = b64json(parts[1]) as Record<string, unknown> | undefined;
+  const claims = sv.payload as Record<string, unknown> | undefined;
   const problem = claimsProblem(expect.typ, claims);
   if (problem || !claims) return fail(5, problem ?? "claims");
   // (6) iss allowed for this typ and equal to the issuer the key is trusted for
@@ -264,10 +282,25 @@ const enc = (v: unknown) => Buffer.from(JSON.stringify(v), "utf8").toString("bas
 export async function signJws<C extends object>(typ: Typ, claims: C, key: Ed25519KeyPair): Promise<string> {
   if (!ALL_TYPS.has(typ)) throw new TypeError(`signJws: unknown typ ${typ}`);
   assertClaims(typ, claims);
+  return signCompact(typ, claims, key, DOCUMENT_TYPS.has(typ) ? MAX_DOCUMENT_JWS_BYTES : MAX_JWS_BYTES);
+}
+
+/**
+ * Compact JWS assembly for any `typ` (claims already checked by the caller): header `{alg: EdDSA, typ, kid}`, signature
+ * from a key pair or an external signer, size ≤ `maxBytes`. Shared by signJws and the key-set statement signer.
+ */
+export async function signCompact(typ: string, claims: object, key: Ed25519KeyPair | ExternalSigner, maxBytes: number): Promise<string> {
+  if (typeof key?.kid !== "string" || key.kid.length === 0) throw new TypeError("signCompact: key.kid");
   const input = `${enc({ alg: "EdDSA", typ, kid: key.kid })}.${enc(claims)}`;
-  const sig = await webcrypto.subtle.sign({ name: "Ed25519" }, key.privateKey as webcrypto.CryptoKey, Buffer.from(input, "ascii"));
-  const token = `${input}.${Buffer.from(sig).toString("base64url")}`;
-  if (token.length > (DOCUMENT_TYPS.has(typ) ? MAX_DOCUMENT_JWS_BYTES : MAX_JWS_BYTES)) throw new RangeError(`signJws: ${typ} exceeds size limit`);
+  let sig: string;
+  if ("privateKey" in key) {
+    sig = Buffer.from(await webcrypto.subtle.sign({ name: "Ed25519" }, key.privateKey as webcrypto.CryptoKey, Buffer.from(input, "ascii"))).toString("base64url");
+  } else {
+    sig = await key.sign(input);
+    if (typeof sig !== "string" || !B64URL.test(sig) || Buffer.from(sig, "base64url").length !== 64) throw new TypeError("signCompact: signature must be 64 bytes base64url");
+  }
+  const token = `${input}.${sig}`;
+  if (token.length > maxBytes) throw new RangeError(`signCompact: ${typ} exceeds size limit`);
   return token;
 }
 
@@ -283,12 +316,7 @@ export async function signJwsWithSigner<C extends object>(typ: Typ, claims: C, s
   if (!ALL_TYPS.has(typ)) throw new TypeError(`signJwsWithSigner: unknown typ ${typ}`);
   assertClaims(typ, claims);
   if (typeof signer?.kid !== "string" || signer.kid.length === 0) throw new TypeError("signJwsWithSigner: signer.kid");
-  const input = `${enc({ alg: "EdDSA", typ, kid: signer.kid })}.${enc(claims)}`;
-  const sig = await signer.sign(input);
-  if (typeof sig !== "string" || !B64URL.test(sig) || Buffer.from(sig, "base64url").length !== 64) throw new TypeError("signJwsWithSigner: signature must be 64 bytes base64url");
-  const token = `${input}.${sig}`;
-  if (token.length > (DOCUMENT_TYPS.has(typ) ? MAX_DOCUMENT_JWS_BYTES : MAX_JWS_BYTES)) throw new RangeError(`signJwsWithSigner: ${typ} exceeds size limit`);
-  return token;
+  return signCompact(typ, claims, signer, DOCUMENT_TYPS.has(typ) ? MAX_DOCUMENT_JWS_BYTES : MAX_JWS_BYTES);
 }
 
 /** Claims as callers pass them to a signer: `iat` explicit (pure), `exp` defaults to `iat + max`, `jti` to a fresh ULID. */

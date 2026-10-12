@@ -212,6 +212,39 @@ describe("companion calls (ctx.callApp)", () => {
     assert.equal(b.bridge.calls.length, 2);
   });
 
+  test("grant_expired is treated like grant_stale: one slice re-read, one retry, then the refusal surfaces (SDK-API §9, v0.1.11 (C70))", async () => {
+    for (const code of ["grant_stale", "grant_expired"]) {
+      let refuse = 1;
+      b.bridge.onCall = () => (refuse-- > 0 ? { status: 403, body: { error: { code, message: code } } } : { status: 200, body: { status: "ok", output: { done: true } } });
+      b.bridge.calls = [];
+      const before = b.bridge.statuses.length;
+      const ok = await callOp(b, "note_get", { id: `r-${code}` });
+      assert.equal(ok.status, 200, code);
+      assert.equal(b.bridge.calls.length, 2, `${code}: refused once, retried once`);
+      assert.equal(b.bridge.statuses.length - before, 1, `${code}: exactly one slice re-read before the retry`);
+      refuse = 5;
+      b.bridge.calls = [];
+      const mid = b.bridge.statuses.length;
+      const twice = await callOp(b, "note_get", { id: `t-${code}` });
+      assert.equal(twice.status, 403, code);
+      assert.equal(twice.body.error.code, code);
+      assert.equal(b.bridge.calls.length, 2, `${code}: never a third attempt`);
+      assert.equal(b.bridge.statuses.length - mid, 1, `${code}: one re-read only`);
+    }
+  });
+
+  test("other refusals (grant_revoked, grant_invalid) are not retried and trigger no slice re-read", async () => {
+    for (const code of ["grant_revoked", "grant_invalid"]) {
+      b.bridge.onCall = () => ({ status: 403, body: { error: { code, message: code } } });
+      b.bridge.calls = [];
+      const before = b.bridge.statuses.length;
+      const r = await callOp(b, "note_get", { id: `x-${code}` });
+      assert.equal(r.body.error.code, code);
+      assert.equal(b.bridge.calls.length, 1, code);
+      assert.equal(b.bridge.statuses.length, before, code);
+    }
+  });
+
   test("a bridge refusal passes through with its code; an undeclared companion op never reaches the bridge", async () => {
     b.bridge.onCall = () => ({ status: 403, body: { error: { code: "hook_denied", message: "refused by a before hook" } } });
     const r = await callOp(b, "note_get", { id: "n4" });

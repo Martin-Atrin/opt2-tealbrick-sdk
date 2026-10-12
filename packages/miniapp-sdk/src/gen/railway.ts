@@ -7,7 +7,8 @@
 //                   service, variables in Railway's `${{…}}` reference syntax) to recreate in Railway's template
 //                   composer or with its API. Portal deploys never use it: Core's deploy recipe is generated from the
 //                   same manifest.
-import { posix } from "node:path";
+import { statSync } from "node:fs";
+import { posix, resolve, sep } from "node:path";
 import type { Condition, EnvEntry, Manifest, Service, SettingField } from "@opt2-tealbrick/spec/manifest";
 import { GenError, type GenFiles, type LoadedManifest, stableJson } from "./load.ts";
 
@@ -41,7 +42,33 @@ interface TemplateService {
   inputs: { name: string; required: boolean; description: string }[];
 }
 
+/**
+ * Build paths are REPO-relative (MANIFEST §3, v0.1.11 (C70)): the emitted `rootDirectory` / `dockerfilePath` are used as
+ * written. When the caller named the repo root (`--repo`), the context and every Dockerfile must exist under it.
+ */
+function checkBuildPaths(lm: LoadedManifest): void {
+  if (!lm.repoDirGiven) return;
+  const m = lm.manifest;
+  const builds = [{ at: "runtime.build", ...m.runtime.build }, ...(m.runtime.services ?? []).flatMap((s) => (s.build ? [{ at: `runtime.services[${s.id}].build`, ...s.build }] : []))];
+  for (const b of builds) {
+    for (const [field, isDir] of [["context", true], ["dockerfile", false]] as const) {
+      const target = resolve(lm.repoDir, b[field]);
+      let ok = false;
+      try {
+        const st = statSync(target);
+        ok = isDir ? st.isDirectory() : st.isFile();
+      } catch {
+        ok = false;
+      }
+      if (!ok || (target !== lm.repoDir && !target.startsWith(lm.repoDir + sep))) {
+        throw new GenError("build_path_missing", `${b.at}.${field} ${b[field]}: no ${isDir ? "directory" : "file"} under the repo root ${lm.repoDir} (build paths are repo-relative)`);
+      }
+    }
+  }
+}
+
 export function genRailway(lm: LoadedManifest, opts: RailwayOptions = {}): GenFiles {
+  checkBuildPaths(lm);
   const { manifest: m, digest } = lm;
   const settings = resolveSettings(m, opts.settings ?? {});
   const deployed = [...(m.runtime.services ?? [])].filter((s) => matches(s.when, settings)).sort((a, b) => a.startOrder - b.startOrder || (a.id < b.id ? -1 : 1));

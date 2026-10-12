@@ -401,8 +401,9 @@ describe("refusals and CLI", () => {
   });
 
   test("parseTbGenArgs and per-kind output dirs", (t) => {
-    assert.deepEqual(parseTbGenArgs(["railway", "--manifest", "m.json", "--out", "o", "--set", "a=b=c"]), { command: "railway", manifest: "m.json", out: "o", build: false, settings: { a: "b=c" } });
+    assert.deepEqual(parseTbGenArgs(["railway", "--manifest", "m.json", "--out", "o", "--set", "a=b=c"]), { command: "railway", manifest: "m.json", repo: null, out: "o", build: false, settings: { a: "b=c" } });
     assert.equal(parseTbGenArgs(["kit", "--build"]).build, true);
+    assert.equal(parseTbGenArgs(["all", "--repo", "../.."]).repo, "../..");
     const dir = temp(t);
     writeTemplateRepo(dir);
     const r = cli(["docs"], dir);

@@ -27,7 +27,7 @@ export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } 
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
 export { buildReport, type CheckResult, type CheckStatus, exitCode, FAILING_STATUSES, type PayloadScan, type Report, renderMarkdown, specDigest, type Target } from "./report.ts";
-export { type AppStartResult, appEnv, loadManifest, type RunAppOptions, runApp } from "./run-app.ts";
+export { type AppStartResult, appEnv, loadManifest, type RunAppOptions, runApp, TEST_ROOTS_ENV } from "./run-app.ts";
 export { freePort, processHarness, type RunBridgeOptions, runBridgeTarget } from "./run-bridge.ts";
 export { type CoreTargetOptions, gatewayOrigin, runCoreTarget } from "./run-core.ts";
 export { type RunRelayOptions, runRelayTarget } from "./run-relay.ts";

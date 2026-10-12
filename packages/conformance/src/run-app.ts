@@ -52,7 +52,19 @@ export interface RunAppOptions {
   /** source trees for M5 */
   scanDirs?: string[];
   agents?: FakeAgent[];
+  /**
+   * v0.1.11 (C62/C63): the harness wires the TEST Portal Root Keys: the app env gets `TBCONF_PORTAL_ROOT_KEYS` (JSON
+   * array of public JWKs; not a TB_* name, read only by the start module, which passes it to
+   * `startApp(app, env, { portalRootKeys })`). Without it the A13 key-set checks report not_run (an app pins its build's
+   * roots and cannot verify statements signed by a test root).
+   */
+  testRoots?: boolean;
+  /** C63a strict check (spec 0.1.12): the fake bridge emits `portalKeySet` from the first slice and A13.kss_first_missing runs */
+  keysetRequired?: boolean;
 }
+
+/** Harness-only env name carrying the test root JWKs (never read by the SDK or the bridge; CONFORMANCE §7). */
+export const TEST_ROOTS_ENV = "TBCONF_PORTAL_ROOT_KEYS";
 
 export function loadManifest(opts: { manifest?: unknown; manifestPath?: string }): unknown {
   if (opts.manifest !== undefined) return opts.manifest;
@@ -96,9 +108,11 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   if (!opts.start && !opts.url) throw new TypeError("runApp: start or url required");
 
   const bridge = await createFakeBridge({ manifest: manifest as Manifest, ...(opts.agents ? { agents: opts.agents } : {}) });
+  // strict run: an app that requires a statement must get one in its very first slice (claim answer)
+  if (opts.keysetRequired && opts.testRoots) await bridge.control.publishKeySet();
   const ownDir = opts.dataDir === undefined;
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "tb-conformance-"));
-  const env = appEnv(bridge, dataDir, opts.env);
+  const env = appEnv(bridge, dataDir, { ...(opts.testRoots ? { [TEST_ROOTS_ENV]: JSON.stringify(bridge.testRootJwks()) } : {}), ...opts.env });
   const timeoutMs = opts.timeoutMs ?? 20_000;
   let app: AppStartResult | null = null;
   let client: AppClient | null = null;
@@ -140,6 +154,8 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
         : {}),
       ...(app?.backupNow ? { backupNow: () => (app as AppStartResult).backupNow?.() ?? Promise.resolve() } : {}),
       inputs: opts.inputs ?? {},
+      testRoots: opts.testRoots === true,
+      keysetRequired: opts.keysetRequired === true,
       ...(opts.deployTemplate !== undefined ? { deployTemplate: opts.deployTemplate } : {}),
       timeoutMs,
     });

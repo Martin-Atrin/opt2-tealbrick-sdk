@@ -4,7 +4,8 @@
 //     --start: the module default-exports `start(env) → Promise<{ url, stop, backupNow? }>` (runApp's harness contract);
 //     the CLI runs it in a child process (forkStart), a fresh one per (re)start, so the app's own process changes (the
 //     SDK's root → uid 1000 drop) never reach the suite
-//   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>]
+//   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>]
+//     --repo: the repository root for M6 (build paths are repo-relative; skill files are relative to <file>'s directory)
 //   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>]
 //     static route-table checks; with --url also live probes (--live-readonly: no sign-in, no writes)
 //   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups a,b] [--pause-latency <ms>]
@@ -14,7 +15,7 @@
 //   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"]
 // Output: markdown (default) or JSON (--json); --report <base> also writes <base>.json and <base>.md. Exit code 0 only
 // when every check passes (CONFORMANCE §6).
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -31,10 +32,13 @@ import { runManifestTarget } from "./targets.ts";
 
 const USAGE = `usage:
   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file>
-                     [--inputs <file.json>] [--deploy-template <file.json>] [--timeout <ms>] [--json] [--report <base>]
-  tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--json] [--report <base>]
+                     [--inputs <file.json>] [--deploy-template <file.json>] [--test-roots] [--timeout <ms>] [--json] [--report <base>]
+      --test-roots: the start module passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys }) (A13 key-set rule; else A13 not_run)
+      --keyset-required: strict spec-0.1.12 checks (A13.kss_first_missing / B20.kss_enrol_missing; needs --test-roots; else not_applicable)
+  tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>] [--json] [--report <base>]
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
-  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--timeout <ms>] [--json] [--report <base>]
+  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--test-roots] [--timeout <ms>] [--json] [--report <base>]
+      --test-roots: the start module passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option (B20 key-set rule; else B20 not_run)
   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"] [--timeout <ms>] [--json] [--report <base>]
   every target: [--allow-not-run]  exit 0 when nothing failed and the only non-passes are not_run (default: not_run fails, CONFORMANCE §6)`;
 
@@ -109,6 +113,7 @@ export async function main(argv: string[]): Promise<number> {
       timeout: { type: "string" },
       scan: { type: "string", multiple: true },
       "expect-digest": { type: "string" },
+      repo: { type: "string" },
       "live-readonly": { type: "boolean", default: false },
       "max-requests": { type: "string" },
       "interval-ms": { type: "string" },
@@ -116,6 +121,8 @@ export async function main(argv: string[]): Promise<number> {
       "pause-latency": { type: "string" },
       "login-cmd": { type: "string" },
       "echo-logs": { type: "boolean", default: false },
+      "test-roots": { type: "boolean", default: false },
+      "keyset-required": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       "allow-not-run": { type: "boolean", default: false },
       report: { type: "string" },
@@ -132,7 +139,7 @@ export async function main(argv: string[]): Promise<number> {
     case "manifest": {
       const path = file ?? values.manifest;
       if (!path) throw new Error("manifest: file required");
-      report = await runManifestTarget({ manifestPath: path, ...(values.scan ? { scanDirs: values.scan } : {}), ...(values["expect-digest"] ? { expectDigest: values["expect-digest"] } : {}) });
+      report = await runManifestTarget({ manifestPath: path, ...(values.scan ? { scanDirs: values.scan } : {}), ...(values["expect-digest"] ? { expectDigest: values["expect-digest"] } : {}), ...(values.repo ? { repoDir: values.repo } : {}) });
       break;
     }
     case "app": {
@@ -162,6 +169,8 @@ export async function main(argv: string[]): Promise<number> {
               }),
         ...(values.inputs ? { inputs: readJson(values.inputs) as Record<string, never> } : {}),
         ...(values["deploy-template"] ? { deployTemplate: readJson(values["deploy-template"]) } : {}),
+        ...(values["test-roots"] ? { testRoots: true } : {}),
+        ...(values["keyset-required"] ? { keysetRequired: true } : {}),
         timeoutMs,
       });
       break;
@@ -201,6 +210,8 @@ export async function main(argv: string[]): Promise<number> {
         ...(pauseLatencyMs !== undefined ? { pauseLatencyMs } : {}),
         ...(values.groups ? { groups: values.groups.split(",").map((g) => g.trim()).filter(Boolean) } : {}),
         echoLogs: values["echo-logs"],
+        ...(values["test-roots"] ? { testRoots: true } : {}),
+        ...(values["keyset-required"] ? { keysetRequired: true } : {}),
       });
       const k = report.counts;
       process.stderr.write(`tb-conformance bridge: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_applicable} not_applicable → ${resultLabel(report)}\n`);

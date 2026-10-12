@@ -2,9 +2,9 @@
 // the checks call is picked from the manifest by shape (audience, crud, effect, idempotency, scopeType) — never by
 // product id. Inputs are generated from the op's JSON Schema with every string set to a scope instance id the caller
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, manifestDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, manifestDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Hook, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -36,6 +36,10 @@ export interface AppTargetContext {
   /** deploy template JSON for A9 */
   deployTemplate?: unknown;
   timeoutMs: number;
+  /** v0.1.11: the app pins the fake bridge's TEST root pair (runApp `testRoots`); A13 runs only then */
+  testRoots?: boolean;
+  /** C63a: strict spec-0.1.12 check A13.kss_first_missing */
+  keysetRequired?: boolean;
 }
 
 const PROOF_CODES = ["call_proof_invalid"] as const;
@@ -897,6 +901,9 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     return verdict(offenders.length === 0, offenders.length ? `public domains: ${offenders.join(", ")}` : "no public domain on app services");
   });
 
+  // ── A13 key-set statements on slices (CREDENTIALS §9.5, v0.1.11) ──
+  await keySetChecks(s, ctx, hs);
+
   // ── A11 SDK coverage ──
   await s.run("A11", "every exported function of types/sdk.ts has a check", "each generated SDK export maps to ≥ 1 catalogued check id", () => coverageOutcome());
 
@@ -927,4 +934,130 @@ export function coverageOutcome(): Outcome {
   const stale = Object.keys(SDK_COVERAGE).filter((n) => !SDK_EXPORTS.some((e) => e.name === n));
   const pass = unmapped.length === 0 && unknownIds.length === 0 && stale.length === 0;
   return verdict(pass, pass ? `${SDK_EXPORTS.length} exports, all mapped to catalogued checks` : `unmapped ${unmapped.join(",") || "-"}; unknown ids ${unknownIds.join(",") || "-"}; stale ${stale.join(",") || "-"}`);
+}
+
+/** A13 ids (CONFORMANCE §4.5 v0.1.11): the slice key-set rule at the app. */
+export const A13_IDS = {
+  "A13.kss_pinned": "slice with a root-signed portalKeySet installed and pinned (transition rule b)",
+  "A13.portal_keys_ignored": "a key added only to slice portalKeys is not trusted",
+  "A13.kss_unknown_root": "statement signed by an unknown root → slice refused",
+  "A13.kss_rollback": "statement with a lower seq → slice refused",
+  "A13.kss_missing": "slice without portalKeySet after a pin → refused (no downgrade)",
+  "A13.kss_rotation": "normal rotation (announce / activate / retire statements) applied",
+  "A13.kss_compromise": "compromise rotation: slices and grants by the dropped kid refused at once",
+  "A13.kss_first_missing": "strict (--keyset-required): first slice without portalKeySet refused (spec 0.1.12)",
+} as const;
+const STRICT_NA = "0.1.11 transition: fallback until spec 0.1.12 (run with --keyset-required for the strict check)";
+
+async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<void> {
+  const b = ctx.bridge;
+  const c = () => ctx.client();
+  const T = ctx.timeoutMs;
+  if (!ctx.keysetRequired) s.record("A13.kss_first_missing", A13_IDS["A13.kss_first_missing"], "first slice without a statement refused", na(STRICT_NA));
+  if (!ctx.testRoots) {
+    const why = "the app pins its build's Portal Root Keys; run with --test-roots and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys })";
+    for (const [id, title] of Object.entries(A13_IDS)) if (!s.has(id)) s.record(id, title, "app verifies slices against the newest root-signed statement", notRun(why));
+    return;
+  }
+  const installed = async (rev: number) => {
+    try {
+      await b.control.waitForSliceRevision(rev, T);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  /** `rev` was refused: a status push after it still reports an older slice revision. */
+  const refused = async (rev: number): Promise<Outcome> => {
+    const t0 = Date.now();
+    const seen = await b.control.waitForStatus((x) => x.at > t0 + 1500, T).catch(() => null);
+    if (!seen) return bad(`no status push after slice rev ${rev}`);
+    return verdict(seen.status.sliceRevision < rev, `slice rev ${rev} ${seen.status.sliceRevision < rev ? "refused" : "INSTALLED"} (app reports ${seen.status.sliceRevision})`);
+  };
+  /** After a refused slice: a normal slice brings the app back to the current state. */
+  const recover = async () => installed(await b.control.republish());
+  const grantRefused = async (key: Ed25519KeyPair) => {
+    const a = await c().callOp("tb.hold_status", hs, { grantKey: key });
+    return { pass: a.code === "grant_invalid", shown: show(a) };
+  };
+
+  const pinned = await s.run("A13.kss_pinned", A13_IDS["A13.kss_pinned"], "the first slice carrying portalKeySet (seq 1) is installed; tokens by the statement's active key work", async () => {
+    const rev = await b.control.publishKeySet();
+    const ok1 = await installed(rev);
+    const a = ok1 ? await c().callOp("tb.hold_status", hs) : null;
+    return verdict(ok1 && !!a && !AUTH_CODES.has(a.code ?? ""), `slice rev ${rev} ${ok1 ? "installed" : "NOT installed"}${a ? `; call ${show(a)}` : ""}`);
+  });
+  if (pinned.pass !== true) {
+    for (const [id, title] of Object.entries(A13_IDS)) if (!s.has(id)) s.record(id, title, "statement pinned first", bad("A13.kss_pinned failed"));
+    return;
+  }
+  await s.run("A13.portal_keys_ignored", A13_IDS["A13.portal_keys_ignored"], "slice (signed by the active key) lists a stranger key as active in portalKeys only → grant by the stranger refused grant_invalid", async () => {
+    const rev = await b.control.serveSlice({ extraPortalKeys: [{ jwk: b.stranger.publicJwk, status: "active" }] });
+    if (!(await installed(rev))) return bad(`slice rev ${rev} not installed`);
+    const g = await grantRefused(b.stranger);
+    await recover();
+    return verdict(g.pass, `stranger grant: ${g.shown}`);
+  });
+  await s.run("A13.kss_unknown_root", A13_IDS["A13.kss_unknown_root"], "slice with a statement (seq + 5) signed by a non-pinned root is not installed", async () => {
+    const rev = await b.control.serveSlice({ portalKeySet: await b.signKeySet(b.keySet.seq + 5, undefined, b.stranger) });
+    const o = await refused(rev);
+    await recover();
+    return o;
+  });
+  await s.run("A13.kss_rollback", A13_IDS["A13.kss_rollback"], "after seq 2 is pinned, a slice carrying the seq 1 statement is not installed", async () => {
+    const old = b.keySet.kss as string;
+    if (!(await installed(await b.control.publishKeySet()))) return bad("seq 2 not installed");
+    const rev = await b.control.serveSlice({ portalKeySet: old });
+    const o = await refused(rev);
+    await recover();
+    return o;
+  });
+  await s.run("A13.kss_missing", A13_IDS["A13.kss_missing"], "slice without portalKeySet (signed by the active key) is not installed", async () => {
+    const rev = await b.control.serveSlice({ portalKeySet: null });
+    const o = await refused(rev);
+    await recover();
+    return o;
+  });
+  await s.run("A13.kss_rotation", A13_IDS["A13.kss_rotation"], "3 statements (announce / activate / retire): each slice installed; grant by the new key ok; by the dropped key grant_invalid", async () => {
+    const old = b.activePortalKey();
+    const r1 = await installed(await b.control.rotatePortalKey("announce"));
+    const r2 = r1 && (await installed(await b.control.rotatePortalKey("activate")));
+    const byNew = r2 ? await c().callOp("tb.hold_status", hs) : null;
+    const r3 = r2 && (await installed(await b.control.rotatePortalKey("retire")));
+    const g = r3 ? await grantRefused(old) : { pass: false, shown: "not reached" };
+    return verdict(r3 && !!byNew && !AUTH_CODES.has(byNew.code ?? "") && g.pass, `announce ${r1}; activate ${r2}; retire ${r3}; new key ${byNew ? show(byNew) : "-"}; dropped key ${g.shown} (seq ${b.keySet.seq})`);
+  });
+  await s.run("A13.kss_compromise", A13_IDS["A13.kss_compromise"], "statement seq + 1 drops the active (stolen) kid: the slice signed by it is not installed, the next slice by the fresh key is; a grant by the stolen key → grant_invalid", async () => {
+    const stolen = b.activePortalKey();
+    const bad1 = await refused(await b.control.compromisePortalKey({ signWith: stolen }));
+    const good = await recover();
+    const g = good ? await grantRefused(stolen) : { pass: false, shown: "not reached" };
+    return verdict(bad1.pass === true && good && g.pass, `${bad1.asserted}; fresh-key slice ${good ? "installed" : "NOT installed"}; stolen-key grant ${g.shown}`);
+  });
+  if (!ctx.keysetRequired) return;
+  // runs last: it leaves the app on a fresh data dir (only A11 and the payload scan follow)
+  await s.run("A13.kss_first_missing", A13_IDS["A13.kss_first_missing"], "an app on a fresh data dir claims and gets a first slice without portalKeySet: it never reports that slice revision", async () => {
+    if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");
+    const fresh = join(ctx.env.TB_DATA_DIR as string, "kss-first-missing");
+    mkdirSync(join(fresh, "backup"), { recursive: true });
+    b.keySet.on = false;
+    const rev = await b.control.republish();
+    const code = b.control.issueEnrolCode();
+    const n = b.claims.length;
+    // a redeploy writes the CURRENT Portal keys into TB_PORTAL_KEYS, so the first slice is refused only for lacking a statement
+    await ctx.restart({ TB_DATA_DIR: fresh, TB_BACKUP_DIR: join(fresh, "backup"), TB_ENROL_CODE: code, TB_PORTAL_KEYS: JSON.stringify(b.portalJwks()) });
+    const claimed = await (async () => {
+      const end = Date.now() + T;
+      while (Date.now() < end) {
+        if (b.claims.length > n) return b.claims.at(-1);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return undefined;
+    })();
+    if (!claimed) return bad("the fresh app did not claim");
+    await new Promise((r) => setTimeout(r, 3000));
+    const after = b.statuses.filter((x) => x.at >= claimed.at);
+    const installed = after.some((x) => x.status.sliceRevision >= rev);
+    return verdict(!installed, `fresh claim ok; ${after.length} status pushes; slice rev ${rev} ${installed ? "INSTALLED without a statement" : "refused"}`);
+  });
 }

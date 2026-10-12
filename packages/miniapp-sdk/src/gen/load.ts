@@ -23,19 +23,31 @@ export class GenError extends Error {
 export interface LoadedManifest {
   manifest: Manifest;
   digest: `sha256:${string}`;
-  /** Directory of the manifest file: skill files resolve against it (repo root). */
-  dir: string;
+  /** Repository root: build paths (`runtime.build`, `runtime.services[].build`) are REPO-relative (MANIFEST §3, v0.1.11 (C70)). */
+  repoDir: string;
+  /** Directory of the manifest file: skill files and other app files are MANIFEST-relative (MANIFEST §3). */
+  manifestDir: string;
+  /** True when the caller named `repoDir` explicitly: the railway generator then checks that the build paths exist under it. */
+  repoDirGiven: boolean;
 }
 
-/** Validated manifest input of every generator. `dir` is only needed by generators that read skill files. */
-export function fromManifest(json: unknown, dir = "."): LoadedManifest {
+/**
+ * Validated manifest input of every generator. `repoDir` is the repo root (build paths); `manifestDir` (default `repoDir`)
+ * is the directory of the manifest file (skill files). Only generators that read files need them.
+ */
+export function fromManifest(json: unknown, repoDir?: string, manifestDir?: string): LoadedManifest {
   const v = validateManifest(json);
   if (!v.ok) throw new GenError("manifest_invalid", `manifest invalid (${v.errors.length} issue(s))`, v.errors);
-  return { manifest: v.manifest, digest: v.digest, dir: resolve(dir) };
+  const repo = resolve(repoDir ?? manifestDir ?? ".");
+  return { manifest: v.manifest, digest: v.digest, repoDir: repo, manifestDir: manifestDir === undefined ? repo : resolve(manifestDir), repoDirGiven: repoDir !== undefined };
 }
 
-/** Reads and validates `tealbrick.manifest.json`; refuses an unreadable or invalid manifest. */
-export function loadManifest(path: string): LoadedManifest {
+/**
+ * Reads and validates `tealbrick.manifest.json`; refuses an unreadable or invalid manifest. `manifestDir` is the directory
+ * of the file; `repoDir` defaults to it (a single-app repo keeps the manifest at its root). Pass the repo root for a
+ * manifest in an app subdirectory.
+ */
+export function loadManifest(path: string, repoDir?: string): LoadedManifest {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -48,7 +60,7 @@ export function loadManifest(path: string): LoadedManifest {
   } catch {
     throw new GenError("manifest_invalid", `${path} is not JSON`);
   }
-  return fromManifest(json, dirname(resolve(path)));
+  return fromManifest(json, repoDir, dirname(resolve(path)));
 }
 
 /** Generated files: path relative to the kind's output dir → content. */

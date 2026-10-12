@@ -3,7 +3,7 @@
 // TB_KEK, TB_PUBLIC_URL, TB_KEYS_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) either through `start(env)` (in-process; the CLI's
 // `--start` wraps it in a child process with forkStart) or as a separate
 // process (`cmd`), waits for enrolment and the first applied config, runs every check group and returns the §6 report.
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -13,7 +13,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { type BridgeStart, type BridgeStartResult, BridgeWorld } from "./bridge-world.ts";
 import { authChecks, B13_VARIANTS, callChecks, claimChecks, companionChecks, dynamicChecks, enrolChecks, enrolRequests, hookChecks, mcpChecks, peerCatalog, surfaceChecks } from "./checks/bridge.ts";
 import { BridgeCtx, type BridgeHarness } from "./checks/bridge-ctx.ts";
-import { configChecks, keyChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
+import { addressChecks, configChecks, keyChecks, keySetChecks, keysOriginChecks, listChangedChecks, oauthChecks, pauseChecks, portalDownChecks, reenrolChecks, scanChecks, standaloneChecks } from "./checks/bridge-flows.ts";
 import { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
 import { spawnCommand } from "./command.ts";
 import { request } from "./http.ts";
@@ -40,6 +40,14 @@ export interface RunBridgeOptions {
   keepData?: boolean;
   /** forward the bridge's stdout/stderr to this process's stderr as well (debugging) */
   echoLogs?: boolean;
+  /**
+   * v0.1.11 (C62/C63): the bridge's start module honours `TBCONF_PORTAL_ROOT_KEYS` (JSON public JWKs; a harness-only
+   * name the bridge itself never reads) by passing it to the bridge's programmatic start option for its pinned roots.
+   * Without it the B20 key-set group reports not_run: a bridge pins its build's roots, which no test can sign for.
+   */
+  testRoots?: boolean;
+  /** C63a: run the strict spec-0.1.12 checks (B20.kss_enrol_missing); else they are not_applicable */
+  keysetRequired?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -128,6 +136,8 @@ const RUNNERS: [string[], Group][] = [
   [["keys_origin"], keysOriginChecks],
   [["oauth"], oauthChecks],
   [["config"], configChecks],
+  [["addresses"], addressChecks],
+  [["keyset"], keySetChecks],
   [["pause.workspace", "pause.agent", "pause.connection", "pause.instance", "revoke"], pauseChecks],
   [["list_changed"], listChangedChecks],
   [["reenrol"], reenrolChecks],
@@ -144,7 +154,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
   const notes: string[] = [];
   const logs = { text: "" };
   const start = opts.start ?? processHarness(opts.cmd as string, logs, opts.echoLogs);
-  const world = await BridgeWorld.create(opts.manifests ? { manifests: opts.manifests } : {});
+  const world = await BridgeWorld.create({ ...(opts.manifests ? { manifests: opts.manifests } : {}), testRoots: opts.testRoots === true, keysetRequired: opts.keysetRequired === true });
   if (world.peer) world.peer.catalog = () => peerCatalog();
   const dataDir = mkdtempSync(join(tmpdir(), "tb-conformance-bridge-"));
   const [pub, int] = [await freePort(), await freePort()];
@@ -162,6 +172,9 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
     TB_DATA_DIR: dataDir,
     PORT: String(pub),
     TB_INTERNAL_PORT: String(int),
+    // BSD-07 (BRIDGE §5.7): the fake apps run on this host = own infrastructure; the owner-set allow-list names them
+    TB_OWN_INFRA_ORIGINS: world.ownInfraOrigins().join(","),
+    ...(opts.testRoots ? { TBCONF_PORTAL_ROOT_KEYS: JSON.stringify(world.testRootJwks()) } : {}),
   };
   world.env = env;
   world.portal.bridgePublicUrl = env.TB_PUBLIC_URL as string;

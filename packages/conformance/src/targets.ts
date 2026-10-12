@@ -14,6 +14,8 @@ export interface ManifestTargetOptions {
   scanDirs?: string[];
   extraProductIds?: string[];
   expectDigest?: string;
+  /** repository root for M6 (build paths are repo-relative); skill files resolve from the manifest's directory. Without it M6 is not_applicable. */
+  repoDir?: string;
 }
 
 /** Default M5 trees: the manifest package's src and dist (platform code that must hold no product id). The conformance
@@ -37,6 +39,7 @@ export async function runManifestTarget(opts: ManifestTargetOptions): Promise<Re
     scanDirs: opts.scanDirs ?? defaultScanDirs(),
     extraProductIds: [...exampleProductIds(), ...(opts.extraProductIds ?? [])],
     ...(opts.expectDigest ? { expectDigest: opts.expectDigest } : {}),
+    ...(opts.repoDir ? { repoDir: opts.repoDir } : {}),
   });
   return buildReport({ target: "manifest", subject: opts.manifestPath, startedAt, checks: r.results });
 }

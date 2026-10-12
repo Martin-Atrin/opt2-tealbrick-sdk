@@ -178,9 +178,9 @@ function kitIndex(lm: LoadedManifest): string {
   const skills = (m.skills ?? []).map((s) => {
     let text: string;
     try {
-      text = readFileSync(resolve(lm.dir, s.file), "utf8");
+      text = readFileSync(resolve(lm.manifestDir, s.file), "utf8");
     } catch {
-      throw new GenError("skill_file_missing", `skill ${s.id}: cannot read ${s.file}`);
+      throw new GenError("skill_file_missing", `skill ${s.id}: cannot read ${s.file} (skill files are relative to the manifest directory ${lm.manifestDir})`);
     }
     return { id: s.id, title: s.title, file: s.file, ...(s.when ? { when: s.when } : {}), text };
   });

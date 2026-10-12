@@ -13,7 +13,7 @@ const manifest = JSON.parse(readFileSync(path, "utf8")) as Manifest;
 const template = { services: [{ name: "app", domains: [] }, { name: "bridge", domains: ["bridge.example.org"] }] };
 
 function run(faults: MiniAppFaults = {}, extra: Partial<Parameters<typeof runApp>[0]> = {}): Promise<Report> {
-  return runApp({ manifest, manifestPath: path, start: (env) => startMiniApp(manifest, env, faults), deployTemplate: template, timeoutMs: 8000, ...extra });
+  return runApp({ manifest, manifestPath: path, start: (env) => startMiniApp(manifest, env, faults), deployTemplate: template, timeoutMs: 8000, testRoots: true, ...extra });
 }
 const failing = (r: Report) => r.checks.filter((c) => c.status === "fail" || c.status === "not_run" || c.status === "not_implemented").map((c) => c.id);
 
@@ -46,8 +46,30 @@ describe("app target", () => {
     ["has no proof replay set", { noProofReplayGuard: true }, ["C6.call_proof_replay"]],
     ["does not re-read its slice on a stale companion grant", { noCompanionRetry: true }, ["A12.companion_refresh_retry"]],
     ["answers a hook with a wrong shape", { badHookShape: true }, ["A2.hook_valid"]],
+    ["ignores portalKeySet (pre-v0.1.11 trust rule)", { ignoreKeySet: true }, ["A13.portal_keys_ignored", "A13.kss_unknown_root", "A13.kss_rollback", "A13.kss_missing", "A13.kss_compromise"]],
     ["loses its instance key on restart", { newKeyOnRestart: true }, ["A1.key_persisted", "A7.restart"], 2000],
   ];
+  it("without --test-roots the A13 key-set checks report not_run (the app pins its build roots)", async () => {
+    const r = await run({}, { testRoots: false });
+    const a13 = r.checks.filter((c) => c.id.startsWith("A13.") && c.id !== "A13.kss_first_missing");
+    assert.equal(a13.length, 7);
+    for (const c of a13) assert.equal(c.status, "not_run", `${c.id}: ${c.asserted}`);
+    const strict = r.checks.find((c) => c.id === "A13.kss_first_missing");
+    assert.equal(strict?.status, "not_applicable");
+    assert.match(strict?.asserted ?? "", /0\.1\.11 transition: fallback until spec 0\.1\.12/);
+    assert.deepEqual(failing(r).filter((id) => !id.startsWith("A13.")), []);
+  });
+
+  it("strict (--keyset-required): a spec-0.1.12 app refuses a first slice without a statement; a 0.1.11 app fails A13.kss_first_missing", async () => {
+    const good = await run({ keysetRequired: true }, { keysetRequired: true });
+    const g = good.checks.find((c) => c.id === "A13.kss_first_missing");
+    assert.equal(g?.status, "pass", g?.asserted);
+    assert.deepEqual(failing(good), [], renderMarkdown(good));
+    const lax = await run({}, { keysetRequired: true });
+    const l = lax.checks.find((c) => c.id === "A13.kss_first_missing");
+    assert.equal(l?.status, "fail", l?.asserted);
+  });
+
   for (const [name, faults, expected, timeoutMs] of cases) {
     it(`an app that ${name} fails ${expected.join(", ")}`, async () => {
       const r = await run(faults, timeoutMs ? { timeoutMs } : {});

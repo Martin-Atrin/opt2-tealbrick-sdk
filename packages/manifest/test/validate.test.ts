@@ -447,7 +447,7 @@ describe("validateAppFiles", async () => {
     }
     return d;
   }
-  const good = { "skills/notes-basics/SKILL.md": basics, "skills/notes-summaries/SKILL.md": summaries };
+  const good = { Dockerfile: "FROM scratch\n", "skills/notes-basics/SKILL.md": basics, "skills/notes-summaries/SKILL.md": summaries };
   const files = async (over: Record<string, string>, m: any = base()) => validateAppFiles(m, await repo({ ...good, ...over }));
   const fileIssue = async (over: Record<string, string>) => expectIssue(await files(over), "M-SK-2", "skill_file_invalid");
 
@@ -456,7 +456,7 @@ describe("validateAppFiles", async () => {
     assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
   });
   test("missing file", async () => {
-    const d = await repo({ "skills/notes-basics/SKILL.md": basics });
+    const d = await repo({ Dockerfile: "FROM scratch\n", "skills/notes-basics/SKILL.md": basics });
     expectIssue(await validateAppFiles(base(), d), "M-SK-2", "skill_file_invalid", "/skills/1/file");
   });
   test("frontmatter name mismatch", () => fileIssue({ "skills/notes-basics/SKILL.md": basics.replace("name: notes-basics", "name: other") }));
@@ -497,5 +497,96 @@ describe("validateAppFiles", async () => {
     const m = base();
     m.artifacts[0].sha256 = "ABC";
     expectIssue(await files({}, m), "M-AR-1", "artifact_invalid");
+  });
+});
+
+describe("validateAppFiles: path bases (MANIFEST §3, v0.1.11 (C70))", async () => {
+  const dirs: string[] = [];
+  after(async () => {
+    for (const d of dirs) await rm(d, { recursive: true, force: true });
+  });
+  const skill = (id: string) => `---\nname: ${id}\ndescription: Skill ${id}\n---\n# ${id}\n`;
+  const SKILLS = { "skills/notes-basics/SKILL.md": skill("notes-basics"), "skills/notes-summaries/SKILL.md": skill("notes-summaries") };
+
+  async function tree(files: Record<string, string>): Promise<string> {
+    const d = await mkdtemp(join(tmpdir(), "tb-manifest-bases-"));
+    dirs.push(d);
+    for (const [rel, content] of Object.entries(files)) {
+      await mkdir(dirname(join(d, rel)), { recursive: true });
+      await writeFile(join(d, rel), content);
+    }
+    return d;
+  }
+  /** Multi-app layout of opt2-tealbrick-samples: repo root with one directory per app (here `notes/`). */
+  const multi = (): any => {
+    const m = base();
+    m.runtime.build = { context: "notes", dockerfile: "notes/Dockerfile" };
+    const sv = m.runtime.services[0]; // the example's `search` service ships an upstream image; make it a thin layer built by the app CI
+    delete sv.image;
+    sv.build = { context: "notes", dockerfile: "notes/Dockerfile.search" };
+    return m;
+  };
+  const inApp = (rel: string) => `notes/${rel}`;
+  const appFiles = { "notes/Dockerfile": "FROM scratch\n", "notes/Dockerfile.search": "FROM scratch\n" };
+
+  test("multi-app repo: build paths from the repo root, skills from the manifest dir", async () => {
+    const root = await tree({ ...appFiles, ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) });
+    const r = await validateAppFiles(multi(), root, join(root, "notes"));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+
+  test("negative: skills resolved from the repo root fail when they only exist next to the manifest", async () => {
+    const root = await tree({ ...appFiles, ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) });
+    const r = await validateAppFiles(multi(), root); // manifestDir defaults to repoDir
+    expectIssue(r, "M-SK-2", "skill_file_invalid", "/skills/0/file");
+  });
+
+  test("negative: build paths resolved from the manifest dir fail", async () => {
+    const root = await tree({ ...appFiles, ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) });
+    // repoDir wrongly set to the app dir: "notes/Dockerfile" would be looked up in notes/notes/
+    const r = await validateAppFiles(multi(), join(root, "notes"), join(root, "notes"));
+    expectIssue(r, "M-RT-9", "build_path_invalid", "/runtime/build/context");
+    expectIssue(r, "M-RT-9", "build_path_invalid", "/runtime/build/dockerfile");
+  });
+
+  test("negative: a skill that exists only at the repo root is not found from the manifest dir", async () => {
+    const root = await tree({ ...appFiles, ...SKILLS });
+    expectIssue(await validateAppFiles(multi(), root, join(root, "notes")), "M-SK-2", "skill_file_invalid");
+  });
+
+  test("a service build is checked against the repo root too", async () => {
+    const root = await tree({ "notes/Dockerfile": "FROM scratch\n", ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) });
+    const r = await validateAppFiles(multi(), root, join(root, "notes"));
+    expectIssue(r, "M-RT-9", "build_path_invalid", "/runtime/services/0/build/dockerfile");
+  });
+
+  test("a build context that is a file, and a Dockerfile that is a directory, are refused", async () => {
+    const root = await tree({ "notes/Dockerfile/x": "", "notes/Dockerfile.search": "FROM scratch\n", ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) });
+    expectIssue(await validateAppFiles(multi(), root, join(root, "notes")), "M-RT-9", "build_path_invalid", "/runtime/build/dockerfile");
+  });
+
+  test("paths escaping their base are refused", async () => {
+    const root = await tree({ ...appFiles, "outside/SKILL.md": skill("notes-basics"), ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) });
+    const m = multi();
+    m.skills[0].file = "../outside/SKILL.md";
+    expectIssue(await validateAppFiles(m, root, join(root, "notes")), "M-SK-2", "skill_file_invalid", "/skills/0/file");
+    const b = multi();
+    b.runtime.build.context = "../elsewhere";
+    expectIssue(await validateAppFiles(b, root, join(root, "notes")), "M-RT-9", "build_path_invalid", "/runtime/build/context");
+  });
+
+  test("hand-written artifacts are looked for beside the manifest (manifestDir), not at the repo root", async () => {
+    const files = { ...appFiles, ...Object.fromEntries(Object.entries(SKILLS).map(([k, v]) => [inApp(k), v])) };
+    const atRoot = await tree({ ...files, "openapi.json": "{}" });
+    assert.equal((await validateAppFiles(multi(), atRoot, join(atRoot, "notes"))).ok, true, "repo-root openapi.json is not beside the manifest");
+    const beside = await tree({ ...files, "notes/openapi.json": "{}" });
+    expectIssue(await validateAppFiles(multi(), beside, join(beside, "notes")), "§14", "hand_written_artifact");
+  });
+
+  test("manifestDir defaults to repoDir (single-app repo)", async () => {
+    const root = await tree({ Dockerfile: "FROM scratch\n", ...SKILLS });
+    const r = await validateAppFiles(base(), root);
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+    assert.deepEqual(await validateAppFiles(base(), root, root), r);
   });
 });

@@ -35,7 +35,7 @@ describe("tb-conformance CLI", () => {
   });
 
   it("app --start <module> runs every check (restart + backup round-trip included) and exits 0", () => {
-    const r = run(["app", "--start", startModule, "--manifest", manifest, "--timeout", "8000", "--json"]);
+    const r = run(["app", "--start", startModule, "--manifest", manifest, "--timeout", "8000", "--test-roots", "--json"]);
     const report = JSON.parse(r.stdout) as { ok: boolean; checks: { id: string; status: string }[] };
     const bad = report.checks.filter((c) => c.status !== "pass" && c.status !== "not_applicable").map((c) => `${c.id}:${c.status}`);
     assert.deepEqual(bad, [], r.stderr.slice(-2000));
@@ -50,7 +50,7 @@ describe("tb-conformance CLI", () => {
       const tpl = join(dir, "template.json");
       writeFileSync(tpl, JSON.stringify({ services: [{ name: "app" }] }));
       const base = join(dir, "report");
-      const r = run(["app", "--cmd", `"${process.execPath}" "${serve}" ${port}`, "--url", `http://127.0.0.1:${port}`, "--manifest", manifest, "--deploy-template", tpl, "--timeout", "8000", "--report", base]);
+      const r = run(["app", "--cmd", `"${process.execPath}" "${serve}" ${port}`, "--url", `http://127.0.0.1:${port}`, "--manifest", manifest, "--deploy-template", tpl, "--timeout", "8000", "--test-roots", "--report", base]);
       const report = JSON.parse(readFileSync(`${base}.json`, "utf8")) as { ok: boolean; checks: { id: string; status: string }[] };
       const bad = report.checks.filter((c) => c.status !== "pass" && c.status !== "not_applicable").map((c) => `${c.id}:${c.status}`);
       // --cmd has no backupNow hook → the backup round-trip is the one check that cannot run (not_run fails the run)

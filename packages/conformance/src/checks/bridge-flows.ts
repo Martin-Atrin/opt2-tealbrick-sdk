@@ -2,21 +2,23 @@
 // A and B (B12, B15), signed config handling (B3, C5 rotation), the pause and revocation matrix at the bridge (P1,
 // P3), list_changed (B7), Portal down and the 12 h rule (B4), restart and re-enrolment (B2), standalone handover
 // (B14) and the closing scans (B9, C4 payload scan, B11 logs / sealed store, C7 lifetimes, C1 summary).
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
-import { type Ed25519KeyPair, generateKeyPair, signAssertion, thumbprint, ulid, verifyAgentSession, verifyAssertion, verifyKeysTicket, verifySlice } from "@opt2-tealbrick/manifest";
+import { type Ed25519KeyPair, generateKeyPair, opaqueDigest, opaqueValue, signAssertion, thumbprint, ulid, verifyAgentSession, verifyAssertion, verifyKeysTicket, verifySlice } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, STANDALONE_ADMIN_PATHS } from "@opt2-tealbrick/spec/bridge";
 import { LIFETIME_S, OAUTH_GRANT_TYPES, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { CapturedPayload } from "../fake-bridge.ts";
-import { errorCode, type HttpAnswer, request } from "../http.ts";
+import { errorCode, type HttpAnswer, listen, request } from "../http.ts";
 import { type HtmlForm, type OAuthClient, parseForms, pkcePair, redirectParams } from "../mcp-agent.ts";
 import type { PayloadScan } from "../report.ts";
 import { type ScanNeedle, scanPayloads } from "../scan.ts";
-import { bad, notRun, type Outcome, ok, verdict } from "../suite.ts";
-import { Mint, newId, nowS, peek } from "../tokens.ts";
+import { bad, na, notRun, type Outcome, ok, verdict } from "../suite.ts";
+import { Mint, newId, nowS, peek, rawSign } from "../tokens.ts";
 import { enrolRequests } from "./bridge.ts";
 import { type BridgeCtx, describeCall, httpRefused, isObj, type KeySlot, sleep, toolRefused } from "./bridge-ctx.ts";
+import { BRIDGE_GROUPS } from "./bridge-ids.ts";
 
 const JWS_RE = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{16,}/g;
 const typOf = (t: string): string | null => {
@@ -1144,3 +1146,219 @@ export async function scanChecks(c: BridgeCtx): Promise<PayloadScan> {
 }
 
 export { ok };
+
+// ── B21 app addresses (BSD-07, BRIDGE §5.7) ──────────────────────────────────
+export async function addressChecks(c: BridgeCtx): Promise<void> {
+  if (!c.on("addresses")) return;
+  const p = c.primary;
+  const read = c.readOp(p);
+  if (!read) {
+    for (const x of BRIDGE_GROUPS.addresses ?? []) c.s.record(x.id, x.title, "an agent read op on the primary app", bad("example manifest has no agent read op"));
+    return;
+  }
+  const hits: string[] = [];
+  const srv = createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", output: {} }));
+  });
+  const foreign = new URL(await listen(srv)).origin;
+  const reported = async () => (await c.until(async () => c.w.portal.acks.some((a) => (a.rejected ?? []).some((x) => x.code === "internal_url_refused")), c.h.timeoutMs)).value === true;
+  try {
+    await c.run("B21.own_infra_allowed", "ownInfra entry whose origin is in TB_OWN_INFRA_ORIGINS is routed", "config with ownInfra: true + allow-listed origins applied; tools/call ok", async () => {
+      const r = await c.apply();
+      const a = await c.call("free", p, read.id);
+      return verdict(r.acked && c.isOk(a), `rev ${r.rev} ${r.acked ? "acked" : "not acked"}; call ${describeCall(a)}`);
+    });
+    await c.run("B21.internal_url_external", "foreign internalUrl (ownInfra, not allow-listed) is not routed", "config applied (ack); call not ok; 0 requests at the foreign origin; rejected[] internal_url_refused", async () => {
+      c.w.appOverrides.set(p.ins, { internalUrl: foreign, ownInfra: true });
+      const r = await c.apply();
+      const a = await c.call("free", p, read.id);
+      await sleep(500);
+      const rep = await reported();
+      return verdict(r.acked && !c.isOk(a) && hits.length === 0 && rep, `rev ${r.rev} ${r.acked ? "acked" : "not acked"}; call ${describeCall(a)}; requests at the foreign origin ${hits.length}${hits.length ? ` (${hits.slice(0, 3).join(", ")})` : ""}; internal_url_refused ${rep ? "reported" : "NOT reported"}`);
+    });
+    await c.run("B21.own_infra_flag_required", "allow-listed origin without ownInfra: true is not routed", "call not ok; the app receives no op call", async () => {
+      c.w.appOverrides.set(p.ins, { ownInfra: false });
+      await c.apply();
+      const s0 = c.w.seqNow();
+      const a = await c.call("free", p, read.id);
+      const got = c.since(p, s0, "op").length;
+      return verdict(!c.isOk(a) && got === 0, `call ${describeCall(a)}; op calls at the app ${got}`);
+    });
+    await c.run("B21.neighbour_url_refused", "neighbour claim with a foreign internalUrl → 403 internal_url_refused", "403 internal_url_refused; no manifest fetch at the foreign origin", async () => {
+      c.w.appOverrides.delete(p.ins);
+      const code = opaqueValue("tbe_");
+      c.w.enrolCodes.push({ digest: opaqueDigest(code), kind: "neighbour", ins: newId("ins") as never, product: p.product, exp: nowS() + 3600 });
+      await c.apply();
+      const before = hits.length;
+      const a = await p.claim(code, { internalUrl: foreign }, await generateKeyPair());
+      const o = httpRefused(a, ["internal_url_refused"]);
+      return verdict(o.pass === true && a.status === 403 && hits.length === before, `${o.asserted}; requests at the foreign origin ${hits.length - before}`);
+    });
+  } finally {
+    c.w.appOverrides.clear();
+    await c.apply();
+    srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  }
+}
+
+// ── B20 key-set statements at the bridge (CREDENTIALS §9.5, BRIDGE §4–5) ─────
+export async function keySetChecks(c: BridgeCtx): Promise<void> {
+  if (!c.on("keyset")) return;
+  const STRICT_NA = "0.1.11 transition: fallback until spec 0.1.12 (run with --keyset-required for the strict check)";
+  if (!c.w.keysetRequired) c.s.record("B20.kss_enrol_missing", "strict first enrolment", "first enrolment without a statement refused", na(STRICT_NA));
+  if (!c.w.testRoots) {
+    const why = "the bridge pins its build's Portal Root Keys; run with --test-roots and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option (CONFORMANCE §7)";
+    for (const x of BRIDGE_GROUPS.keyset ?? []) if (!c.s.has(x.id)) c.s.record(x.id, x.title, "bridge verifies configs against the newest root-signed statement", notRun(why));
+    return;
+  }
+  const p = c.primary;
+  const read = c.readOp(p);
+  const stillWorks = async (): Promise<string | null> => {
+    if (!read) return "no read op";
+    const r = await c.call("free", p, read.id);
+    return c.isOk(r) ? null : describeCall(r);
+  };
+  /** A forged-pause config built by `over` must be dropped: calls keep working and its rev is never acked. */
+  const dropped = async (label: string, over: Parameters<typeof c.w.serveForged>[0]): Promise<Outcome> => {
+    const seen = c.w.portal.acks.length;
+    const rev = await c.w.serveForged({ ...over, body: { pause: { workspace: true, agents: [], instances: [] }, ...(over.body ?? {}) } });
+    await sleep(2500);
+    const broke = await stillWorks();
+    const acked = c.w.portal.acks.slice(seen).some((a) => a.rev === rev);
+    return verdict(!broke && !acked, `${label}: ${broke ? `forged pause applied (${broke})` : "last good kept"}; forged rev ${acked ? "ACKED" : "not acked"}`);
+  };
+  const body = (o: Record<string, unknown>) => o as never;
+  await c.run("B20.kss_enrolled", "enrolment and configs carry portalKeySet; configs applied", "the enrolment response held a statement signed by the test root; the next config revision is acked and calls work", async () => {
+    const r = await c.apply();
+    const broke = await stillWorks();
+    return verdict(r.acked && !broke && c.w.portal.enrolKeySet !== null, `seq ${c.w.keySet?.seq}; rev ${r.rev} ${r.acked ? "acked" : "not acked"}${broke ? `; ${broke}` : ""}`);
+  });
+  await c.run("B20.portal_keys_ignored", "a key listed only in portalKeys cannot sign", "config (active key) adds a stranger key to portalKeys → applied; a following config signed by the stranger is dropped", async () => {
+    const extra = [...c.w.portal.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), { jwk: c.w.stranger.publicJwk, status: "active" }];
+    await c.w.serveForged({ body: body({ portalKeys: extra }) });
+    await sleep(2500);
+    return dropped("stranger signs after a portalKeys-only announcement", { key: c.w.stranger, body: body({ portalKeys: extra }) });
+  });
+  await c.run("B20.kss_unknown_root", "statement signed by an unknown root → config dropped", "last good config kept", async () =>
+    dropped("unknown root", { body: body({ portalKeySet: await c.w.signKeySet((c.w.keySet?.seq ?? 0) + 5, undefined, c.w.stranger) }) }),
+  );
+  await c.run("B20.kss_rollback", "lower-seq statement → config dropped", "after seq + 1 is applied, a config carrying the older statement is dropped", async () => {
+    const old = c.w.keySet?.jws ?? "";
+    const seq = (c.w.keySet?.seq ?? 0) + 1;
+    const jws = await c.w.signKeySet(seq);
+    c.w.keySet = { seq, jws, keys: c.w.keySet?.keys ?? "" };
+    c.w.portal.enrolKeySet = jws;
+    const r = await c.apply();
+    if (!r.acked) return bad(`seq ${seq} config not acked`);
+    return dropped("rollback", { body: body({ portalKeySet: old }) });
+  });
+  await c.run("B20.kss_missing", "config without portalKeySet after a pin → dropped", "last good config kept", async () => {
+    const seen = c.w.portal.acks.length;
+    const b0 = { ...c.w.portal.configBody(c.w.portal.rev + 1), pause: { workspace: true, agents: [], instances: [] } } as Record<string, unknown>;
+    delete b0.portalKeySet;
+    const rev = c.w.portal.rev + 1;
+    const key = c.w.portal.activeKey();
+    c.w.portal.serveRaw(await rawSignConfig(b0, key));
+    await sleep(2500);
+    const broke = await stillWorks();
+    const acked = c.w.portal.acks.slice(seen).some((a) => a.rev === rev);
+    return verdict(!broke && !acked, `${broke ? `forged pause applied (${broke})` : "last good kept"}; rev ${rev} ${acked ? "ACKED" : "not acked"}`);
+  });
+  await c.run("B20.kss_compromise", "compromise rotation: the dropped kid is refused at once", "statement seq + 1 lists only a fresh key: config signed by the stolen key dropped; config by the fresh key applied", async () => {
+    const stolen = c.w.portal.activeKey();
+    c.w.portal.keys = [{ key: await generateKeyPair(), status: "active" }];
+    const portalKeySet = await c.w.ensureKeySet();
+    c.w.portal.configExtra = { ...c.w.portal.configExtra, portalKeySet, portalKeys: c.w.portal.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })) };
+    // the fake apps already trust only the fresh key, so calls cannot probe the gap here: the forged rev must not be acked
+    const seen = c.w.portal.acks.length;
+    const forgedRev = await c.w.serveForged({ key: stolen });
+    await sleep(2500);
+    const ackedForged = c.w.portal.acks.slice(seen).some((a) => a.rev === forgedRev);
+    const r = await c.apply();
+    const broke = await stillWorks();
+    return verdict(!ackedForged && r.acked && !broke, `stolen-key rev ${forgedRev} ${ackedForged ? "ACKED" : "not acked"}; fresh-key rev ${r.rev} ${r.acked ? "acked" : "not acked"}${broke ? `; calls: ${broke}` : ""}`);
+  });
+  await reenrolKeySetChecks(c, stillWorks);
+}
+
+/** C63a: re-enrolment of a pinned bridge without a valid statement; strict first enrolment (spec 0.1.12). */
+async function reenrolKeySetChecks(c: BridgeCtx, stillWorks: () => Promise<string | null>): Promise<void> {
+  const restart = c.h.restart;
+  const strict = c.w.keysetRequired;
+  if (!restart) {
+    c.s.record("B20.kss_reenrol_missing", "re-enrolment without a statement", "a restartable bridge (--start or --cmd)", notRun("the bridge cannot be restarted in this mode"));
+    if (strict) c.s.record("B20.kss_enrol_missing", "strict first enrolment", "a restartable bridge (--start or --cmd)", notRun("the bridge cannot be restarted in this mode"));
+    return;
+  }
+  const p = c.w.portal;
+  const origCode = c.h.env.TB_ENROL_CODE as string;
+  const origDir = c.h.env.TB_DATA_DIR as string;
+  const oldKey = p.bridgeKey;
+  const current = p.enrolKeySet;
+  /** restart with `extra`; a bridge that refuses by exiting counts as a refusal (the harness throws) */
+  const tryRestart = async (extra: Record<string, string>): Promise<boolean> => {
+    try {
+      await restart(extra);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const waitEnrol = async (before: number) => (await c.until(async () => enrolRequests(c).length > before, c.h.timeoutMs)).value === true;
+  const restore = async () => {
+    p.bridgeKey = oldKey;
+    p.enrolKeySet = current;
+    await tryRestart({ TB_ENROL_CODE: origCode, TB_DATA_DIR: origDir });
+    c.dropSessions();
+  };
+  await c.run("B20.kss_reenrol_missing", "re-enrolment of a pinned bridge without a valid portalKeySet refused", "for an EnrolResponse without portalKeySet and one by an unknown root: the bridge sends the enrol request, refuses it and keeps its old key and pin (a config under the old identity is acked; calls work)", async () => {
+    const out: string[] = [];
+    let pass = true;
+    try {
+      for (const [label, kss] of [["no statement", null], ["unknown root", await c.w.signKeySet((c.w.keySet?.seq ?? 0) + 5, undefined, c.w.stranger)]] as const) {
+        p.enrolKeySet = kss;
+        const before = enrolRequests(c).length;
+        const up = await tryRestart({ TB_ENROL_CODE: p.issueEnrolCode() });
+        const seen = await waitEnrol(before);
+        // Core refused nothing: give the old identity back so a bridge that kept it can pull again
+        p.bridgeKey = oldKey;
+        if (!up) await tryRestart({});
+        c.dropSessions();
+        const r = await c.apply();
+        const broke = r.acked ? await stillWorks() : "not reached";
+        pass &&= seen && r.acked && !broke;
+        out.push(`${label}: enrol request ${seen ? "sent" : "NOT sent"}${up ? "" : " (process exited)"}; old-identity rev ${r.rev} ${r.acked ? "acked" : "NOT acked"}${broke ? `; calls: ${broke}` : ""}`);
+      }
+    } finally {
+      await restore();
+    }
+    return verdict(pass, out.join("; "));
+  });
+  if (!strict) return;
+  await c.run("B20.kss_enrol_missing", "strict: first enrolment without portalKeySet refused (spec 0.1.12)", "a bridge on a fresh data dir gets an EnrolResponse without portalKeySet: no config is acked under the new key", async () => {
+    const fresh = join(origDir, "kss-enrol-missing");
+    mkdirSync(fresh, { recursive: true });
+    try {
+      p.enrolKeySet = null;
+      const before = enrolRequests(c).length;
+      const up = await tryRestart({ TB_ENROL_CODE: p.issueEnrolCode(), TB_DATA_DIR: fresh });
+      const seen = await waitEnrol(before);
+      if (!seen) return bad(`no enrol request from the fresh bridge${up ? "" : " (process exited before enrolling)"}`);
+      const seenAcks = p.acks.length;
+      const rev = await c.w.publish();
+      const acked = (await c.until(async () => p.acks.slice(seenAcks).some((a) => a.rev >= rev), c.h.timeoutMs)).value === true;
+      return verdict(!acked, `fresh bridge ${up ? "running" : "exited"}; rev ${rev} ${acked ? "ACKED (enrolment accepted without a statement)" : "not acked"}`);
+    } finally {
+      await restore();
+      await c.apply();
+    }
+  });
+}
+
+/** Signs `body` as a config JWS without the claim checks signConfig enforces (forged documents). */
+function rawSignConfig(body: Record<string, unknown>, key: Ed25519KeyPair): Promise<string> {
+  return rawSign({ alg: "EdDSA", typ: TYP.config, kid: thumbprint(key.publicJwk) }, { ...body, exp: (body.iat as number) + 43200, jti: ulid() }, key);
+}

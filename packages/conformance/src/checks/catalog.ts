@@ -22,6 +22,7 @@ export const MANIFEST_CHECK_IDS = [
   "M3",
   "M4.no_copies",
   "M5",
+  "M6.paths",
 ] as const;
 
 export const APP_CHECK_IDS = [
@@ -115,6 +116,14 @@ export const APP_CHECK_IDS = [
   "A12.companion_inbound",
   "A12.companion_call",
   "A12.companion_refresh_retry",
+  "A13.kss_pinned",
+  "A13.portal_keys_ignored",
+  "A13.kss_unknown_root",
+  "A13.kss_rollback",
+  "A13.kss_missing",
+  "A13.kss_rotation",
+  "A13.kss_compromise",
+  "A13.kss_first_missing",
   "A10",
   "P1.held_release_paused",
   "P1.workspace",

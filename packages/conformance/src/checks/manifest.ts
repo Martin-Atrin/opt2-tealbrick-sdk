@@ -1,12 +1,13 @@
-// Manifest checks M1–M5 (CONFORMANCE §4.1). M1/M2 run the ONE validator (`validateManifest`) and re-assert the key
+// Manifest checks M1–M6 (CONFORMANCE §4.1). M1/M2 run the ONE validator (`validateManifest`) and re-assert the key
 // cross-field rules independently, then prove the validator enforces them with mutated copies (sensitivity). M3
 // recomputes the digest several ways. M4 scans for hand-written generator outputs beside the manifest. M5 looks for
 // product ids taken from manifests as literals in source trees: in JS/TS files only code literals count (comments are
 // stripped by `codeLiterals`); other files are matched on their raw text. This package's own tree is never scanned.
+// M6 (v0.1.11 (C70)): path bases (MANIFEST §3): build paths resolve from the repo root, skill files from the manifest dir.
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, extname, join, sep } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { digest, manifestDigest, mcpToolName, toolNameFits, validateManifest } from "@opt2-tealbrick/manifest";
+import { digest, manifestDigest, mcpToolName, toolNameFits, validateAppFiles, validateManifest } from "@opt2-tealbrick/manifest";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { codeLiterals, literalNamesId } from "../code-literals.ts";
@@ -22,8 +23,22 @@ export interface ManifestCheckOptions {
   extraProductIds?: string[];
   /** expected digest (e.g. the one in a release record) */
   expectDigest?: string;
+  /**
+   * repository root for M6 (build paths are repo-relative, MANIFEST §3). Skill files resolve from the directory of
+   * `manifestPath` (default: `repoDir`). Without it M6 is not_applicable.
+   */
+  repoDir?: string;
   /** when set and no scanDirs are given, M5 reports not_applicable with this reason (app target) */
   m5NotApplicable?: string;
+}
+
+function isKind(path: string, dir: boolean): boolean {
+  try {
+    const st = statSync(path);
+    return dir ? st.isDirectory() : st.isFile();
+  } catch {
+    return false;
+  }
 }
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
@@ -180,12 +195,16 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     const dup = keys.filter((k, i) => keys.indexOf(k) !== i);
     return verdict(dup.length === 0, dup.length ? `duplicates: ${dup.join(",")}` : `${keys.length} names unique`);
   });
-  await s.run("M2.hook_ops", "hooks reference real ops (M-HK-3)", "own-product hook match.operations exist with audience agent", () => {
+  await s.run("M2.hook_ops", "hooks reference real ops (M-HK-3)", "own-product hook match.operations exist with audience agent; foreign hooks are checked by Core", () => {
     if (!m) return bad("manifest invalid");
-    if (!m.hooks?.length) return na("no hooks declared");
+    const hooks = m.hooks ?? [];
+    const own = hooks.filter((h) => h.match.products.length === 1 && h.match.products[0] === m.id);
+    const foreign = hooks.length - own.length;
+    if (own.length === 0) return na(`no own-product hook declared (own 0, foreign ${foreign}: checked by Core at chain resolution (M-HK-3))`);
     const agentOps = new Set(m.operations.filter((o) => o.audience === "agent").map((o) => o.id));
-    const off = m.hooks.filter((h) => h.match.products.length === 1 && h.match.products[0] === m.id && (h.match.operations ?? []).some((o) => !agentOps.has(o))).map((h) => h.id);
-    return verdict(off.length === 0, off.length ? `violations: ${off.join(",")}` : `${m.hooks.length} hooks ok`);
+    const off = own.filter((h) => (h.match.operations ?? []).some((o) => !agentOps.has(o))).map((h) => h.id);
+    const counts = `own ${own.length} (ops checked), foreign ${foreign}: checked by Core at chain resolution (M-HK-3)`;
+    return verdict(off.length === 0, off.length ? `violations: ${off.join(",")}; ${counts}` : counts);
   });
   await s.run("M2.when_settings", "`when` references declared settings (M-ST-3)", "every when key names an enum/boolean field", () => {
     if (!m) return bad("manifest invalid");
@@ -229,6 +248,34 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     const ids = [...new Set([m.id, ...(opts.extraProductIds ?? [])])];
     const hits = findProductLiterals(opts.scanDirs, ids);
     return verdict(hits.length === 0, hits.length ? `${hits.length} hits: ${hits.slice(0, 5).join("; ")}` : `${opts.scanDirs.length} trees clean of ${ids.join(",")}`);
+  });
+
+  // ── M6 path bases (MANIFEST §3) ──
+  await s.run("M6.paths", "path bases: build paths repo-relative, skill files manifest-relative (MANIFEST §3)", "build contexts/Dockerfiles exist under the repo root, skill files under the manifest directory, none escaping its base", async () => {
+    if (!m) return bad("manifest invalid");
+    if (!opts.repoDir) return na("no repo dir given (pass --repo <dir>: the repository root that build paths are relative to)");
+    const repoRoot = resolve(opts.repoDir);
+    const manifestDir = opts.manifestPath ? resolve(dirname(opts.manifestPath)) : repoRoot;
+    const builds = [{ at: "runtime.build", ...m.runtime.build }, ...(m.runtime.services ?? []).flatMap((x) => (x.build ? [{ at: `runtime.services[${x.id}].build`, ...x.build }] : []))];
+    const off: string[] = [];
+    for (const b of builds) {
+      for (const [field, dir] of [["context", true], ["dockerfile", false]] as const) {
+        const p = resolve(repoRoot, b[field]);
+        if (p !== repoRoot && !p.startsWith(repoRoot + sep)) off.push(`${b.at}.${field} ${b[field]} escapes the repo root`);
+        else if (!isKind(p, dir)) off.push(`${b.at}.${field} ${b[field]}: no ${dir ? "directory" : "file"} under the repo root ${repoRoot}`);
+      }
+    }
+    for (const sk of m.skills ?? []) {
+      const p = resolve(manifestDir, sk.file);
+      if (!p.startsWith(manifestDir + sep)) off.push(`skill ${sk.id}: ${sk.file} escapes the manifest directory`);
+      else if (!isKind(p, false)) off.push(`skill ${sk.id}: ${sk.file}: no file under the manifest directory ${manifestDir}`);
+    }
+    // the one validator must agree with the independent check above
+    const vr = await validateAppFiles(m, repoRoot, manifestDir);
+    const vPaths = vr.ok ? [] : vr.errors.filter((e) => e.code === "build_path_invalid" || (e.code === "skill_file_invalid" && /not found|escapes/.test(e.message)));
+    if (vPaths.length !== off.length) off.push(`validateAppFiles disagrees: ${vPaths.length} path issue(s) against ${off.length} found here`);
+    const nSkills = m.skills?.length ?? 0;
+    return verdict(off.length === 0, off.length ? `violations: ${off.join("; ")}` : `${builds.length} build(s) under repo ${repoRoot}; ${nSkills} skill file(s) under manifest dir ${manifestDir}`);
   });
 
   return { results: s.results, manifest: m };

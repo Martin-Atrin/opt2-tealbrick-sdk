@@ -17,6 +17,7 @@ import {
   opaqueDigest,
   opaqueValue,
   sdkMajorOf,
+  signKeySetStatement,
   signSlice,
   TYP,
   verifyAssertion,
@@ -136,6 +137,16 @@ export class FakeBridge {
 
   // state (internal)
   portalKeys: PortalKeyState[];
+  /**
+   * v0.1.11 (C62/C63): TEST Portal Root Key pair for key-set statements. An app pins it only when its start module
+   * passes `env.TBCONF_PORTAL_ROOT_KEYS` to startApp's harness `portalRootKeys` (CONFORMANCE §7); production builds pin
+   * their channel's roots and never read that name.
+   */
+  readonly testRoot: Ed25519KeyPair;
+  /** key-set statement state: slices carry `portalKeySet` once `on` (the app starts on the transition path) */
+  keySet = { on: false, seq: 0, kss: null as string | null };
+  /** one-shot override of the next slice (A13 negatives): `portalKeySet` (null = omitted), signer, extra portalKeys */
+  sliceOverride: { portalKeySet?: string | null; signer?: Ed25519KeyPair; extraPortalKeys?: PortalKeyEntry[] } | null = null;
   bridgeKeys: Ed25519KeyPair[];
   stranger: Ed25519KeyPair;
   readonly sdkMajors: number[];
@@ -160,8 +171,9 @@ export class FakeBridge {
   readonly #opts: FakeBridgeOptions;
   #closed = false;
 
-  private constructor(opts: FakeBridgeOptions, keys: { portal: Ed25519KeyPair; bridge: Ed25519KeyPair; stranger: Ed25519KeyPair }) {
+  private constructor(opts: FakeBridgeOptions, keys: { portal: Ed25519KeyPair; bridge: Ed25519KeyPair; stranger: Ed25519KeyPair; root: Ed25519KeyPair }) {
     this.#opts = opts;
+    this.testRoot = keys.root;
     this.manifest = opts.manifest;
     const agents = opts.agents ?? [
       { id: newId("agt") as AgentId, name: "Conformance agent A", mode: "free" },
@@ -195,8 +207,8 @@ export class FakeBridge {
   }
 
   static async create(opts: FakeBridgeOptions): Promise<FakeBridge> {
-    const [portal, bridge, stranger] = await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair()]);
-    const fb = new FakeBridge(opts, { portal, bridge, stranger });
+    const [portal, bridge, stranger, root] = await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair(), generateKeyPair()]);
+    const fb = new FakeBridge(opts, { portal, bridge, stranger, root });
     fb.url = await listen(fb.#server, opts.port ?? 0);
     await fb.rebuildSlice();
     return fb;
@@ -205,6 +217,23 @@ export class FakeBridge {
   /** `TB_PORTAL_KEYS` value (public JWKS, bootstrap trust). */
   portalJwks(): { keys: Ed25519PublicJwk[] } {
     return { keys: this.portalKeys.filter((k) => k.status !== "pending").map((k) => k.key.publicJwk) };
+  }
+
+  /** Public JWKs of the TEST root pair (value of `TBCONF_PORTAL_ROOT_KEYS`, JSON array). */
+  testRootJwks(): Ed25519PublicJwk[] {
+    return [this.testRoot.publicJwk];
+  }
+
+  /** A key-set statement over `keys` (default: the current Portal keys) with `seq`, signed by `root` (default: the test root). */
+  signKeySet(seq: number, keys: PortalKeyEntry[] = this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), root: Ed25519KeyPair = this.testRoot): Promise<string> {
+    return signKeySetStatement({ iss: "tb:portal-root", aud: "tb:portal-keys", seq, iat: nowS(), keys }, root);
+  }
+
+  /** Signs the next statement (`seq` + 1) over the current Portal keys and turns `portalKeySet` on. */
+  async nextKeySet(): Promise<void> {
+    this.keySet.seq++;
+    this.keySet.kss = await this.signKeySet(this.keySet.seq);
+    this.keySet.on = true;
   }
 
   activePortalKey(): Ed25519KeyPair {
@@ -265,6 +294,9 @@ export class FakeBridge {
     // meanwhile must never answer the old slice under the new revision (race seen in slower CI runners)
     const rev = this.sliceRev + 1;
     const now = nowS();
+    const over = this.sliceOverride;
+    this.sliceOverride = null;
+    const portalKeySet = over && "portalKeySet" in over ? over.portalKeySet : this.keySet.on ? this.keySet.kss : null;
     this.revoked = this.revoked.filter((r) => r.exp > now);
     const body = {
       v: 1 as const,
@@ -276,7 +308,8 @@ export class FakeBridge {
       rev,
       ins: this.ids.ins,
       product: this.manifest.id,
-      portalKeys: this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })),
+      portalKeys: [...this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })), ...(over?.extraPortalKeys ?? [])],
+      ...(portalKeySet ? { portalKeySet } : {}),
       bridge: { id: this.ids.bridge, keys: this.bridgeKeys.slice(0, 4).map((k) => k.publicJwk) },
       pause: { workspace: this.pause.workspace, agents: [...this.pause.agents], instances: [...this.pause.instances] },
       revoked: { jtis: this.revoked.map((r) => ({ jti: r.jti, exp: r.exp })) },
@@ -284,7 +317,7 @@ export class FakeBridge {
       grants: await this.companionGrants(),
       agents: this.agentEntries(),
     };
-    const signedSlice = await signSlice(body, this.activePortalKey());
+    const signedSlice = await signSlice(body, over?.signer ?? this.activePortalKey());
     this.slice = signedSlice;
     this.sliceRev = rev;
     this.wake();
@@ -580,7 +613,27 @@ export class FakeBridgeControl {
       next.status = "active";
     }
     if (phase === "retire") b.portalKeys = b.portalKeys.filter((k) => k.status !== "retired");
+    // v0.1.11: once statements are on, every rotation step is one statement (CREDENTIALS §9.5)
+    if (b.keySet.on) await b.nextKeySet();
     return b.rebuildSlice();
+  }
+  /** v0.1.11: publishes the next key-set statement (`seq` + 1, current keys) in a new slice; turns statements on. */
+  async publishKeySet(): Promise<number> {
+    await this.#b.nextKeySet();
+    return this.#b.rebuildSlice();
+  }
+  /** v0.1.11 compromise rotation: a fresh key replaces every Portal key in statement `seq` + 1; the slice carrying it is signed by `signWith` (default: the new key). */
+  async compromisePortalKey(opts: { signWith?: Ed25519KeyPair } = {}): Promise<number> {
+    const b = this.#b;
+    b.portalKeys = [{ key: await generateKeyPair(), status: "active" }];
+    await b.nextKeySet();
+    if (opts.signWith) b.sliceOverride = { signer: opts.signWith };
+    return b.rebuildSlice();
+  }
+  /** One slice with an override (A13 negatives); the next slice is normal again. */
+  serveSlice(over: NonNullable<FakeBridge["sliceOverride"]>): Promise<number> {
+    this.#b.sliceOverride = over;
+    return this.#b.rebuildSlice();
   }
   /** Re-enrolment of the bridge: new bridge key signs proofs; `keepOld` keeps the old key in slice `bridge.keys`. */
   async rotateBridgeKey(opts: { keepOld?: boolean } = {}): Promise<number> {

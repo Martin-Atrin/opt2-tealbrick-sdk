@@ -2,7 +2,7 @@
 // deployed bridge (FakeUpstream) and the Portal device flow (FakePortal), optionally provisions the agent credential
 // with `--login-cmd` (RFC 8628 device flow, scope agent, approved by the suite as the owner), then starts the relay
 // with HOME / XDG_CONFIG_HOME / TMPDIR in a fresh directory, drives it over stdio and checks B10 + C4 at the relay.
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

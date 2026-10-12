@@ -79,7 +79,12 @@ export function keySetFromPortalKeys(entries: readonly PortalKeyEntry[], issuer:
 }
 
 /**
- * CORE §4 trust rule. `announced` is the full key list of a document (config / slice `portalKeys`) whose signature was
+ * @deprecated v0.1.11 (C62/C63): NOT a trust path any more — the trusted Portal key set comes only from a root-signed
+ * key-set statement (`trustedPortalKeys`, keyset.ts). Kept exported for one minor solely for the transition rule (c) of
+ * CREDENTIALS §9.5 (a verifier that has pinned no statement and receives documents without `portalKeySet`; used by
+ * miniapp-sdk's TrustState legacy path). Removed in v0.2.
+ *
+ * Pre-v0.1.11 CORE §4 trust rule. `announced` is the full key list of a document (config / slice `portalKeys`) whose signature was
  * verified with key `announcedBy.kid`. Only when that key is already in `trusted` does the document's list take effect,
  * and it then REPLACES the trusted set: new keys are added, keys the document dropped (rotation end, compromise,
  * standalone `portalKeys: []`) are no longer trusted, retired keys stay verifiable while the document still lists them.
