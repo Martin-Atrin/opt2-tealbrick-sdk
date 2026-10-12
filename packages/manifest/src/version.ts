@@ -38,6 +38,8 @@ export const BRIDGE_FEATURES = [
   { feature: "dynamic_ops", minBridge: "0.1.15", why: "dynamic tool search needs the C91 catalog proof binding" },
   { feature: "wildcard_companion", minBridge: "0.1.16", why: "companion product \"*\" (tb.holds_pending, C82)" },
   { feature: "holds_pending_companion", minBridge: "0.1.16", why: "tb.holds_pending as a companion op (G4)" },
+  // C111a: op-limited Free grants (wf + caps) need the Free-wf gate (bridge 0.1.19 = manifest 0.1.12). A grant property, not a
+  // manifest feature: Core checks it per workspace bridge before minting such grants (MIN_BRIDGE_FREE_WF).
 ] as const;
 
 type ManifestLike = {
@@ -68,3 +70,8 @@ export function requiredBridgeVersion(m: ManifestLike): { bridge: string | null;
   if (typeof declared === "string") bump(declared, "declared by the manifest (requires.bridge)");
   return { bridge, reasons };
 }
+
+/** C111a (spec 0.1.20 cutover rule): the first bridge that enforces a non-empty `wf` on Free grants. */
+export const MIN_BRIDGE_FREE_WF = "0.1.19";
+/** C111a: the first miniapp-sdk whose authorize() pairs with op-limited Free grants (caps in any mode, C108 tolerant held). */
+export const MIN_SDK_FREE_WF = "0.1.16";
