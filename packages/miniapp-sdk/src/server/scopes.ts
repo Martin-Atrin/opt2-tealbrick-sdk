@@ -1,5 +1,6 @@
 // Scope store (SDK-API §7.2): the app is the authority for scope assignments (CORE §6). Types and access levels
-// come from manifest `scopes[]`; `defaultGrants` (C1) are applied once per (caller, type) on first sight.
+// come from manifest `scopes[]`; `defaultGrants` (C1) are applied once per (caller, type) on first sight, and (v0.1.13)
+// the `shared` default also when an instance becomes shared later, for every caller seen before.
 import type { AgentId } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Manifest, Scope } from "@opt2-tealbrick/spec/manifest";
 import type { AuditLog, PersonPrincipal, ScopeAccessView, ScopeGrantRow, ScopeInstance, ScopeStore, SliceAgent } from "@opt2-tealbrick/spec/sdk";
@@ -54,13 +55,31 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
     return r ? toRow(r) : null;
   };
 
+  /**
+   * v0.1.13 (Kanban QA S2): an instance that BECOMES shared (created shared, or switched from not shared) gets the
+   * `shared` default grant for every caller whose defaults were already applied (the directory seen so far); callers
+   * seen later get it on first sight as before. INSERT OR IGNORE: an existing row (an owner edit) always wins.
+   */
+  const shareWithSeen = (s: Scope, id: string): boolean => {
+    const g = s.defaultGrants.find((x) => x.kind === "shared");
+    if (!g) return false;
+    const seen = (db.prepare("SELECT agent FROM tb_scope_defaults WHERE type = ?").all(s.type) as Row[]).map((r) => String(r.agent));
+    let n = 0;
+    const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access) VALUES (?, ?, ?, ?)");
+    for (const agent of seen) n += Number(grant.run(agent, s.type, id, g.access).changes ?? 0);
+    return n > 0;
+  };
+
   const createInstance = (type: string, id: string, label: string, opts: { shared?: boolean; ownerAgent?: string } = {}): ScopeInstance => {
-    scopeOf(type);
+    const s = scopeOf(type);
     if (!id || id.length > 128) throw new TbError("scope_instance_invalid", "scope instance id must be 1..128 chars", 400);
+    const before = db.prepare("SELECT shared FROM tb_scope_instances WHERE type = ? AND id = ?").get(type, id) as Row | undefined;
+    const becomesShared = opts.shared === true && (before === undefined || Number(before.shared) !== 1);
     db.prepare(
       `INSERT INTO tb_scope_instances (type, id, label, shared, owner_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (type, id) DO UPDATE SET label = excluded.label, shared = excluded.shared, owner_agent = COALESCE(excluded.owner_agent, owner_agent)`,
     ).run(type, id, label, opts.shared ? 1 : 0, opts.ownerAgent ?? null, Date.now());
+    if (becomesShared && shareWithSeen(s, id)) bump();
     return toInstance(db.prepare("SELECT * FROM tb_scope_instances WHERE type = ? AND id = ?").get(type, id) as Row);
   };
 

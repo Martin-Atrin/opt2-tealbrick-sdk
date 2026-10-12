@@ -2,7 +2,7 @@
 // /a/<product>/tb/v1/ops/:op. Order on /tb/v1/ops: call proof → verifyGrant → op/audience → input schema → idempotency
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { authorize, digest, EFFECTS, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
+import { authorize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
@@ -10,6 +10,8 @@ import type {
   Caller,
   HandlerSpec,
   HoldDecideInput,
+  HoldsPendingItem,
+  HoldsPendingOutput,
   Json,
   OpContext,
   OperationView,
@@ -141,6 +143,11 @@ function buildContext(
     db: rt.appDb,
     log: rt.log,
     signal,
+    // v0.1.13 (C86)
+    statusChanged: () => rt.statusChanged(),
+    ownerLink: (path) => rt.ownerLink(path),
+    // v0.1.14 addition (SPEC-GAP: InstanceSlice.companionTargets)
+    companionTargets: () => rt.companionTargets(),
   };
 }
 
@@ -260,10 +267,24 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     if (op.standard && op.id === "tb.hold_status") {
       const v = validateInput(op, body.input);
       if (!v.ok) throw new TbError("input_invalid", "input does not match the schema", 400, { errors: v.errors });
-      const hs = await rt.receipts.holdStatus(callerId, String((body.input as { holdId: string }).holdId));
+      const hs = rt.receipts.holdStatusSync(callerId, String((body.input as { holdId: string }).holdId));
       if (!hs) throw new TbError("hold_not_found", "no such hold for this caller", 404);
-      const output: Json = { status: hs.status, expiresAt: hs.expiresAt === null ? null : iso(hs.expiresAt), ...(hs.decidedAt !== null ? { decidedAt: iso(hs.decidedAt) } : {}) };
+      const output: Json = {
+        status: hs.status,
+        expiresAt: hs.expiresAt === null ? null : iso(hs.expiresAt),
+        ...(hs.decidedAt !== null ? { decidedAt: iso(hs.decidedAt) } : {}),
+        // v0.1.13 clarification (additive): why it was held — hook verdict reason or SDK hold reason code only (C90)
+        family: hs.family,
+        reason: hs.reason,
+      };
       return sendJson(res, 200, { status: "ok", output } satisfies OpResult);
+    }
+    // v0.1.13 (G4) tb.holds_pending: valid grant suffices (I4); no receipt.
+    if (op.standard && op.id === HOLDS_PENDING_OP) {
+      const v = validateInput(op, body.input);
+      if (!v.ok) throw new TbError("input_invalid", "input does not match the schema", 400, { errors: v.errors });
+      const output = holdsPending(rt, g.caller.type, callerId, g.claims.wf, body.input as { limit?: number; cursor?: string }, now);
+      return sendJson(res, 200, { status: "ok", output: output as unknown as Json } satisfies OpResult);
     }
     if (op.standard) throw new TbError("audience_not_agent", "operation is not agent-audience", 403);
 
@@ -321,6 +342,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       access,
       usage,
       approval: approved ? "approved" : "none",
+      // v0.1.13 (G1): the bridge-attested before-hook hold verdict; an approval for this exact call satisfies it
+      holdVerdict: proof.claims.hv ? { family: proof.claims.hv.f, reason: proof.claims.hv.r, by: proof.claims.hv.by } : null,
     });
     const receiptCaller = { type: caller.type as "agent" | "app", id: callerId, name: caller.name };
     const base = { callId, caller: receiptCaller, op: op.id, effect: eff.effect, inputDigest: inputDigest as Sha256Digest, idempotencyKey: idemKey };
@@ -337,9 +360,25 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
         throw new TbError("hold_view_too_large", "hold view exceeds 16 000 characters", 500);
       }
       const summary = clampSummary(spec?.redact ? spec.redact(body.input) : op.title);
-      const hold = rt.receipts.insert({ ...base, kind: "hld", holdFamily: decision.holdFamily ?? null, status: "held", summary, meta: meta0, view, expiresAt: now + HOLD_TTL_MS }, now);
+      // v0.1.13 (G1): heldBy + the reason (hook verdict reason, else the SDK decision reason code; C90: never input/view/meta)
+      const byHook = decision.reason === DECISION_REASON.heldByHook && proof.claims.hv;
+      const hold = rt.receipts.insert(
+        {
+          ...base,
+          kind: "hld",
+          holdFamily: decision.holdFamily ?? null,
+          heldBy: decision.heldBy ?? null,
+          holdReason: byHook ? proof.claims.hv?.r : decision.reason,
+          status: "held",
+          summary,
+          meta: meta0,
+          view,
+          expiresAt: now + HOLD_TTL_MS,
+        },
+        now,
+      );
       if (idemKey) rt.receipts.idemPut(callerId, op.id, idemKey, inputDigest, { holdId: hold.id }, now);
-      rt.kickStatus();
+      rt.statusChanged();
       return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now + HOLD_TTL_MS) } satisfies OpResult);
     }
 
@@ -376,6 +415,40 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
   }
 }
 
+// ── tb.holds_pending (v0.1.13, G4) ───────────────────────────────────────────
+/**
+ * An AGENT caller sees only its own pending holds; an APP caller whose companion grant names tb.holds_pending (`wf`)
+ * sees every pending hold of the instance. SPEC-GAP: an app caller WITHOUT it in `wf` (I4 lets any valid grant through)
+ * sees only its own holds, like an agent. Summaries only: never input, view or meta.
+ */
+export function holdsPending(
+  rt: Runtime,
+  callerType: "agent" | "app",
+  callerId: string,
+  wf: readonly string[],
+  input: { limit?: number; cursor?: string },
+  now: number,
+): HoldsPendingOutput {
+  const all = callerType === "app" && wf.includes(HOLDS_PENDING_OP);
+  const page = rt.receipts.pending({ caller: all ? null : callerId, limit: input.limit ?? 50, ...(input.cursor ? { cursor: input.cursor } : {}) }, now);
+  const items = page.items.map(
+    (h): HoldsPendingItem => ({
+      id: h.id as HoldsPendingItem["id"],
+      product: rt.product,
+      op: h.op,
+      family: h.family ?? "policy",
+      reason: h.reason.slice(0, SUMMARY_MAX),
+      heldBy: h.heldBy,
+      summary: h.summary,
+      caller: h.caller,
+      createdAt: iso(h.createdAt) as HoldsPendingItem["createdAt"],
+      ageS: Math.max(0, Math.floor((now - h.createdAt) / 1000)),
+      decidePath: `/holds/${h.id}`,
+    }),
+  );
+  return { items, nextCursor: page.nextCursor };
+}
+
 // ── Hold decide (person only, §4.5) ──────────────────────────────────────────
 export async function decide(rt: Runtime, principal: PersonPrincipal, input: HoldDecideInput): Promise<Receipt> {
   if (principal?.type !== "person" || principal.instance !== rt.instanceId) throw new TbError("session_required", "only the owner can decide holds", 403);
@@ -385,7 +458,7 @@ export async function decide(rt: Runtime, principal: PersonPrincipal, input: Hol
   if (!row) throw new TbError("hold_not_found", "no such hold", 404);
   if (row.status === "held" && row.expiresAt !== null && row.expiresAt <= now) {
     rt.receipts.sweep(now);
-    rt.kickStatus();
+    rt.statusChanged();
     throw new TbError("hold_expired", "the hold expired before a decision", 409);
   }
   if (row.status !== "held") throw new TbError("hold_decided", `hold is already ${row.status}`, 409);
@@ -396,7 +469,7 @@ export async function decide(rt: Runtime, principal: PersonPrincipal, input: Hol
     target: row.id,
     detail: { decision: input.decision, op: row.op, caller: row.caller.id, ...(input.note ? { note: input.note.slice(0, 1000) } : {}) },
   });
-  rt.kickStatus();
+  rt.statusChanged();
   return rt.receipts.getSync(row.id) as Receipt;
 }
 

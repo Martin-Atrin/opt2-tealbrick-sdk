@@ -6,7 +6,7 @@ import type { AuditLog, BackupApi, CompanionResult, Db, HealthStatus, Json, Logg
 import type { AppSecrets } from "./app-secrets.ts";
 import type { BridgeClient } from "./bridge-client.ts";
 import type { AttentionCode } from "./claim-guard.ts";
-import type { ContextExtras, SdkAppDefinition } from "./context.ts";
+import type { ContextExtras, SdkAppDefinition, SdkEventContext } from "./context.ts";
 import type { SdkConfig } from "./env.ts";
 import type { KeysInternals } from "./keys.ts";
 import type { SecretRegistry } from "./log.ts";
@@ -51,14 +51,27 @@ export interface Runtime {
   health(): HealthStatus;
   /** C31 context members for agent/app calls (person calls override `workspace`) */
   extras(): ContextExtras;
-  /** pending-hold count or scopes changed: push a status report at once (C16 S2) */
+  /** scopes changed: push a status report at once (C16 S2) */
   kickStatus(): void;
+  /** v0.1.13 (C86): ctx.statusChanged() — push within 1 s, debounced, ≤ 1 push/s; the SDK calls it on hold create/decide/expire */
+  statusChanged(): void;
+  /** v0.1.13 (C86): AppStatus.pendingHolds = held receipts + the app's pendingCount() (clamped, 1 s timeout) */
+  pendingHolds(): Promise<number>;
+  /** v0.1.13 (C86): ctx.ownerLink(path); throws path_invalid; null until the slice carries portalUrl */
+  ownerLink(path: string): string | null;
+  /** v0.1.14 addition: product ids of the slice's companionTargets (sorted, unique) */
+  companionTargets(): string[];
+  /** v0.1.13: the ctx every event handler gets */
+  eventContext(): SdkEventContext;
+  /** v0.1.13 (Fleet): events.agentsChanged when the slice's agents differ from the last notified list (and once after boot) */
+  notifyAgents(): Promise<void>;
   /** claim completed (or already recorded): runs `onStart` once */
   onClaimed(): void;
   /** re-reads the slice from the bridge once (companion `grant_stale`) */
   refreshSlice(): Promise<void>;
   /** first sight of an agent edge (§7.2): agentAdded event, then manifest defaultGrants */
   ensureAgent(agent: SliceAgent): Promise<void>;
+  /** `parentCall: null` = app-initiated (C85: StartContext / EventContext / timers) */
   callApp<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; parentCall: string | null }): Promise<CompanionResult<O>>;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
 }

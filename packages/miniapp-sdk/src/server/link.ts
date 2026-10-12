@@ -89,11 +89,11 @@ export class BridgeLink {
 
   /** One status exchange without waiting (companion `grant_stale` → re-read the slice once). */
   async refreshNow(): Promise<void> {
-    const r = await this.#client.request("POST", `${BRIDGE_INTERNAL_PATHS.status}?wait=0`, this.#status());
+    const r = await this.#client.request("POST", `${BRIDGE_INTERNAL_PATHS.status}?wait=0`, await this.#status());
     if (r.status === 200) await this.#apply(r.body as AppStatusResponse);
   }
 
-  #status(): AppStatus {
+  async #status(): Promise<AppStatus> {
     const rt = this.#rt;
     return {
       readiness: readiness(rt.health()),
@@ -102,7 +102,8 @@ export class BridgeLink {
       scopesRev: rt.scopes.rev(),
       sliceRevision: rt.trust.slice?.rev ?? 0,
       keysRev: rt.keys.keysRev(),
-      pendingHolds: rt.receipts.pendingCount(),
+      // v0.1.13 (C86): held receipts + defineApp pendingCount() (clamped 0..10 000, 1 s timeout)
+      pendingHolds: await rt.pendingHolds(),
     };
   }
 
@@ -198,11 +199,12 @@ export class BridgeLink {
         this.#poll = new AbortController();
         const wait = this.#dirty ? 0 : STATUS_WAIT_S;
         this.#dirty = false;
+        const status = await this.#status();
         const sentAt = Date.now();
         const r = await this.#client.request(
           "POST",
           `${BRIDGE_INTERNAL_PATHS.status}?wait=${wait}`,
-          this.#status(),
+          status,
           {},
           AbortSignal.any([this.#stop.signal, this.#poll.signal]),
         );
@@ -234,11 +236,17 @@ export class BridgeLink {
     }
   }
 
-  /** Companion call `POST /tb/v1/call` with TB-Assert + TB-Grant (SDK-API §9, BRIDGE §8.3). */
+  /**
+   * Companion call `POST /tb/v1/call` with TB-Assert + TB-Grant (SDK-API §9, BRIDGE §8.3). `parentCall: null` = an
+   * app-initiated call (v0.1.13 C85: StartContext / EventContext / timers): the envelope carries no parentCall.
+   */
   async call<O = Json>(product: string, op: string, input: Json, opts: { idempotencyKey?: string; parentCall: string | null }): Promise<CompanionResult<O>> {
     const rt = this.#rt;
-    const declared = rt.manifest.companions?.find((c) => c.product === product);
-    if (!declared?.operations.includes(op)) throw new TbError("companion_undeclared", `companion operation not declared: ${product}.${op}`, 500);
+    // a product declaration first; else the wildcard companion (M-CP-3: only tb.holds_pending) for any product
+    const declared =
+      rt.manifest.companions?.find((c) => c.product === product && c.operations.includes(op)) ??
+      (product !== "*" ? rt.manifest.companions?.find((c) => c.product === "*" && c.operations.includes(op)) : undefined);
+    if (!declared) throw new TbError("companion_undeclared", `companion operation not declared: ${product}.${op}`, 500);
     const p = rt.trust.paused(null);
     if (p.workspace || p.instance) throw new TbError("paused", "this instance is paused", 403);
     const envelope: CallEnvelope = {
@@ -249,7 +257,7 @@ export class BridgeLink {
       ...(opts.parentCall ? { parentCall: opts.parentCall as CallEnvelope["parentCall"] } : {}),
     };
     for (let attempt = 0; ; attempt++) {
-      const grant = companionGrant(rt, declared.operations);
+      const grant = companionGrant(rt, product, declared.product === "*" ? null : declared.operations, op);
       if (!grant) throw new TbError("no_grant", `no companion grant for ${product} in the slice`, 403);
       const r = await this.#client.request("POST", BRIDGE_INTERNAL_PATHS.call, envelope, { [BRIDGE_HEADERS.companionGrant]: grant });
       if (r.status === 200 || r.status === 202) return r.body as OpResult<O>;
@@ -266,17 +274,28 @@ export class BridgeLink {
 /**
  * The slice's `grants` carry no product label. SPEC-GAP: the SDK picks the grant whose `wf` equals the manifest-declared
  * companion operations for that product (I8: companion grants carry `wf` = those operations); the bridge verifies it.
+ * v0.1.14 addition: when the slice's `companionTargets` names the product's instance, the grant's `aud` must be that
+ * instance. A wildcard companion (`ops` null) needs that mapping: its per-app grants differ only by `aud`.
  */
-function companionGrant(rt: Runtime, ops: readonly string[]): string | null {
-  const want = [...ops].sort().join(",");
+function companionGrant(rt: Runtime, product: string, ops: readonly string[] | null, op: string): string | null {
+  const want = ops ? [...ops].sort().join(",") : null;
+  const auds = new Set(rt.trust.companionTargets().filter((t) => t.product === product).map((t) => `tb:ins:${t.ins}`));
+  if (!want && auds.size === 0) return null;
   for (const g of rt.trust.slice?.grants ?? []) {
     const c = peekClaims(g);
-    if (Array.isArray(c?.wf) && [...(c.wf as string[])].sort().join(",") === want && c.sub === rt.trust.self) return g;
+    if (!Array.isArray(c?.wf) || c.sub !== rt.trust.self) continue;
+    const wf = c.wf as string[];
+    if (want ? [...wf].sort().join(",") !== want : !wf.includes(op)) continue;
+    if (auds.size > 0 && !auds.has(String(c.aud))) continue;
+    return g;
   }
   return null;
 }
 
-/** Verifies + installs a slice, then runs the side effects: first sight (§7.2), agentRemoved, pause → drop key cache. */
+/**
+ * Verifies + installs a slice, then runs the side effects: first sight (§7.2), agentRemoved, v0.1.13 (Fleet)
+ * agentsChanged, pause → drop key cache.
+ */
 export async function installSlice(rt: Runtime, token: string): Promise<boolean> {
   const r = rt.trust.install(token, Date.now());
   if (!r.ok) {
@@ -289,11 +308,12 @@ export async function installSlice(rt: Runtime, token: string): Promise<boolean>
   for (const a of r.changed.removed) {
     rt.db.prepare("UPDATE tb_agents SET in_slice = 0 WHERE agent = ?").run(a.id);
     try {
-      await rt.def.events?.agentRemoved?.(a, { db: rt.appDb, log: rt.log });
+      await rt.def.events?.agentRemoved?.(a, rt.eventContext());
     } catch (e) {
       rt.log.warn("agentRemoved failed", { agent: a.id, error: e instanceof Error ? e.message : "unknown" });
     }
   }
+  await rt.notifyAgents();
   const p = rt.trust.paused(null);
   if (p.workspace || p.instance) rt.keys.dropCache();
   return true;

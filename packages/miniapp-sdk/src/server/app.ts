@@ -3,7 +3,7 @@
 // manifest, handler set or migration set.
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
-import { keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
+import { isValidLaunchPath, keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
 import type { Ed25519PublicJwk, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { App, AppDefinition, HealthStatus, HoldDecideInput, OperationView, PersonPrincipal, Receipt, RunningApp, SliceAgent } from "@opt2-tealbrick/spec/sdk";
@@ -12,7 +12,7 @@ import { createAuditLog } from "./audit.ts";
 import { createBackupApi, restoreAtBoot } from "./backup.ts";
 import { BridgeClient } from "./bridge-client.ts";
 import { logMountAtBoot } from "./claim-guard.ts";
-import type { SdkAppDefinition } from "./context.ts";
+import type { SdkAppDefinition, SdkEventContext, StartContext } from "./context.ts";
 import { readEnv } from "./env.ts";
 import { TbError } from "./errors.ts";
 import { createKeys } from "./keys.ts";
@@ -27,6 +27,7 @@ import { createScopeStore } from "./scopes.ts";
 import { createSealer, loadInstanceKey, resolveKeks } from "./secrets.ts";
 import { createHttpServer } from "./server.ts";
 import { createServiceHelperCaller } from "./service-helper.ts";
+import { PendingCounter, StatusPusher } from "./status.ts";
 import { appDb, metaGet, metaSet, openStore, type Row, runAppMigrations } from "./store.ts";
 import { TrustState } from "./trust.ts";
 
@@ -185,10 +186,30 @@ export async function startApp(
   const bridge = cfg.standalone || !cfg.bridgeUrl ? null : new BridgeClient({ baseUrl: cfg.bridgeUrl, instanceId, key: instanceKey, bridgeId: () => trust.bridgeId });
   const receipts = new Receipts(db);
   const kick = () => link?.kick();
+  // v0.1.13 (C86): statusChanged() pacing (≤ 1 push/s) and pendingHolds = held receipts + the app's pendingCount()
+  const pusher = new StatusPusher(kick);
+  const counter = new PendingCounter(def.pendingCount, appDb(db), log);
   const scopes = createScopeStore(db, manifest, audit, kick);
   const appHandle = appDb(db);
   const appSecrets = createAppSecrets(db, sealer, secrets);
   closeOnFail(() => appSecrets.reseal());
+  // v0.1.13 (C85/C86): callApp without parentCall (app-initiated), statusChanged and ownerLink outside op handlers
+  const appCallApp: StartContext["callApp"] = (product, op, input, opts) => {
+    if (!link) return Promise.reject(new TbError("no_bridge", "companion calls need the bridge", 503));
+    return link.call(product, op, input, { ...(opts?.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}), parentCall: null });
+  };
+  const ownerLink = (path: string): string | null => {
+    if (typeof path !== "string" || !isValidLaunchPath(path)) throw new TbError("path_invalid", "owner link path must be an app-relative launch path", 400);
+    const portal = trust.portalUrl;
+    const ws = trust.ws;
+    if (!portal || !ws) return null;
+    return `${portal}/w/${ws}/open?product=${encodeURIComponent(manifest.id)}&path=${encodeURIComponent(path)}`;
+  };
+  const companionTargets = (): string[] => [...new Set(trust.companionTargets().map((t) => t.product))].sort();
+  const statusChanged = (): void => pusher.request();
+  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets });
+  /** Fleet: last agent list handed to events.agentsChanged in this process (null = none yet since boot) */
+  let notifiedAgents: string | null = null;
   const keys = createKeys({
     db,
     manifest,
@@ -200,7 +221,7 @@ export async function startApp(
     bridge: () => (state.claimed ? bridge : null),
     emit: async (names) => {
       try {
-        await def.events?.keysChanged?.(names, { log });
+        await def.events?.keysChanged?.(names, eventContext());
       } catch (e) {
         log.warn("keysChanged failed", { error: e instanceof Error ? e.message : "unknown" });
       }
@@ -278,12 +299,31 @@ export async function startApp(
       };
     },
     kickStatus: kick,
+    statusChanged,
+    async pendingHolds() {
+      return receipts.pendingCount() + (await counter.count());
+    },
+    ownerLink,
+    companionTargets,
+    eventContext,
+    async notifyAgents() {
+      const agents = trust.slice?.agents;
+      if (!agents) return;
+      // ids, names, mode, status (Fleet); order-insensitive
+      const key = JSON.stringify(agents.map((a) => [a.id, a.name, a.mode, a.status]).sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0)));
+      if (key === notifiedAgents) return;
+      notifiedAgents = key;
+      try {
+        await def.events?.agentsChanged?.(agents.map((a) => ({ ...a })), eventContext());
+      } catch (e) {
+        log.warn("agentsChanged failed", { error: e instanceof Error ? e.message : "unknown" });
+      }
+    },
     onClaimed() {
       if (onStartRan || !def.onStart) return;
       onStartRan = true;
-      def.onStart({ db: appHandle, log, scopes, secrets: appSecrets, getKey: (n) => keys.getKey(n), callServiceHelper: helper }).catch((e) =>
-        log.error("onStart failed", { error: e instanceof Error ? e.message : "unknown" }),
-      );
+      const ctx: StartContext = { ...eventContext(), secrets: appSecrets, getKey: (n) => keys.getKey(n), callServiceHelper: helper };
+      def.onStart(ctx).catch((e) => log.error("onStart failed", { error: e instanceof Error ? e.message : "unknown" }));
     },
     async refreshSlice() {
       await link?.refreshNow();
@@ -297,7 +337,7 @@ export async function startApp(
       }
       db.prepare("INSERT OR IGNORE INTO tb_agents (agent, name, first_seen, in_slice) VALUES (?, ?, ?, ?)").run(agent.id, agent.name, Date.now(), inSlice);
       try {
-        await def.events?.agentAdded?.(agent, { db: appHandle, scopes, log });
+        await def.events?.agentAdded?.(agent, eventContext());
       } catch (e) {
         log.warn("agentAdded failed", { agent: agent.id, error: e instanceof Error ? e.message : "unknown" });
       }
@@ -332,11 +372,13 @@ export async function startApp(
     throw new TbError("listen_failed", `cannot listen on port ${manifest.runtime.port}: ${e instanceof Error ? e.message : "error"}`, 500);
   }
   if (cfg.standalone || state.claimed) rt.onClaimed();
+  // Fleet: the stored slice is the first slice after boot (a bridge answers a long-poll with 204 while it is current)
+  if (trust.slice) void rt.notifyAgents();
   link?.start();
   const sweep = setInterval(() => {
     try {
       const now = Date.now();
-      if (receipts.sweep(now).expired > 0) kick();
+      if (receipts.sweep(now).expired > 0) statusChanged(); // v0.1.13: a hold expired
       person.sweep(now);
     } catch (e) {
       log.warn("sweep failed", { error: e instanceof Error ? e.message : "unknown" });
@@ -351,6 +393,7 @@ export async function startApp(
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
       clearInterval(sweep);
+      pusher.stop();
       backup.stop();
       await link?.stop();
       await new Promise<void>((resolve) => {

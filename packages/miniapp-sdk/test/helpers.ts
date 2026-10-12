@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { digest, type Ed25519KeyPair, generateKeyPair, signCallProof, signGrant, signKeySetStatement, signSlice, signTicket, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, BridgeId, Ed25519PublicJwk, InstanceId, PersonId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { CrudAction, HoldFamily } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction, HoldFamily, HookHoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 
 export const nowS = () => Math.floor(Date.now() / 1000);
@@ -78,7 +78,11 @@ export function testRoots(w: World): { portalRootKeys: Ed25519PublicJwk[] } {
 export async function slice(
   w: World,
   product: string,
-  over: Partial<Pick<InstanceSlice, "pause" | "agents" | "grants" | "personNbf">> & { portalKeySet?: string | null } = {},
+  over: Partial<Pick<InstanceSlice, "pause" | "agents" | "grants" | "personNbf" | "portalUrl">> & {
+    portalKeySet?: string | null;
+    /** spec 0.1.14 addition (not in the 0.1.13 types): companion grant targets */
+    companionTargets?: { product: string; ins: string }[];
+  } = {},
 ): Promise<string> {
   w.rev += 1;
   const self = `tb:ins:${w.ins}` as const;
@@ -104,7 +108,9 @@ export async function slice(
         { id: w.agents.b, name: "Agent B", mode: "free", status: "active" },
       ],
       ...(over.portalKeySet === null ? {} : { portalKeySet: over.portalKeySet ?? w.portalKeySet }),
-    },
+      ...(over.portalUrl ? { portalUrl: over.portalUrl } : {}),
+      ...(over.companionTargets ? { companionTargets: over.companionTargets } : {}),
+    } as Parameters<typeof signSlice>[0],
     w.portal,
   );
 }
@@ -129,7 +135,15 @@ export async function grant(w: World, agent: AgentId, opts: { crud?: CrudAction[
   );
 }
 
-export async function callProof(w: World, grantToken: string, op: string, input: Json, context: Record<string, Json> = {}, over: { aud?: InstanceId; inputFor?: Json } = {}): Promise<string> {
+/** `over.hv` (v0.1.13 G1): the bridge-attested before-hook hold verdict claim. */
+export async function callProof(
+  w: World,
+  grantToken: string,
+  op: string,
+  input: Json,
+  context: Record<string, Json> = {},
+  over: { aud?: InstanceId; inputFor?: Json; hv?: { f: HookHoldFamily; r: string; by: string } } = {},
+): Promise<string> {
   const g = JSON.parse(Buffer.from(grantToken.split(".")[1] as string, "base64url").toString("utf8")) as { jti: string; sub: `tb:agt:${string}` };
   return signCallProof(
     {
@@ -142,6 +156,7 @@ export async function callProof(w: World, grantToken: string, op: string, input:
       op,
       in: digest(over.inputFor ?? input),
       ctx: digest(context),
+      ...(over.hv ? { hv: over.hv } : {}),
     },
     w.bridgeKey,
   );

@@ -47,6 +47,8 @@ export interface PersonAuth {
   requireSession(req: IncomingMessage): SessionInfo;
   /** non-GET under /a/<product>/: `TB-CSRF` equals the session token and `Origin` = request host; throws `csrf_invalid` */
   requireCsrf(req: IncomingMessage, s: SessionInfo): void;
+  /** v0.1.13: the same check for a form POST (no script, CSP): the session CSRF token in a form field + same Origin */
+  requireCsrfToken(req: IncomingMessage, s: SessionInfo, token: string | undefined): void;
   /** app-alone mode: prints a setup code at first boot or with TB_STANDALONE_RESET=1 */
   standaloneBoot(reset: boolean): void;
   sweep(nowMs: number): void;
@@ -254,7 +256,9 @@ export function createPersonAuth(opts: {
       return { principal: s.principal, csrf: s.csrf, idempotencyRequired: s.idempotencyRequired };
     },
     requireCsrf(req, s) {
-      const token = header(req, CSRF_HEADER);
+      this.requireCsrfToken(req, s, header(req, CSRF_HEADER));
+    },
+    requireCsrfToken(req, s, token) {
       if (!token || !digestEqual(token, s.csrf) || !sameOrigin(req)) throw new TbError("csrf_invalid", "TB-CSRF header or Origin missing or wrong", 403);
     },
     standaloneBoot(reset) {

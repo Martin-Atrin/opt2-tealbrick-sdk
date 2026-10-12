@@ -9,6 +9,7 @@ import { handleBridgeOp, handleHook } from "./bridge-routes.ts";
 import type { AttentionCode } from "./claim-guard.ts";
 import type { SdkPublicContext } from "./context.ts";
 import { TbError } from "./errors.ts";
+import { HOLD_PAGE_RE, handleHoldPage } from "./holds-page.ts";
 import { escapeHtml, readRaw, requestId, sendError, sendHtml, sendJson } from "./http.ts";
 import { buildOpenApi } from "./openapi.ts";
 import { handleAgentOp, handlePersonOp } from "./ops.ts";
@@ -149,6 +150,9 @@ export function createHttpServer(rt: Runtime): Server {
       if (rest === "/tb/v1/logout" && m === "POST") return rt.person.handleLogout(req, res);
       if (rest.startsWith("/tb/v1/ops/") && m === "POST") return handlePersonOp(rt, req, res, decodeURIComponent(rest.slice("/tb/v1/ops/".length)));
       if (rest === "/tb/standalone" && (m === "GET" || m === "POST")) return rt.person.handleStandalone(req, res);
+      // v0.1.13 (G4): apps without a person UI get the SDK's minimal decision page at /holds/<id> (apps with a UI route it)
+      const hold = rt.manifest.ui ? null : HOLD_PAGE_RE.exec(rest);
+      if (hold?.[1] && (m === "GET" || m === "POST")) return handleHoldPage(rt, req, res, hold[1]);
       if (rest.startsWith("/tb/") || m !== "GET") return sendError(res, requestId(), new TbError("not_found", "not found", 404));
       if (!rt.manifest.ui) return sendError(res, requestId(), new TbError("not_found", "this app has no person UI", 404));
       try {

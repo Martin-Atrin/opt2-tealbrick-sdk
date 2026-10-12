@@ -18,12 +18,16 @@ export type {
   CompanionResult,
   Db,
   DynamicHandlers,
+  EventContext,
   ExportMeta,
   Handler,
   HandlerSpec,
   Health,
   HealthStatus,
   HoldDecideInput,
+  HoldsPendingInput,
+  HoldsPendingItem,
+  HoldsPendingOutput,
   HookContext,
   HookHandler,
   HookRequest,
@@ -56,7 +60,18 @@ export type {
   SliceAgent,
 } from "@opt2-tealbrick/spec/sdk";
 export { decideHold, defineApp, getKey, onKeysChanged, SDK_MAJOR, SDK_VERSION, startApp } from "./app.ts";
-export type { AppSecrets, ContextExtras, SdkAppDefinition, SdkHookContext, SdkOpContext, SdkPublicContext, StartContext } from "./context.ts";
+export type {
+  AppSecrets,
+  CompanionTargetsView,
+  ContextExtras,
+  SdkAppDefinition,
+  SdkAppEvents,
+  SdkEventContext,
+  SdkHookContext,
+  SdkOpContext,
+  SdkPublicContext,
+  StartContext,
+} from "./context.ts";
 export { TbError } from "./errors.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";

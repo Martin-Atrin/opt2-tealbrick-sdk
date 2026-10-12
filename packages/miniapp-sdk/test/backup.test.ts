@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { type Ed25519KeyPair, generateKeyPair, keySetFrom, ulid, verifyAssertion } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS } from "@opt2-tealbrick/spec/bridge";
-import { type BridgeId, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, type BridgeId, type InstanceId, type Sha256Digest, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { BackupMeta, ExportMeta } from "@opt2-tealbrick/spec/sdk";
 import { createAuditLog } from "../src/server/audit.ts";
@@ -19,6 +19,7 @@ import { nextRun, parseCron } from "../src/server/cron.ts";
 import { TbError } from "../src/server/errors.ts";
 import { defineApp, startApp } from "../src/server/index.ts";
 import { createLogger, SecretRegistry } from "../src/server/log.ts";
+import { Receipts } from "../src/server/receipts.ts";
 import { openStore, type RawDb } from "../src/server/store.ts";
 import { bufferSink, readTarGz, writeTarGz } from "../src/server/tar.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
@@ -447,6 +448,45 @@ test("restoreAtBoot: a path-traversal archive is refused and writes nothing outs
     writeFileSync(join(r.ctx.backupDir, "evil2.tar.gz"), rawTarGz([{ name: "meta.json", body: Buffer.from(JSON.stringify(meta2)) }, { name: "files/data/uploads/x", body }]));
     await assert.rejects(restoreAtBoot(r.ctx, "evil2.tar.gz"), isCode("restore_failed"));
     assert.ok(!existsSync(join(r.dir, "evil.txt")));
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("v0.1.13 (G1): receipt heldBy is in the export and survives a backup round trip", async () => {
+  const r = await rig();
+  try {
+    const hold = new Receipts(r.db).insert({
+      kind: "hld",
+      callId: null,
+      caller: { type: "agent", id: "agt_1" as AgentId, name: "A" },
+      op: "note_get",
+      effect: "read",
+      holdFamily: "policy",
+      heldBy: "rules/check_policy",
+      holdReason: "needs the owner",
+      status: "held",
+      inputDigest: "sha256:x" as Sha256Digest,
+      summary: "s",
+      meta: null,
+      idempotencyKey: null,
+      view: "v",
+      expiresAt: Date.now() + 60_000,
+    });
+    const ex = await r.api.api.exportNow();
+    for await (const _ of ex.stream) void _;
+    const exported = JSON.parse((await entries(join(r.ctx.backupDir, ex.file))).get("receipts.jsonl")?.toString() ?? "null") as Record<string, unknown>;
+    assert.equal(exported.held_by, "rules/check_policy");
+    const { file } = await r.api.api.runNow();
+    r.db.exec("DELETE FROM tb_receipts");
+    r.api.stop();
+    r.db.close();
+    await restoreAtBoot(r.ctx, file);
+    r.reopen();
+    const back = new Receipts(r.db).getSync(hold.id);
+    assert.equal(back?.heldBy, "rules/check_policy");
+    assert.equal(back?.holdFamily, "policy");
+    assert.equal(new Receipts(r.db).holdStatusSync("agt_1", hold.id)?.reason, "needs the owner");
   } finally {
     await r.cleanup();
   }

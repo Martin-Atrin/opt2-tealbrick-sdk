@@ -12,6 +12,29 @@ export const APPROVAL_WINDOW_MS = 15 * 60_000;
 export const IDEMPOTENCY_TTL_MS = 24 * 3600_000;
 export const RECEIPT_RETENTION_MS = 90 * 86400_000;
 const CAP_WINDOW_MS = { hour: 3600_000, day: 86400_000 } as const;
+/** v0.1.13 (G4): tb.holds_pending page size (1..100, default 50) */
+export const HOLDS_PENDING_MAX = 100;
+
+/**
+ * v0.1.13: the reason shown by tb.hold_status / tb.holds_pending — the stored hook verdict reason or SDK hold reason;
+ * rows from before 0.1.13 (no `hold_reason`) derive the SDK reason code from the family. Never input, view or meta.
+ */
+export function holdReasonOf(stored: unknown, family: unknown): string {
+  if (typeof stored === "string" && stored !== "") return stored;
+  return family === "money" ? "held_money" : family === "caps" ? "caps_exceeded" : "held_family";
+}
+
+/** One pending hold (status `held`) as a summary row (tb.holds_pending): no input, view or meta. */
+export interface PendingHoldRow {
+  id: string;
+  op: string;
+  family: Receipt["holdFamily"];
+  reason: string;
+  heldBy: string | null;
+  summary: string;
+  caller: Receipt["caller"];
+  createdAt: number;
+}
 
 export interface NewReceipt {
   kind: "hld" | "rcp";
@@ -19,7 +42,11 @@ export interface NewReceipt {
   caller: Receipt["caller"];
   op: string;
   effect: Effect;
-  holdFamily: HoldFamily | "caps" | null;
+  holdFamily: HoldFamily | "caps" | "policy" | null;
+  /** v0.1.13 (G1): `<product>/<hookId>` of the before hook whose verdict held the call */
+  heldBy?: string | null;
+  /** v0.1.13: hook verdict reason or the SDK hold reason code (never input, view or meta; C90) */
+  holdReason?: string | null;
   status: ReceiptStatus;
   inputDigest: Sha256Digest;
   summary: string;
@@ -41,6 +68,7 @@ function toReceipt(r: Row, withView: boolean): Receipt {
     op: String(r.op),
     effect: String(r.effect) as Effect,
     holdFamily: (r.hold_family as Receipt["holdFamily"]) ?? null,
+    heldBy: (r.held_by as string | null | undefined) ?? null,
     status: String(r.status) as ReceiptStatus,
     inputDigest: String(r.input_digest) as Sha256Digest,
     summary: String(r.summary),
@@ -112,15 +140,71 @@ export class Receipts implements ReceiptStore {
   }
 
   async holdStatus(caller: string, holdId: string): Promise<{ status: ReceiptStatus; decidedAt: number | null; expiresAt: number | null } | null> {
+    const r = this.holdStatusSync(caller, holdId);
+    return r ? { status: r.status, decidedAt: r.decidedAt, expiresAt: r.expiresAt } : null;
+  }
+
+  /** holdStatus plus (v0.1.13 clarification) the hold `family` and `reason` (hook verdict reason or SDK hold reason). */
+  holdStatusSync(
+    caller: string,
+    holdId: string,
+  ): { status: ReceiptStatus; decidedAt: number | null; expiresAt: number | null; family: Receipt["holdFamily"]; reason: string } | null {
     const r = this.#db
-      .prepare("SELECT status, decided_at, expires_at FROM tb_receipts WHERE id = ? AND caller_id = ? AND id LIKE 'hld\\_%' ESCAPE '\\'")
+      .prepare("SELECT status, decided_at, expires_at, hold_family, hold_reason FROM tb_receipts WHERE id = ? AND caller_id = ? AND id LIKE 'hld\\_%' ESCAPE '\\'")
       .get(holdId, caller) as Row | undefined;
     if (!r) return null;
     return {
       status: String(r.status) as ReceiptStatus,
       decidedAt: r.decided_at === null ? null : Number(r.decided_at),
       expiresAt: r.expires_at === null ? null : Number(r.expires_at),
+      family: (r.hold_family as Receipt["holdFamily"]) ?? null,
+      reason: holdReasonOf(r.hold_reason, r.hold_family),
     };
+  }
+
+  /** v0.1.13: the stored hold reason of a hold (person page), null for a non-hold id. */
+  holdReason(id: string): string | null {
+    const r = this.#db.prepare("SELECT hold_family, hold_reason FROM tb_receipts WHERE id = ? AND id LIKE 'hld\\_%' ESCAPE '\\'").get(id) as Row | undefined;
+    return r ? holdReasonOf(r.hold_reason, r.hold_family) : null;
+  }
+
+  /**
+   * v0.1.13 (G4): pending (`held`, not yet expired) holds, oldest first; `caller` null = every caller of the instance.
+   * Summary columns only (never input digest, view or meta).
+   */
+  pending(q: { caller: string | null; limit?: number; cursor?: string }, now: number): { items: PendingHoldRow[]; nextCursor: string | null } {
+    const limit = clampLimit(q.limit, HOLDS_PENDING_MAX);
+    const cur = decodeCursor(q.cursor);
+    const where = ["status = 'held'", "(expires_at IS NULL OR expires_at > ?)"];
+    const args: (string | number)[] = [now];
+    if (q.caller !== null) {
+      where.push("caller_id = ?");
+      args.push(q.caller);
+    }
+    if (cur) {
+      where.push("(created_at > ? OR (created_at = ? AND id > ?))");
+      args.push(cur.at, cur.at, cur.id);
+    }
+    const rows = this.#db
+      .prepare(
+        `SELECT id, op, hold_family, hold_reason, held_by, summary, caller_type, caller_id, caller_name, created_at FROM tb_receipts
+          WHERE ${where.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`,
+      )
+      .all(...args, limit + 1) as Row[];
+    const items = rows.slice(0, limit).map(
+      (r): PendingHoldRow => ({
+        id: String(r.id),
+        op: String(r.op),
+        family: (r.hold_family as Receipt["holdFamily"]) ?? null,
+        reason: holdReasonOf(r.hold_reason, r.hold_family),
+        heldBy: (r.held_by as string | null) ?? null,
+        summary: String(r.summary),
+        caller: { type: String(r.caller_type) as "agent" | "app", id: String(r.caller_id) as Receipt["caller"]["id"], name: String(r.caller_name) },
+        createdAt: Number(r.created_at),
+      }),
+    );
+    const last = items.at(-1);
+    return { items, nextCursor: rows.length > limit && last ? encodeCursor(last.createdAt, last.id) : null };
   }
 
   // ── internal (SDK only) ──
@@ -129,7 +213,7 @@ export class Receipts implements ReceiptStore {
     this.#db
       .prepare(
         `INSERT INTO tb_receipts (id, call_id, caller_type, caller_id, caller_name, op, effect, hold_family, status, input_digest,
-          summary, meta, idempotency_key, view, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -148,6 +232,8 @@ export class Receipts implements ReceiptStore {
         n.view ?? null,
         now,
         n.expiresAt ?? null,
+        n.heldBy ?? null,
+        n.holdReason ?? null,
       );
     return this.getSync(id) as Receipt;
   }
@@ -196,7 +282,8 @@ export class Receipts implements ReceiptStore {
     return Number((this.#db.prepare("SELECT COUNT(*) AS n FROM tb_receipts WHERE status = 'held'").get() as Row).n);
   }
 
-  /** Expires pending holds (→ denied by "expiry"), drops views of lapsed approvals, purges old rows and keys. */
+  /** Expires pending holds (→ denied by "expiry"), drops views of lapsed approvals, purges old rows and keys. `expired`
+   *  > 0 → the caller pushes the status (v0.1.13: statusChanged on hold expiry). */
   sweep(now: number): { expired: number } {
     const expired = Number(
       this.#db

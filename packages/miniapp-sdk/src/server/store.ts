@@ -58,6 +58,13 @@ CREATE INDEX tb_audit_order ON tb_audit (at, id);
     name: "sdk_app_secrets",
     sql: "CREATE TABLE tb_secrets (name TEXT PRIMARY KEY, sealed TEXT NOT NULL, updated_at INTEGER NOT NULL) STRICT;",
   },
+  {
+    // v0.1.13 (G1): `held_by` = Receipt.heldBy (`<product>/<hookId>` of the before hook whose verdict held the call);
+    // `hold_reason` = the hook verdict reason or the SDK hold reason code (tb.hold_status / tb.holds_pending). Old rows: null.
+    version: 3,
+    name: "sdk_receipt_held_by",
+    sql: "ALTER TABLE tb_receipts ADD COLUMN held_by TEXT;\nALTER TABLE tb_receipts ADD COLUMN hold_reason TEXT;",
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {

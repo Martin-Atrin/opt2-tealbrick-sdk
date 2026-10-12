@@ -170,6 +170,27 @@ export class TrustState {
     return this.slice?.agents.find((a) => a.id === id);
   }
 
+  /** v0.1.13 (C86): Portal GUI origin from the slice (no trailing `/`), null until a slice carries one. */
+  get portalUrl(): string | null {
+    const u = this.slice?.portalUrl;
+    return typeof u === "string" && /^https?:\/\/[^/?#\s]+\/?$/.test(u) ? u.replace(/\/$/, "") : null;
+  }
+
+  /**
+   * Companion grant targets `{product, ins}` from the verified slice (Core fills it).
+   * SPEC-GAP: spec 0.1.14 InstanceSlice.companionTargets — not in the 0.1.13 types; malformed entries are skipped.
+   */
+  companionTargets(): { product: string; ins: string }[] {
+    const raw = (this.slice as (InstanceSlice & { companionTargets?: unknown }) | null)?.companionTargets;
+    if (!Array.isArray(raw)) return [];
+    const out: { product: string; ins: string }[] = [];
+    for (const t of raw as unknown[]) {
+      const e = t as { product?: unknown; ins?: unknown } | null;
+      if (e && typeof e === "object" && typeof e.product === "string" && e.product !== "" && typeof e.ins === "string" && e.ins !== "") out.push({ product: e.product, ins: e.ins });
+    }
+    return out;
+  }
+
   /**
    * Verifies and installs a slice (`rev` must increase). The first slice teaches `ws` (ClaimResponse carries none).
    * Key-set rule first (CREDENTIALS §9.5, `trustedPortalKeys`): a slice carrying `portalKeySet` is verified against the

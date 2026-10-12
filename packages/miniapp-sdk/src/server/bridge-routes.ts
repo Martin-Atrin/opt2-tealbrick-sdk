@@ -1,7 +1,7 @@
 // Grantless bridge→app routes (SDK-API §3.2): hook calls (`verifyHookProof`) and the bridge ops catalog, resolve,
 // mark, scope-summary (`verifyBridgeOpProof`, C16 B5). No receipts, no hooks, no agent action.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { digest, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
+import { bridgeOpBinding, digest, mcpToolName, toolNameFits, verifyBridgeOpProof, verifyHookProof } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type HookRequest, type ScopeSummaryResult } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeOp } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, HOOK_PHASES, type Operation } from "@opt2-tealbrick/spec/manifest";
@@ -113,12 +113,9 @@ export async function handleBridgeOp(rt: Runtime, req: IncomingMessage, res: Ser
     const trust = ready(rt);
     const body = await readJson(req);
     if (!isObj(body)) throw new TbError("input_invalid", "body must be an object", 400);
-    // Bound claims per SDK-API §3.2: catalog {op}, resolve {op, in}, mark {in}, scope_summary {}.
-    // SPEC-GAP: CREDENTIALS §10 describes `in` generically; the catalog row of SDK-API §3.2 lists only `op`.
-    const op = typeof body.op === "string" ? body.op : "";
-    const bind =
-      bop === "catalog" ? { bop, op } : bop === "resolve" ? { bop, op, inputDigest: digest(body as Json) } : bop === "mark" ? { bop, inputDigest: digest(body as Json) } : { bop };
-    const proof = verifyBridgeOpProof(header(req, BRIDGE_HEADERS.callProof) ?? "", trust, bind, rt.replay);
+    // THE binding rule (SDK-API §3.2, C91), shared with the bridge and conformance: catalog {op}, resolve {op, in},
+    // mark {in}, scope_summary {}.
+    const proof = verifyBridgeOpProof(header(req, BRIDGE_HEADERS.callProof) ?? "", trust, bridgeOpBinding(bop, body as Json), rt.replay);
     if (!proof.ok) throw new TbError("call_proof_invalid", "bridge-op proof missing or not valid", 401);
     switch (bop) {
       case "catalog": {
