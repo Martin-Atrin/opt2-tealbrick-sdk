@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { isValidLaunchPath, keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
+import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519PublicJwk, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { App, AppDefinition, HealthStatus, HoldDecideInput, OperationView, PersonPrincipal, Receipt, RunningApp, SliceAgent } from "@opt2-tealbrick/spec/sdk";
@@ -208,7 +209,8 @@ export async function startApp(
   const companionTargets = (): string[] => [...new Set(trust.companionTargets().map((t) => t.product))].sort();
   const statusChanged = (): void => pusher.request();
   const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
-  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets, appsPolicy });
+  const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
+  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets, appsPolicy, agentScopeRequest });
   /** Fleet: last agent list handed to events.agentsChanged in this process (null = none yet since boot) */
   let notifiedAgents: string | null = null;
   const keys = createKeys({
@@ -307,6 +309,7 @@ export async function startApp(
     ownerLink,
     companionTargets,
     appsPolicy,
+    agentScopeRequest,
     eventContext,
     async notifyAgents() {
       const agents = trust.slice?.agents;

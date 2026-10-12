@@ -425,6 +425,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
     assert.equal(ctx.ownerLink("/holds/x"), null);
     assert.deepEqual(ctx.companionTargets(), []);
     assert.equal(ctx.appsPolicy(), null, "v0.1.15 (C105a): no appsPolicy in the slice → null");
+    assert.equal(ctx.agentScopeRequest(b.w.agents.a), null, "v0.1.18: no scopeRequest → null");
     for (const bad of ["//evil.example/x", "https://evil.example", "/a/../b", "/a\\b", "relative", ""]) {
       assert.throws(
         () => ctx.ownerLink(bad),
@@ -438,6 +439,10 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
         grants: [peerGrant, alphaGrant],
         portalUrl: "https://portal.example/",
         appsPolicy: { held: ["destructive", "money", "first_contact"] },
+        agents: [
+          { id: b.w.agents.a, name: "Agent A", mode: "free", status: "active", scopeRequest: { product: PRODUCT, kind: "connect_inbox", createName: "Team inbox" } },
+          { id: b.w.agents.b, name: "Agent B", mode: "free", status: "active", scopeRequest: { product: "other", kind: "buzz_channel", id: "c1" } },
+        ],
         companionTargets: [
           { product: "zeta", ins: `ins_${ulid()}` },
           { product: "alpha", ins: alphaIns },
@@ -450,6 +455,9 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
     assert.equal(ctx.ownerLink("/holds/hld_1?tab=a b"), `https://portal.example/w/${b.w.ws}/open?product=${PRODUCT}&path=${encodeURIComponent("/holds/hld_1?tab=a b")}`);
     assert.deepEqual(ctx.companionTargets(), ["alpha", PEER, "zeta"].sort());
     assert.deepEqual(ctx.appsPolicy(), ["destructive", "money", "first_contact"]);
+    // v0.1.18 (C106a, Connect F21): scopeRequest of this product only
+    assert.deepEqual(ctx.agentScopeRequest(b.w.agents.a), { product: PRODUCT, kind: "connect_inbox", createName: "Team inbox" });
+    assert.equal(ctx.agentScopeRequest(b.w.agents.b), null, "a request for another product is not returned");
     // same agents → no agentsChanged
     assert.equal(b.agentsChanged.length, before);
     // OpContext has both too
@@ -479,7 +487,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
   });
 
   test("Fleet: agentsChanged once after boot, on rename/pause/removal only; EventContext is complete; once again after a restart", async () => {
-    const ctxKeys = ["appsPolicy", "callApp", "companionTargets", "db", "log", "ownerLink", "scopes", "statusChanged"];
+    const ctxKeys = ["agentScopeRequest", "appsPolicy", "callApp", "companionTargets", "db", "log", "ownerLink", "scopes", "statusChanged"];
     assert.ok(b.agentsChanged.length >= 1);
     assert.deepEqual(b.agentsChanged[0]?.ctxKeys, ctxKeys);
     const n = b.agentsChanged.length;

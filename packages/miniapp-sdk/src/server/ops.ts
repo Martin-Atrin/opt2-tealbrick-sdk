@@ -149,6 +149,7 @@ function buildContext(
     // v0.1.14 addition (SPEC-GAP: InstanceSlice.companionTargets)
     companionTargets: () => rt.companionTargets(),
     appsPolicy: () => rt.appsPolicy(),
+    agentScopeRequest: (agt: string) => rt.agentScopeRequest(agt),
   };
 }
 
@@ -500,7 +501,7 @@ async function runStandardPersonOp(rt: Runtime, principal: PersonPrincipal, id: 
     case "tb.agents_list": {
       const agents = rt.trust.slice?.agents ?? [];
       const out: Json[] = [];
-      for (const a of agents) out.push({ ...a, access: (await rt.scopes.list(a.id)) as unknown as Json });
+      for (const a of agents) out.push({ id: a.id, name: a.name, mode: a.mode, status: a.status, access: (await rt.scopes.list(a.id)) as unknown as Json });
       return { agents: out };
     }
     case "tb.scopes_set": {

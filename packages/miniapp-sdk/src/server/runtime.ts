@@ -1,5 +1,6 @@
 // Internal runtime shared by the route modules of one running app (not exported from the package).
 import type { Ed25519KeyPair, ReplayGuard } from "@opt2-tealbrick/manifest";
+import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { AuditLog, BackupApi, CompanionResult, Db, HealthStatus, Json, Logger, OperationView, SliceAgent } from "@opt2-tealbrick/spec/sdk";
@@ -63,6 +64,8 @@ export interface Runtime {
   companionTargets(): string[];
   /** v0.1.15 (C105a) */
   appsPolicy(): readonly string[] | null;
+  /** v0.1.18 (C106a) */
+  agentScopeRequest(agt: string): ScopeRequest | null;
   /** v0.1.13: the ctx every event handler gets */
   eventContext(): SdkEventContext;
   /** v0.1.13 (Fleet): events.agentsChanged when the slice's agents differ from the last notified list (and once after boot) */

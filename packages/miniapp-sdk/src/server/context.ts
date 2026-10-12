@@ -1,5 +1,6 @@
 // Context members added by Coordinator C31 on top of types/sdk.ts §B (SPEC-GAP until the spec package declares them):
 // `publicUrl` (slice `bridge.publicUrl`), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
+import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { AppDefinition, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
@@ -28,6 +29,8 @@ export interface CompanionTargetsView {
   /** v0.1.15 (C105a): the workspace apps policy's held families from the slice (display only; enforcement is the
    *  companion grant `held` claim at the target app), or null when the slice has none */
   appsPolicy(): readonly string[] | null;
+  /** v0.1.18 (C106a, Connect F21): the slice's `agents[].scopeRequest` for `agt` when it targets THIS product, else null */
+  agentScopeRequest(agt: string): ScopeRequest | null;
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */

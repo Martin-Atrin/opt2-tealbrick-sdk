@@ -14,7 +14,7 @@ import {
   verifyJws,
   verifySlice,
 } from "@opt2-tealbrick/manifest";
-import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
+import type { InstanceSlice, ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import { type BridgeId, type Ed25519PublicJwk, type InstanceId, type InstanceRef, LIFETIME_S, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { metaDelete, metaGet, metaSet, type RawDb } from "./store.ts";
@@ -188,6 +188,12 @@ export class TrustState {
     const raw = this.slice?.companionCallers;
     if (!Array.isArray(raw)) return [];
     return raw.filter((e) => e && typeof e.product === "string" && typeof e.ins === "string" && typeof e.name === "string" && e.name !== "").map((e) => ({ product: e.product, ins: e.ins, name: e.name }));
+  }
+
+  /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */
+  agentScopeRequest(agt: string, product: string): ScopeRequest | null {
+    const r = this.slice?.agents.find((a) => a.id === agt)?.scopeRequest;
+    return r && r.product === product ? { product: r.product, kind: r.kind, ...(r.id !== undefined ? { id: r.id } : {}), ...(r.createName !== undefined ? { createName: r.createName } : {}) } : null;
   }
 
   /** v0.1.15 (C105a): slice `appsPolicy.held`, or null */
