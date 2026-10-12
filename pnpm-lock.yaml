@@ -21,8 +21,8 @@ importers:
         specifier: workspace:*
         version: link:../miniapp-sdk
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz
     devDependencies:
       '@types/node':
         specifier: 24.19.2
@@ -47,8 +47,8 @@ importers:
   packages/manifest:
     dependencies:
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz
       ajv:
         specifier: 8.17.1
         version: 8.17.1
@@ -66,8 +66,8 @@ importers:
         specifier: workspace:*
         version: link:../manifest
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz
     devDependencies:
       '@types/node':
         specifier: 24.19.2
@@ -143,9 +143,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz':
-    resolution: {integrity: sha512-mwB7Sm5N+xh3odtbB2jiM27OgBBkxpXnTM174FusA8S/01PQBNOZhXdxyBJmW069Rt3UE4a4LMza6+1Ay6v2IQ==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz}
-    version: 0.1.15
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz':
+    resolution: {integrity: sha512-2ec0MfbFz6OONFTMKUCZ4f2ev0MW9DkuzVST+0EOluW3AqtQz1hHmcYnm/UsgtBG4nxWszxtr/1u2gZNy2asiA==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz}
+    version: 0.1.16
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -354,7 +354,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.15':
     optional: true
 
-  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz': {}
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.16/opt2-tealbrick-spec-0.1.16.tgz': {}
 
   '@types/node@24.19.2':
     dependencies:

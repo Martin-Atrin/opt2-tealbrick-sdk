@@ -407,7 +407,9 @@ function operationRules(m: Manifest, add: Add): void {
           ? hf === "destructive"
           : op.effect === "money"
             ? hf === "money"
-            : hf === undefined || hf === "first_contact" || hf === "profile_change" || hf === "live_call";
+            : // outward (v0.1.16 C107: + outward, identity). An ABSENT family is still accepted for one release (Core keeps
+              // deploying current manifests); conformance 0.1.11 warns (M2.outward_family) and manifest 0.1.12 refuses it.
+              hf === undefined || hf === "first_contact" || hf === "profile_change" || hf === "live_call" || hf === "outward" || hf === "identity";
     if (!hfOk) add("M-OP-4", "hold_family_invalid", `${p}/holdFamily`, `holdFamily ${hf ?? "(absent)"} invalid for effect ${op.effect}`);
 
     if (op.crud.includes("create") && op.idempotency !== "required") {
