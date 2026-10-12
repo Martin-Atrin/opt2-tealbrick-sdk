@@ -47,8 +47,8 @@ importers:
   packages/manifest:
     dependencies:
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.21/opt2-tealbrick-spec-0.1.21.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.21/opt2-tealbrick-spec-0.1.21.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.22/opt2-tealbrick-spec-0.1.22.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.22/opt2-tealbrick-spec-0.1.22.tgz
       ajv:
         specifier: 8.17.1
         version: 8.17.1
@@ -146,6 +146,10 @@ packages:
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.21/opt2-tealbrick-spec-0.1.21.tgz':
     resolution: {integrity: sha512-YVSPqcq9jT1+zXmVuK4UvP0hvVxU2+Yau7pJU4VPUNgCl5Mw2P8+rYVbzOfs1BeBsiO3mqLM2XAaJo9SZrUnlw==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.21/opt2-tealbrick-spec-0.1.21.tgz}
     version: 0.1.21
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.22/opt2-tealbrick-spec-0.1.22.tgz':
+    resolution: {integrity: sha512-clKj6Bm3bRyv4LQK0H1ASCRBPLksPApq/+1Y0UVjSrKW7rFPJcaSO1xwnlhKtXsKYGxd/MmgnvZMXN3tOhk3Ig==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.22/opt2-tealbrick-spec-0.1.22.tgz}
+    version: 0.1.22
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -355,6 +359,8 @@ snapshots:
     optional: true
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.21/opt2-tealbrick-spec-0.1.21.tgz': {}
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.22/opt2-tealbrick-spec-0.1.22.tgz': {}
 
   '@types/node@24.19.2':
     dependencies:

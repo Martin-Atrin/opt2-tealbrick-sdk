@@ -70,3 +70,17 @@ test("deriveIdempotencyKey (C98): stable within the 10-min bucket, differs by se
     assert.notEqual(deriveIdempotencyKey({ ...base, ...other }), k, JSON.stringify(other));
   }
 });
+
+test("normalizeTag / tagsMatch (G5): trim + lower case on both sides; anyOf at least one, noneOf none", async () => {
+  const { normalizeTag, tagsMatch } = await import("../src/index.ts");
+  assert.equal(normalizeTag("  Work "), "work");
+  assert.equal(tagsMatch(undefined, []), true);
+  assert.equal(tagsMatch({ anyOf: ["Work"] }, ["work", "x"]), true);
+  assert.equal(tagsMatch({ anyOf: ["work"] }, [" WORK "]), true);
+  assert.equal(tagsMatch({ anyOf: ["work"] }, ["home"]), false);
+  assert.equal(tagsMatch({ anyOf: ["work"] }, []), false);
+  assert.equal(tagsMatch({ anyOf: [] }, ["home"]), true, "empty anyOf = no anyOf filter");
+  assert.equal(tagsMatch({ noneOf: ["Secret"] }, ["secret"]), false);
+  assert.equal(tagsMatch({ noneOf: ["secret"] }, []), true);
+  assert.equal(tagsMatch({ anyOf: ["work"], noneOf: ["secret"] }, ["work", "Secret"]), false);
+});
