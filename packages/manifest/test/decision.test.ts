@@ -167,3 +167,18 @@ test("gate + authorize v0.1.13 (G4): tb.holds_pending needs only a valid grant (
   assert.equal(gate(gateIn({ op: view })).decision, "pass");
   assert.equal(gate(gateIn({ op: view, grant: bad })).reason, "grant_invalid");
 });
+
+test("C111a (spec 0.1.19): a non-empty wf limits ops in ANY mode; caps apply in any mode", async () => {
+  const free = await setup({ mode: "free", wf: ["notes_search"], crud: ["read", "create"], caps: { write: { max: 1, per: "hour" } } });
+  const view = (id: string, crud: ("read" | "create")[], effect: "read" | "write") => ({ standard: false as const, id, title: id, description: id, crud, effect, audience: "agent" as const, idempotency: "none" as const, receipt: false, input: { type: "object" as const }, output: { type: "object" as const }, scopeType: "area" }) as unknown as OperationView;
+  assert.equal(gate(free.gateIn({ op: view("notes_search", ["read"], "read") })).decision, "pass");
+  assert.deepEqual(gate(free.gateIn({ op: view("notes_add", ["create"], "write") })), { decision: "refuse", reason: "not_in_workflow" });
+  // Free with an empty wf keeps verb-level access
+  const open = await setup({ mode: "free", wf: [], crud: ["read", "create"] });
+  assert.equal(gate(open.gateIn({ op: view("notes_add", ["create"], "write") })).decision, "pass");
+  // caps still apply to a Free op-limited grant (authorize)
+  const add = { id: "notes_search", crud: ["create"] as "create"[], effect: "write" as const, scopeType: "area" };
+  const access = { level: "rw", crud: ["read", "create"] as ("read" | "create")[] };
+  assert.equal(authorize(free.authIn({ op: add, access, usage: { write: 0 } })).decision, "run");
+  assert.deepEqual(authorize(free.authIn({ op: add, access, usage: { write: 1 } })), { decision: "hold", reason: "caps_exceeded", holdFamily: "caps" });
+});

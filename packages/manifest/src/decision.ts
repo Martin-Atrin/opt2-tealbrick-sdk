@@ -32,8 +32,9 @@ const subset = (a: readonly CrudAction[], b: readonly CrudAction[]) => a.every((
 
 /**
  * Bridge, every routed call: (1) paused (workspace, agent, connection, instance) → refuse; (2) `verifyGrant` → refuse
- * with its code; (3) `op.crud ⊆ grant.crud`, agent audience, `scopeType` declared by the target manifest; (4) Bound:
- * `op.id ∈ grant.wf`. `tb.hold_status` needs only a valid grant (I4): it skips (3) and (4).
+ * with its code; (3) `op.crud ⊆ grant.crud`, agent audience, `scopeType` declared by the target manifest; (4) Bound or non-empty `wf`:
+ * `op.id ∈ grant.wf` — v0.1.19 (C111a): also for a Free grant whose `wf` is non-empty. `tb.hold_status` and
+ * `tb.holds_pending` need only a valid grant (I4): they skip (3) and (4).
  */
 export function gate(input: GateInput): GateDecision {
   const p = input.paused;
@@ -46,7 +47,8 @@ export function gate(input: GateInput): GateDecision {
   if (op.audience !== "agent") return { decision: "refuse", reason: DECISION_REASON.audienceNotAgent };
   const scopeType = op.standard ? undefined : op.scopeType;
   if (scopeType !== undefined && !input.declaredScopeTypes.includes(scopeType)) return { decision: "refuse", reason: DECISION_REASON.scopeTypeUnknown };
-  if (g.claims.mode === "bound" && !g.claims.wf.includes(op.id)) return { decision: "refuse", reason: DECISION_REASON.notInWorkflow };
+  // v0.1.19 (C111a): `wf`, when non-empty, limits ops in ANY mode (bound grants always carry a non-empty wf)
+  if ((g.claims.mode === "bound" || g.claims.wf.length > 0) && !g.claims.wf.includes(op.id)) return { decision: "refuse", reason: DECISION_REASON.notInWorkflow };
   return { decision: "pass", reason: DECISION_REASON.pass };
 }
 
@@ -55,7 +57,7 @@ export function gate(input: GateInput): GateDecision {
  * → refuse with its code; (2) `op.crud ⊆ grant.crud`, and `⊆ access.crud` when the op has a `scopeType` (no access →
  * refuse) → else `scope_denied`; (2b, v0.1.13 G1) a hook hold verdict (proof `hv`) → hold with its family, `heldBy`;
  * (3) effect `money` (always) or `holdFamily ∈ grant.held` → hold; (4) Free caps:
- * `usage[effect] ≥ caps[effect].max` → hold `caps`; (5) run. An approved hold for this exact call (C8: once per call)
+ * `usage[effect] ≥ caps[effect].max` → hold `caps` (v0.1.19 C111a: in ANY mode, whenever `caps` has the effect); (5) run. An approved hold for this exact call (C8: once per call)
  * skips (2b), (3) and (4). `tb.hold_status` and `tb.holds_pending` skip (2) (I4).
  */
 export function authorize(input: AuthorizeInput): Decision {
