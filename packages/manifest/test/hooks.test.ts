@@ -79,7 +79,12 @@ test("normalizeTag / tagsMatch (G5): trim + lower case on both sides; anyOf at l
   assert.equal(tagsMatch({ anyOf: ["work"] }, [" WORK "]), true);
   assert.equal(tagsMatch({ anyOf: ["work"] }, ["home"]), false);
   assert.equal(tagsMatch({ anyOf: ["work"] }, []), false);
-  assert.equal(tagsMatch({ anyOf: [] }, ["home"]), true, "empty anyOf = no anyOf filter");
+  // C115: an EMPTY anyOf passes nothing (Rules' disjoint merge); absent anyOf is no constraint
+  assert.equal(tagsMatch({ anyOf: [] }, ["home"]), false, "empty anyOf passes nothing");
+  assert.equal(tagsMatch({ anyOf: [] }, []), false);
+  assert.equal(tagsMatch({ anyOf: [], noneOf: ["x"] }, ["home"]), false, "empty anyOf + noneOf still passes nothing");
+  assert.equal(tagsMatch({ noneOf: ["x"] }, ["home"]), true, "absent anyOf = no anyOf constraint");
+  assert.equal(tagsMatch({}, ["home"]), true, "no lists = no constraint");
   assert.equal(tagsMatch({ noneOf: ["Secret"] }, ["secret"]), false);
   assert.equal(tagsMatch({ noneOf: ["secret"] }, []), true);
   assert.equal(tagsMatch({ anyOf: ["work"], noneOf: ["secret"] }, ["work", "Secret"]), false);

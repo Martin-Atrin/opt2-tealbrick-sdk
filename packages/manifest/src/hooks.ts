@@ -148,14 +148,15 @@ export function normalizeTag(tag: string): string {
 }
 
 /**
- * v0.1.22 (G5): THE `rules.narrowing` tag comparison. `memoryTags.anyOf` given and non-empty → at least one normalised
- * item tag is in it; `noneOf` → no normalised item tag is in it; absent `memoryTags` → true. Callers handle items whose
+ * v0.1.23 (G5, C115): THE `rules.narrowing` tag comparison. `memoryTags.anyOf` PRESENT (even empty) → at least one
+ * normalised item tag is in it, so an empty `anyOf` passes NOTHING (Rules emits it for a disjoint merge; treating it as "no
+ * constraint" would widen access, L13); `noneOf` → no normalised item tag is in it; absent `memoryTags` / absent `anyOf` →
+ * no anyOf constraint. Callers handle items whose
  * tags are UNKNOWN themselves (dropped under any narrowing, §18 point 4) — an empty `tags` array means "no tags".
  */
 export function tagsMatch(memoryTags: { anyOf?: readonly string[]; noneOf?: readonly string[] } | undefined, tags: readonly string[]): boolean {
   if (!memoryTags) return true;
   const have = new Set(tags.map(normalizeTag));
-  const any = (memoryTags.anyOf ?? []).map(normalizeTag);
-  if (any.length > 0 && !any.some((t) => have.has(t))) return false;
+  if (memoryTags.anyOf !== undefined && !memoryTags.anyOf.map(normalizeTag).some((t) => have.has(t))) return false;
   return !(memoryTags.noneOf ?? []).map(normalizeTag).some((t) => have.has(t));
 }
