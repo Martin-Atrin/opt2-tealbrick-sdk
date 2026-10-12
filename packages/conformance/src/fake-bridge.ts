@@ -258,7 +258,9 @@ export class FakeBridge {
 
   /** Signs a new slice (`rev` + 1) with the active Portal key and wakes the status long-polls. */
   async rebuildSlice(): Promise<number> {
-    this.sliceRev++;
+    // the revision and the signed slice change together (after the async sign): a long-poll that wakes or times out
+    // meanwhile must never answer the old slice under the new revision (race seen in slower CI runners)
+    const rev = this.sliceRev + 1;
     const now = nowS();
     this.revoked = this.revoked.filter((r) => r.exp > now);
     const body = {
@@ -268,7 +270,7 @@ export class FakeBridge {
       aud: `tb:ins:${this.ids.ins}` as const,
       iat: now,
       ws: this.ids.ws,
-      rev: this.sliceRev,
+      rev,
       ins: this.ids.ins,
       product: this.manifest.id,
       portalKeys: this.portalKeys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })),
@@ -279,9 +281,11 @@ export class FakeBridge {
       grants: await this.companionGrants(),
       agents: this.agentEntries(),
     };
-    this.slice = await signSlice(body, this.activePortalKey());
+    const signedSlice = await signSlice(body, this.activePortalKey());
+    this.slice = signedSlice;
+    this.sliceRev = rev;
     this.wake();
-    return this.sliceRev;
+    return rev;
   }
 
   wake(): void {

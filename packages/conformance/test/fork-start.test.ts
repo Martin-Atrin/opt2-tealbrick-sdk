@@ -3,7 +3,7 @@
 // the runner, each (re)start is a fresh child, and boot failures surface as clear errors.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -75,6 +75,8 @@ describe("CLI --start runs the app in a child process", () => {
 
   it("root CI: CLI app --start on the real miniapp-sdk startApp (uid drop) still writes --report into a root-owned dir", { skip: process.getuid?.() !== 0 ? "not root: the SDK only drops privileges when started as root (runs in root CI containers)" : false }, async () => {
     const dir = tmp("tbconf-root-");
+    // app files must be readable by the dropped app (as in an image); mkdtemp creates 0700. The report dir stays 0700.
+    chmodSync(dir, 0o755);
     try {
       const { fixtureManifest } = (await import(new URL("../../miniapp-sdk/test/fixtures/manifest.ts", import.meta.url).href)) as { fixtureManifest(port: number): unknown };
       const mPath = join(dir, "manifest.json");
