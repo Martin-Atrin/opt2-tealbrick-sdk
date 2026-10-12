@@ -41,7 +41,7 @@ export async function runManifestTarget(opts: ManifestTargetOptions): Promise<Re
     ...(opts.expectDigest ? { expectDigest: opts.expectDigest } : {}),
     ...(opts.repoDir ? { repoDir: opts.repoDir } : {}),
   });
-  return buildReport({ target: "manifest", subject: opts.manifestPath, startedAt, checks: r.results });
+  return buildReport({ target: "manifest", subject: opts.manifestPath, startedAt, checks: r.results, notes: r.notes });
 }
 
 const PENDING: Record<Exclude<Target, "app" | "manifest">, readonly PendingCheck[]> = { bridge: BRIDGE_CHECKS, relay: RELAY_CHECKS, core: CORE_CHECKS };

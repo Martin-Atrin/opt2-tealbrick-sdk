@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
 import {
+  DEFAULT_HELD_FAMILIES,
   digest,
   type Ed25519KeyPair,
   generateKeyPair,
@@ -85,6 +86,15 @@ describe("fake bridge: claim", () => {
     assert.ok(sl.ok);
     assert.equal(sl.ok && sl.slice.agents.length, 3);
     assert.equal(sl.ok && sl.slice.grants.length, 1, "one companion grant per manifest companion");
+    // spec 0.1.15 slice shape (C90, C102, C105a): companionTargets per grant, companionCallers, appsPolicy; the companion
+    // grant holds appsPolicy.held = DEFAULT_HELD_FAMILIES (CORE I8)
+    assert.ok(sl.ok);
+    if (sl.ok) {
+      assert.deepEqual(sl.slice.companionTargets, [{ product: "conf-peer", ins: b.ids.peers["conf-peer"] }]);
+      assert.deepEqual(sl.slice.companionCallers, []);
+      assert.deepEqual(sl.slice.appsPolicy, { held: [...DEFAULT_HELD_FAMILIES] });
+      assert.deepEqual((peek(sl.slice.grants[0] as string) as { held: string[] }).held, [...DEFAULT_HELD_FAMILIES]);
+    }
     const again = await post(`${b.url}/tb/v1/claim`, claimBody(b, key));
     assert.equal(again.status, 403);
     assert.equal((again.body.error as { code: string }).code, "code_invalid");
@@ -191,6 +201,26 @@ describe("fake bridge: control + mint", () => {
     assert.equal(sl.revoked.jtis[0].jti, "01JA2B3C4D5E6F7G8H9JKMNPQR");
     assert.equal(sl.personNbf, 1234);
     assert.equal(sl.bridge.keys.length, 2);
+  });
+
+  it("C102 / C105a: listed app callers and the apps policy land in the slice; client grants default to the card / apps policy", async () => {
+    const ins = "ins_01JA2B3C4D5E6F7G8H9JKMNPQR" as const;
+    await b.control.listCompanionCaller({ product: "tbconf-caller", ins, name: "Caller app" });
+    await b.control.setAppsPolicy(["money"]);
+    const sl = peek(b.slice as string) as unknown as InstanceSlice;
+    assert.deepEqual(sl.companionCallers, [{ product: "tbconf-caller", ins, name: "Caller app" }]);
+    assert.deepEqual(sl.appsPolicy, { held: ["money"] });
+    assert.deepEqual((peek(sl.grants[0] as string) as { held: string[] }).held, ["money"]);
+    // AppClient: an agent grant holds DEFAULT_HELD_FAMILIES, an app-caller grant the apps policy (nothing is sent: unreachable URL)
+    const client = b.client("http://127.0.0.1:9");
+    const asAgent = await client.callOp("item_get", { space: "s", id: "i" }).catch((e: unknown) => e);
+    const asApp = await client.callOp("item_get", { space: "s", id: "i" }, { caller: ins }).catch((e: unknown) => e);
+    void asAgent;
+    void asApp;
+    const sent = b.captured.filter((x) => x.dir === "app-out" && x.path === "/tb/v1/ops/item_get").slice(-2);
+    const held = sent.map((x) => (peek(String(x.headers.authorization).replace(/^Bearer /, "")) as { held: string[] }).held);
+    assert.deepEqual(held, [[...DEFAULT_HELD_FAMILIES], ["money"]]);
+    await b.control.setAppsPolicy(DEFAULT_HELD_FAMILIES);
   });
 
   it("minted grants, proofs and tickets verify with the manifest verifiers", async () => {

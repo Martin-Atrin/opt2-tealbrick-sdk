@@ -3,7 +3,7 @@
 // and gate order (B8, B5, B13), hooks (B6), dynamic tools and limits (B16), companion calls, claims and status
 // (B18, §5 version matrix). Part 2 (keys, OAuth, config, pause, Portal-down, re-enrolment, standalone, scans) is in
 // bridge-flows.ts. Every check asserts an observed value; nothing passes by default.
-import { activeKeyRequirements, digest, renderSkill, signAssertion, signInstanceAssertion, thumbprint, ulid, verifyAgentSession } from "@opt2-tealbrick/manifest";
+import { activeKeyRequirements, DEFAULT_HELD_FAMILIES, digest, KNOWN_HOLD_FAMILIES, renderSkill, signAssertion, signInstanceAssertion, thumbprint, ulid, verifyAgentSession } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type ClaimResponse, type EnrolRequest, TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, type InstanceId, LIFETIME_S, OAUTH_GRANT_TYPES, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { DynamicCatalogEntry, Operation, Skill } from "@opt2-tealbrick/spec/manifest";
@@ -484,7 +484,10 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
   });
   // C98 (spec 0.1.14, BRIDGE §7.2): model-driven clients cannot set `_meta`; the bridge derives the key from
   // (connection, MCP session, op, canonical input, 10-min bucket). Root cause recorded (L2): every earlier test set _meta.
-  await c.run("B8.idempotency_derived", "no _meta key on a required op → the bridge derives one; an identical retry is deduplicated", "call without _meta → ok with a non-empty forwarded idempotencyKey; identical retry (same session, same input) → same key; other input → other key", async () => {
+  // C98a (spec 0.1.15): the same rule for idempotency `supported` ops (a model-driven retry of a supported op is
+  // deduplicated too); `none` ops never get a key
+  const supported = c.pick(p, (o) => o.idempotency === "supported");
+  await c.run("B8.idempotency_derived", "no _meta key on a required or supported op → the bridge derives one; an identical retry is deduplicated (C98, C98a)", "required op without _meta → ok with a non-empty forwarded idempotencyKey; identical retry (same session, same input) → same key; other input → other key; a supported op (when the example manifest has one) → a non-empty key, the same on retry", async () => {
     if (!create) return bad("no idempotency: required op");
     const input = c.input(p, create.id);
     const s0 = c.w.seqNow();
@@ -497,8 +500,21 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
     const s2 = c.w.seqNow();
     const o = other === null ? null : await c.call("free", p, create.id, other, null);
     const k3 = other === null ? undefined : keyOf(lastOp(c, p, s2, create.id));
-    const pass = c.isOk(a) && c.isOk(b) && typeof k1 === "string" && k1.length > 0 && k1 === k2 && (other === null || (o !== null && k3 !== k1));
-    return verdict(pass, `first ${describeCall(a)} key ${k1 ? "derived" : "MISSING"}; retry ${describeCall(b)} key ${k2 === k1 ? "same" : "DIFFERENT"}; other input ${other === null ? "n/a" : k3 !== k1 ? "other key" : "SAME key"}`);
+    const requiredOk = c.isOk(a) && c.isOk(b) && typeof k1 === "string" && k1.length > 0 && k1 === k2 && (other === null || (o !== null && k3 !== k1));
+    let supportedOk = true;
+    let supShown = "supported op: n/a (none in the example manifest)";
+    if (supported) {
+      const sin = c.input(p, supported.id);
+      const t0 = c.w.seqNow();
+      const sa = await c.call("free", p, supported.id, sin, null);
+      const s1k = keyOf(lastOp(c, p, t0, supported.id));
+      const t1 = c.w.seqNow();
+      const sb = await c.call("free", p, supported.id, sin, null);
+      const s2k = keyOf(lastOp(c, p, t1, supported.id));
+      supportedOk = c.isOk(sa) && c.isOk(sb) && typeof s1k === "string" && s1k.length > 0 && s1k === s2k && s1k !== k1;
+      supShown = `supported ${supported.id}: ${describeCall(sa)} key ${s1k ? "derived" : "MISSING"}, retry ${describeCall(sb)} key ${s2k === s1k ? "same" : "DIFFERENT"}`;
+    }
+    return verdict(requiredOk && supportedOk, `first ${describeCall(a)} key ${k1 ? "derived" : "MISSING"}; retry ${describeCall(b)} key ${k2 === k1 ? "same" : "DIFFERENT"}; other input ${other === null ? "n/a" : k3 !== k1 ? "other key" : "SAME key"}; ${supShown}`);
   });
   await c.run("B8.input_invalid", "input failing the op schema → input_invalid", "isError input_invalid; the app is not called", async () => {
     const s0 = c.w.seqNow();
@@ -589,6 +605,34 @@ export async function callChecks(c: BridgeCtx): Promise<void> {
       return c.isOk(a) ? a : null;
     }, c.h.pauseLatencyMs);
     return verdict(!!r.value, r.value ? `ok after ${r.ms} ms` : "still refused");
+  });
+  // v0.1.17 (C108, tolerant reader): a newer Core may put a family into an agent grant's `held` that this bridge does
+  // not know; the grant stays valid (shape-checked, the unknown family ignored) and the call is forwarded
+  const spec = c.w.grantSpecs.find((x) => x.role === "free" && x.app === p);
+  const unknownFamily = "future_x";
+  await c.run("B5.grant_held_unknown", "an agent grant whose held names an unknown family is still honoured (C108)", `config grant (free agent → primary) with held [...DEFAULT_HELD_FAMILIES, ${unknownFamily}] → the read op is forwarded ok with that grant (never grant_invalid / no_grant)`, async () => {
+    if (!spec) return bad("no free-agent grant spec for the primary app");
+    spec.held = [...DEFAULT_HELD_FAMILIES, unknownFamily];
+    try {
+      await c.apply();
+      const g = c.w.grantFor("free", p) ?? "";
+      const r = await c.until(async () => {
+        const s0 = c.w.seqNow();
+        const a = await c.call("free", p, read.id);
+        const got = lastOp(c, p, s0, read.id);
+        return c.isOk(a) && got ? { a, got } : null;
+      }, c.h.pauseLatencyMs);
+      const v = r.value;
+      const carried = !!v && v.got.grant?.jti === peek(g)?.jti && ((peek(g)?.held as string[] | undefined) ?? []).includes(unknownFamily);
+      if (!v) {
+        const a = await c.call("free", p, read.id);
+        return bad(`${describeCall(a)} (the grant with held ${unknownFamily} was not honoured)`);
+      }
+      return verdict(carried, `${describeCall(v.a)}; forwarded grant ${carried ? `= the config grant (held …, ${unknownFamily})` : "is not the config grant"}`);
+    } finally {
+      delete spec.held;
+      await c.apply();
+    }
   });
 }
 
@@ -740,9 +784,17 @@ export async function dynamicChecks(c: BridgeCtx): Promise<void> {
     const body = cat ? (JSON.parse(cat.body) as { op?: unknown; query?: unknown }) : null;
     return verdict(c.isOk(a) && !!cat?.verified && body?.op === search.id && body.query === "conformance" && JSON.stringify(a.raw).includes(String(inside?.name)), `${describeCall(a)}; catalog ${cat ? `verified ${cat.verified}, op ${String(body?.op)}` : "not called"}`);
   });
+  // C107 (spec 0.1.16): outward / money resolutions must carry a holdFamily (the peer's search op ceiling is money)
+  const famEntry = KNOWN_HOLD_FAMILIES.find((f) => f === "first_contact") ?? KNOWN_HOLD_FAMILIES[0];
+  const resolutions: Record<string, Record<string, Json>> = {
+    entry_bad: { crud: ["delete"], effect: "destructive" },
+    entry_outward_fam: { crud: ["create"], effect: "outward", holdFamily: famEntry },
+    entry_outward_bare: { crud: ["create"], effect: "outward" },
+    entry_money_bare: { crud: ["create"], effect: "money" },
+  };
   peer.resolve = (b) => {
     const tool = String(b.tool ?? "");
-    return tool === "entry_bad" ? { tool, crud: ["delete"], effect: "destructive" } : { tool, crud: ["read"], effect: "read" };
+    return { tool, ...(resolutions[tool] ?? { crud: ["read"], effect: "read" }) };
   };
   await c.run("B16.dynamic_call_resolved", "_call resolved before gate() and forwarded to the dynamic op", "verified bridge-op resolve {op, tool}, then the op call carries {tool, arguments}", async () => {
     const s0 = c.w.seqNow();
@@ -757,6 +809,22 @@ export async function dynamicChecks(c: BridgeCtx): Promise<void> {
     const a = await c.callTool("free", d.call, { tool: "entry_bad", arguments: {} });
     const o = toolRefused(a, ["dynamic_ceiling_exceeded"]);
     return verdict(o.pass === true && !lastOp(c, peer, s0, search.id), `${o.asserted}; op calls ${c.since(peer, s0, "op").length}`);
+  });
+  await c.run("B16.resolve_family", "a resolve answer with effect outward or money and no holdFamily is refused (C107)", `_call of an entry resolved {effect outward, holdFamily ${famEntry}} → forwarded; resolved {effect outward} or {effect money} without holdFamily → isError dynamic_resolve_failed with details.reason family_missing, the op not called`, async () => {
+    const seen: string[] = [];
+    let pass = true;
+    for (const [tool, want] of [["entry_outward_fam", "forward"], ["entry_outward_bare", "refuse"], ["entry_money_bare", "refuse"]] as const) {
+      const s0 = c.w.seqNow();
+      const a = await c.callTool("free", d.call, { tool, arguments: {} });
+      const called = !!lastOp(c, peer, s0, search.id);
+      // C107 decision: refused as dynamic_resolve_failed with details.reason "family_missing" (BRIDGE v0.1.17)
+      const st = (a.structured ?? {}) as { error?: { code?: unknown; details?: { reason?: unknown } } };
+      const reasonOk = st.error?.code === "dynamic_resolve_failed" && st.error?.details?.reason === "family_missing";
+      const fine = want === "forward" ? c.isOk(a) && called : a.isError === true && !called && reasonOk;
+      pass &&= fine;
+      seen.push(`${tool}: ${describeCall(a)}, op ${called ? "called" : "not called"}${fine ? "" : " (WRONG)"}`);
+    }
+    return verdict(pass, seen.join("; "));
   });
   await c.run("B16.dynamic_entry_call", "list entry tool forwarded to its dynamic op", "op call on the list op with input {tool: entry, arguments}", async () => {
     const s0 = c.w.seqNow();

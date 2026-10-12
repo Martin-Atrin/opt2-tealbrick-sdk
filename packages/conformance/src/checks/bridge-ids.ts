@@ -57,7 +57,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B8.input_verbatim": "input forwarded verbatim; proof binds input and context",
     "B8.headers": "only grant + call proof authenticate the forward",
     "B8.idempotency_forwarded": "_meta idempotency key forwarded",
-    "B8.idempotency_derived": "no _meta key → derived key; identical retry deduplicated (C98)",
+    "B8.idempotency_derived": "no _meta key on a required or supported op → derived key; identical retry deduplicated (C98, C98a)",
     "B8.input_invalid": "input failing the schema → input_invalid",
     "B8.held": "held answer returned with the hold-status tool",
     "B8.app_error_passthrough": "app refusal codes pass through",
@@ -70,6 +70,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B5.grant_revoked": "revoked grant refused",
     "B5.paused_first": "pause checked before the grant",
     "B5.restored": "unpause / un-revoke restore the agent",
+    "B5.grant_held_unknown": "agent grant whose held names an unknown family still honoured (C108)",
   }),
   hooks: ids({
     "B6.order": "hook order before → context → op → after",
@@ -91,6 +92,7 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B16.search_uses_catalog": "_search answered through the catalog bridge op",
     "B16.dynamic_call_resolved": "_call resolved before gate() and forwarded",
     "B16.dynamic_ceiling_exceeded": "resolution outside the ceilings → dynamic_ceiling_exceeded",
+    "B16.resolve_family": "resolve answer with effect outward / money and no holdFamily refused (C107)",
     "B16.dynamic_entry_call": "list entry tool forwarded to its dynamic op",
   }),
   companion: ids({

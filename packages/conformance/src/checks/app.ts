@@ -4,9 +4,9 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, manifestDigest, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
-import { type HoldVerdictClaim, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { CrudAction, Hook, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
+import type { CrudAction, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { AppClient, CallOptions, OpAnswer, PersonSession } from "../app-client.ts";
 import { tamperValue } from "../app-client.ts";
@@ -528,10 +528,23 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     return verdict(isHeld(a), `${op.id}: ${show(a)}`);
   });
 
+  // v0.1.17 (C108, tolerant reader): a newer Core may hold a family this app's build does not know; the grant stays
+  // valid (verifyGrant ignores the unknown family) and the known families still hold
+  const UNKNOWN_FAMILY = "future_x";
+  await s.run("C3.grant_held_unknown", "a grant whose held names an unknown family is accepted (C108 tolerant reader)", `grant held [destructive, ${UNKNOWN_FAMILY}]: tb.hold_status not refused (200 or 404 hold_not_found, never grant_invalid); a destructive op (holdFamily destructive) with that grant → 202 held (that part n/a when there is none)`, async () => {
+    const held = ["destructive", UNKNOWN_FAMILY];
+    const probe = await c().callOp("tb.hold_status", hs, { held });
+    const accepted = !AUTH_CODES.has(probe.code ?? "") && (probe.status === 200 || probe.status === 404);
+    const op = byRank(agentOps.filter((o) => o.holdFamily === "destructive"))[0];
+    if (!op) return verdict(accepted, `tb.hold_status: ${show(probe)}; destructive part n/a (no agent op with holdFamily destructive)`);
+    const a = track(await c().callOp(op.id, inputFor(op), { held, idempotencyKey: idemKey(op) }));
+    return verdict(accepted && isHeld(a), `tb.hold_status: ${show(probe)}; ${op.id} (destructive): ${show(a)}`);
+  });
   await s.run("A3.run", "an allowed call runs and writes its receipt", "a receipt op the grant and scope allow (no hold) → 200 {status: ok, output, receiptId}", async () => {
     const op = byRank(agentOps.filter((o) => o.receipt && o.effect !== "money")).sort((x, y) => Number(x.effect !== "write") - Number(y.effect !== "write"))[0];
     if (!op) return na("no agent op with receipt true (other than money)");
-    const a = track(await c().callOp(op.id, inputFor(op), { idempotencyKey: idemKey(op) }));
+    // the grant deliberately holds nothing (`held: []`): a destructive / first_contact receipt op must run here too
+    const a = track(await c().callOp(op.id, inputFor(op), { held: [], idempotencyKey: idemKey(op) }));
     if (isOk(a)) return verdict(isObj(a.body) && typeof a.body.receiptId === "string", `${op.id}: ${show(a)}${isObj(a.body) && a.body.receiptId ? ` receipt ${String(a.body.receiptId)}` : " (no receiptId)"}`);
     const authLike = AUTH_CODES.has(a.code ?? "") || ["scope_denied", "paused", "audience_not_agent", "input_invalid"].includes(a.code ?? "") || isHeld(a);
     return authLike ? bad(`${op.id}: ${show(a)}`) : notRun(`${op.id}: handler rejected the generated input (${show(a)}); supply an inputs fixture`);
@@ -662,6 +675,109 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const twiceAttempts = attempts() - n0;
     b.companionRefuseQueue.length = 0;
     return verdict(isOk(once) && onceAttempts === 2 && !isOk(twice) && twiceAttempts === 2, `${op.id}: refused once → ${show(once)} after ${onceAttempts} attempts; refused twice → ${show(twice)} after ${twiceAttempts} attempts`);
+  });
+
+  // ── A12 app callers (SDK-API v0.1.14 C102 Caller.name; v0.1.15 C105a: app calls are held like agent calls) ──
+  // An inbound app caller presents a companion grant (sub tb:ins:<caller>) whose `held` = the workspace apps policy
+  // (fake bridge default DEFAULT_HELD_FAMILIES). A scoped op needs a scope instance the caller can reach: first the
+  // caller's own instance (MANIFEST §6 `own`, the SDK names it after the caller), else the owner grants the caller
+  // agent A's instance through tb.scopes_set (a person op any owner may use).
+  const appCall = async (caller: InstanceId, op: Operation, extra: CallOptions = {}): Promise<{ answer: OpAnswer; input: Json; key?: string; how: string }> => {
+    const tries: { input: Json; how: string; grant?: ScopeRow }[] = [];
+    if (op.scopeType && ctx.inputs[op.id] === undefined) tries.push({ input: sampleInput(op.input, caller), how: "own instance" });
+    const row = op.scopeType ? rows.find((r) => r.agent === agentA.id && r.type === op.scopeType && subset(op.crud, levelCrud(r.type, r.access))) : undefined;
+    tries.push({ input: inputFor(op), how: row ? "agent A's instance, granted by the owner" : "generated input", ...(row ? { grant: row } : {}) });
+    let last: { answer: OpAnswer; input: Json; key?: string; how: string } | null = null;
+    for (const t of tries) {
+      if (t.grant && sess) await c().personOp(sess, "tb.scopes_set", { agent: caller, type: t.grant.type, id: t.grant.instanceId, access: t.grant.access });
+      const key = idemKey(op);
+      const answer = track(await c().callOp(op.id, t.input, { caller, ...(key ? { idempotencyKey: key } : {}), ...extra }));
+      last = { answer, input: t.input, ...(key ? { key } : {}), how: t.how };
+      if (answer.code !== "scope_denied") return last;
+    }
+    return last as { answer: OpAnswer; input: Json; key?: string; how: string };
+  };
+  /** The receipt row id of an answer: receiptId (ran) or holdId (held; holds are receipt rows). */
+  const rowIdOf = (a: OpAnswer) => (isHeld(a) ? holdIdOf(a) : isOk(a) && isObj(a.body) && typeof a.body.receiptId === "string" ? a.body.receiptId : null);
+  const receiptRows = async (): Promise<Record<string, unknown>[]> => {
+    if (!sess) return [];
+    const r = await c().personOp(sess, "tb.receipts_list", {});
+    return (isObj(r.output) && Array.isArray(r.output.items) ? r.output.items : []).filter(isObj);
+  };
+  await s.run("A12.caller_name", "an app caller is named from slice companionCallers; an unlisted one by its instance id (C102)", "a caller listed in companionCallers {product, ins, name} calls a receipt op (companion grant sub tb:ins:<ins>) → its tb.receipts_list row has caller.name = that name; an unlisted caller's row has caller.name = its instance id", async () => {
+    const op = byRank(agentOps.filter((o) => o.receipt)).sort((x, y) => Number(x.effect === "money") - Number(y.effect === "money"))[0];
+    if (!op) return na("no agent op with receipt: true");
+    if (!sess) return bad("no person session");
+    const listed = newId("ins") as InstanceId;
+    const unlisted = newId("ins") as InstanceId;
+    const name = `Conformance caller ${ulid().slice(-6)}`;
+    await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-caller" as ProductId, ins: listed, name }), T);
+    const one = await appCall(listed, op);
+    const two = await appCall(unlisted, op);
+    const shown = `${op.id}: listed ${show(one.answer)} (${one.how}); unlisted ${show(two.answer)} (${two.how})`;
+    const [id1, id2] = [rowIdOf(one.answer), rowIdOf(two.answer)];
+    if (!id1 || !id2) {
+      const authLike = [one.answer, two.answer].some((a) => AUTH_CODES.has(a.code ?? "") || a.code === "audience_not_agent");
+      return authLike ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
+    }
+    const items = await receiptRows();
+    const nameOf = (id: string) => {
+      const row = items.find((x) => x.id === id);
+      return row && isObj(row.caller) ? row.caller.name : undefined;
+    };
+    const [n1, n2] = [nameOf(id1), nameOf(id2)];
+    return verdict(n1 === name && n2 === unlisted, `${shown}; row caller.name: listed ${n1 === name ? "= companionCallers name" : JSON.stringify(n1)}, unlisted ${n2 === unlisted ? "= instance id" : JSON.stringify(n2)}`);
+  });
+  await s.run("A12.app_caller_held", "an app caller's first_contact call is held from the companion grant held (C105a); the approval runs once (C8)", "app caller with a companion grant held = appsPolicy.held (DEFAULT_HELD_FAMILIES) calls a first_contact op → 202 held + holdId; approve via the person session; same input + same idempotency key → ok (not held); same call with a new key → held again (new holdId)", async () => {
+    const op = byRank(agentOps.filter((o) => o.holdFamily === "first_contact"))[0];
+    if (!op) return na("no agent op with holdFamily first_contact");
+    if (!sess) return bad("no person session");
+    if (!b.appsPolicy.held.includes("first_contact")) return bad(`fake bridge apps policy ${b.appsPolicy.held.join(",")} does not hold first_contact`);
+    const caller = newId("ins") as InstanceId;
+    const first = await appCall(caller, op);
+    if (!isHeld(first.answer)) return bad(`${op.id} by app caller (${first.how}): ${show(first.answer)} (expected 202 held)`);
+    const id = holdIdOf(first.answer);
+    const d = await c().personOp(sess, "tb.holds_decide", { holdId: id, decision: "approve" });
+    if (d.status !== 200) return bad(`approve ${show(d)}`);
+    const same = track(await c().callOp(op.id, first.input, { caller, ...(first.key ? { idempotencyKey: first.key } : {}) }));
+    const again = track(await c().callOp(op.id, first.input, { caller, ...(idemKey(op) ? { idempotencyKey: idemKey(op) } : {}) }));
+    const pass = isOk(same) && isHeld(again) && holdIdOf(again) !== id;
+    return verdict(pass, `${op.id} (${first.how}): first ${show(first.answer)}; after approval same input${first.key ? " + key" : ""} ${show(same)}; again${first.key ? " (new key)" : ""} ${show(again)}`);
+  });
+
+  // ── A11 resolve answers carry a hold family (MANIFEST v0.1.16 C107) ──
+  await s.run("A11.resolve_family", "resolve answers with effect outward or money carry a holdFamily (C107)", "for every dynamic op: each catalog entry resolved through the bridge op resolve {op, tool}; a resolution with effect outward|money has a known holdFamily (money → money)", async () => {
+    const dyn = m.operations.filter((o) => o.audience === "agent" && o.dynamic);
+    if (dyn.length === 0) return na("no dynamic op declared");
+    const problems: string[] = [];
+    const seen: string[] = [];
+    let resolved = 0;
+    for (const op of dyn) {
+      const body: Record<string, Json> = op.dynamic?.mode === "search" ? { op: op.id, query: "", limit: 50 } : { op: op.id };
+      const cat = await c().callBridgeOp("catalog", body);
+      const list = Array.isArray(cat.body) ? cat.body : isObj(cat.body) && Array.isArray(cat.body.entries) ? cat.body.entries : null;
+      if (cat.status !== 200 || !list) {
+        problems.push(`${op.id}: catalog ${show(cat)}`);
+        continue;
+      }
+      for (const e of list.filter(isObj).slice(0, 50)) {
+        const r = await c().callBridgeOp("resolve", { op: op.id, tool: String(e.name) });
+        if (r.status !== 200 || !isObj(r.body)) {
+          seen.push(`${op.id}/${String(e.name)}: resolve ${show(r)}`);
+          continue;
+        }
+        resolved++;
+        const eff = String(r.body.effect);
+        const hf = r.body.holdFamily;
+        if (eff !== "outward" && eff !== "money") continue;
+        const known = typeof hf === "string" && (KNOWN_HOLD_FAMILIES as readonly string[]).includes(hf);
+        if (!known || (eff === "money" && hf !== "money")) problems.push(`${op.id}/${String(e.name)}: effect ${eff}, holdFamily ${hf === undefined ? "MISSING" : String(hf)}`);
+        else seen.push(`${op.id}/${String(e.name)}: ${eff}/${String(hf)}`);
+      }
+    }
+    if (problems.length) return bad(problems.slice(0, 6).join("; "));
+    if (resolved === 0) return notRun(`no catalog entry resolved (${seen.slice(0, 4).join("; ") || "empty catalogs"})`);
+    return ok(`${resolved} resolutions of ${dyn.length} dynamic op(s); outward/money ones carry a family${seen.length ? `: ${seen.slice(0, 4).join("; ")}` : ""}`);
   });
 
   // ── A10 post-approval retry + P1 held release while paused + C8 no standing approval ──

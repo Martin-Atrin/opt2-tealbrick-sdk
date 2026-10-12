@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { digest, HOLDS_PENDING_OP, manifestDigest, mcpToolName, toolNameFits, validateAppFiles, validateManifest } from "@opt2-tealbrick/manifest";
+import { digest, HOLDS_PENDING_OP, KNOWN_HOLD_FAMILIES, manifestDigest, mcpToolName, toolNameFits, validateAppFiles, validateManifest } from "@opt2-tealbrick/manifest";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { codeLiterals, literalNamesId } from "../code-literals.ts";
@@ -128,8 +128,10 @@ export function findProductLiterals(dirs: readonly string[], productIds: readonl
   return hits;
 }
 
-export async function runManifestChecks(json: unknown, opts: ManifestCheckOptions = {}): Promise<{ results: CheckResult[]; manifest: Manifest | null }> {
+export async function runManifestChecks(json: unknown, opts: ManifestCheckOptions = {}): Promise<{ results: CheckResult[]; manifest: Manifest | null; notes: string[] }> {
   const s = new Suite();
+  /** report notes (v0.1.16 C107: the warn-only M2.outward_family lists its ops here) */
+  const notes: string[] = [];
   const v = validateManifest(json);
   const m = v.ok ? v.manifest : null;
 
@@ -182,6 +184,43 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     if (money.length === 0) return na("no money op declared");
     const off = money.filter((o) => o.holdFamily !== "money" || !o.receipt).map((o) => o.id);
     return verdict(off.length === 0, off.length ? `violations: ${off.join(",")}` : `${money.length} money ops ok`);
+  });
+  // C105 (spec 0.1.15): the families an op may declare are the spec vocabulary KNOWN_HOLD_FAMILIES (imported, L1);
+  // `policy` (hook verdicts only) and `caps` (Free-card caps) are never op families. Asserted on the raw JSON so an
+  // invalid manifest still names the offending ops.
+  const rawOps = (): Record<string, unknown>[] => {
+    const ops = (json as { operations?: unknown } | null)?.operations;
+    return Array.isArray(ops) ? ops.filter((o): o is Record<string, unknown> => !!o && typeof o === "object" && !Array.isArray(o)) : [];
+  };
+  const known = new Set<string>(KNOWN_HOLD_FAMILIES);
+  await s.run("M2.hold_family_known", "op holdFamily ∈ KNOWN_HOLD_FAMILIES (C105)", `every op holdFamily is one of ${KNOWN_HOLD_FAMILIES.join("|")} (never policy or caps)`, () => {
+    const ops = rawOps();
+    if (ops.length === 0) return bad("no operations array");
+    const declared = ops.filter((o) => o.holdFamily !== undefined);
+    const off = declared.filter((o) => typeof o.holdFamily !== "string" || !known.has(o.holdFamily)).map((o) => `${String(o.id)}: ${String(o.holdFamily)}`);
+    if (declared.length === 0) return na("no op declares a holdFamily");
+    return verdict(off.length === 0, off.length ? `unknown families: ${off.join(", ")}` : `${declared.length} declared families, all known`);
+  });
+  await s.run("M2.hold_family_known.enforced", "validator enforces the known hold families (C105)", "validateManifest refuses an op with holdFamily policy and one with caps; accepts every known family the op's effect admits", () => {
+    if (!m) return bad("manifest invalid");
+    const probe = (hf: string, effect = "outward") => validateManifest({ ...clone(m), operations: [...clone(m.operations), probeOp({ crud: [effect === "destructive" ? "delete" : "update"], effect, idempotency: "supported", receipt: true, holdFamily: hf })] });
+    const refusedAt = (r: ReturnType<typeof validateManifest>) => !r.ok && r.errors.some((e) => e.path.endsWith("/holdFamily"));
+    const policy = probe("policy");
+    const caps = probe("caps");
+    // M-OP-4: destructive/money have their own family; every other known family is an outward family
+    const effectFor = (hf: string) => (hf === "destructive" ? "destructive" : hf === "money" ? "money" : "outward");
+    const knownOk = KNOWN_HOLD_FAMILIES.filter((hf) => !probe(hf, effectFor(hf)).ok);
+    const show = (r: ReturnType<typeof validateManifest>) => (r.ok ? "accepted" : codes(r).join(","));
+    return verdict(refusedAt(policy) && refusedAt(caps) && knownOk.length === 0, `policy: ${show(policy)}; caps: ${show(caps)}; known families refused: ${knownOk.join(",") || "none"}`);
+  });
+  // C107 (spec 0.1.16): every outward op declares a family. WARN-ONLY in conformance 0.1.11 (fails from 0.1.12)
+  await s.run("M2.outward_family", "outward ops declare a holdFamily (C107; warn-only in 0.1.11)", "every op with effect outward declares a holdFamily (0.1.11: a missing one is a WARN note, status pass; fails from 0.1.12)", () => {
+    const outward = rawOps().filter((o) => o.effect === "outward");
+    if (outward.length === 0) return na("no outward op declared");
+    const off = outward.filter((o) => o.holdFamily === undefined).map((o) => `${String(o.id)} (${String(o.audience)})`);
+    if (off.length === 0) return ok(`${outward.length} outward ops, all declare a family`);
+    notes.push(`M2.outward_family WARN (C107, fails from conformance 0.1.12): ${off.length} outward op(s) without holdFamily: ${off.join(", ")}`);
+    return ok(`WARN: ${off.length} of ${outward.length} outward ops declare no holdFamily: ${off.join(", ")} (warn-only in 0.1.11; fails from 0.1.12)`);
   });
   await s.run("M2.tool_names", "MCP tool names ≤ 64 chars (M-OP-1, CORE I9)", "every <product>__<op> fits ^[a-z0-9_-]+$ and ≤ 64", () => {
     if (!m) return bad("manifest invalid");
@@ -305,5 +344,5 @@ export async function runManifestChecks(json: unknown, opts: ManifestCheckOption
     return verdict(off.length === 0, off.length ? `violations: ${off.join("; ")}` : `${builds.length} build(s) under repo ${repoRoot}; ${nSkills} skill file(s) under manifest dir ${manifestDir}`);
   });
 
-  return { results: s.results, manifest: m };
+  return { results: s.results, manifest: m, notes };
 }

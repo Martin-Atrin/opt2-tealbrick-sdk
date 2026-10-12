@@ -114,7 +114,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   const subjectOf = (url: string) => `${manifest ? `${manifest.id}@${manifest.version}` : "invalid manifest"} at ${url}`;
   if (!manifest) {
     for (const id of APP_CHECK_IDS) s.record(id, "app check", "app checks need a valid manifest", bad("manifest invalid (M1)"));
-    return buildReport({ target: "app", subject: subjectOf(opts.url ?? "(not started)"), startedAt, checks: s.results });
+    return buildReport({ target: "app", subject: subjectOf(opts.url ?? "(not started)"), startedAt, checks: s.results, notes: [...mres.notes] });
   }
   if (!opts.start && !opts.url) throw new TypeError("runApp: start or url required");
 
@@ -130,7 +130,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   let app: AppStartResult | null = null;
   let client: AppClient | null = null;
   let scan: PayloadScan | undefined;
-  const notes: string[] = [];
+  const notes: string[] = [...mres.notes];
   try {
     if (opts.start) app = await opts.start(env);
     else opts.onEnv?.(env);
@@ -148,7 +148,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
     } catch (e) {
       const why = `boot failed: ${e instanceof Error ? e.message : String(e)} (claims ${bridge.claims.length}, status pushes ${bridge.statuses.length}, refusals ${bridge.violations.map((v) => v.code).join(",") || "none"})`;
       for (const id of APP_CHECK_IDS) s.record(id, "app check", "app claims and installs its first slice", bad(why));
-      const bootNotes = [why];
+      const bootNotes = [why, ...mres.notes];
       // claimed but no slice installed: the app refused the fake bridge's slice (key-set rule, CREDENTIALS §9.5)
       if (bridge.claims.length > 0 && !bridge.statuses.some((x) => x.status.sliceRevision >= 1)) {
         bootNotes.push(testRoots ? `${PINNED_ROOTS_HINT} (test roots were offered in ${TEST_ROOTS_ENV}; the app did not pin them)` : `${PINNED_ROOTS_HINT} (--no-test-roots given)`);

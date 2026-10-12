@@ -145,6 +145,43 @@ describe("manifest checks", () => {
     assert.match(checkOf(b.results, "M1")?.asserted ?? "", /companion_invalid/);
   });
 
+  it("M2.hold_family_known (C105): known families pass; an op declaring policy or caps fails it (and M1)", async () => {
+    const r = (await runManifestChecks(manifest)).results;
+    assert.equal(byId(r, "M2.hold_family_known"), "pass", checkOf(r, "M2.hold_family_known")?.asserted);
+    assert.equal(byId(r, "M2.hold_family_known.enforced"), "pass", checkOf(r, "M2.hold_family_known.enforced")?.asserted);
+    for (const hf of ["policy", "caps"]) {
+      const ops = (manifest.operations as Record<string, unknown>[]).map((o) => (o.id === "item_delete" ? { ...o, holdFamily: hf } : o));
+      const b = await runManifestChecks({ ...manifest, operations: ops });
+      assert.equal(byId(b.results, "M2.hold_family_known"), "fail", hf);
+      assert.match(checkOf(b.results, "M2.hold_family_known")?.asserted ?? "", new RegExp(`item_delete: ${hf}`));
+      assert.equal(byId(b.results, "M1"), "fail");
+    }
+  });
+
+  it("M2.outward_family (C107) is warn-only in 0.1.11: an outward op without a family passes with WARN and a report note", async () => {
+    const send = { id: "item_send", title: "Send", description: "Send an item.", input: { type: "object", properties: {} }, output: { type: "object" }, crud: ["update"], effect: "outward", idempotency: "supported", receipt: true, audience: "agent" };
+    const none = await runManifestChecks(manifest);
+    assert.equal(byId(none.results, "M2.outward_family"), "not_applicable");
+    assert.deepEqual(none.notes, []);
+    const fam = await runManifestChecks({ ...manifest, operations: [...(manifest.operations as unknown[]), { ...send, holdFamily: "first_contact" }] });
+    assert.equal(byId(fam.results, "M2.outward_family"), "pass");
+    assert.doesNotMatch(checkOf(fam.results, "M2.outward_family")?.asserted ?? "", /^WARN:/);
+    const warn = await runManifestChecks({ ...manifest, operations: [...(manifest.operations as unknown[]), send] });
+    const c = checkOf(warn.results, "M2.outward_family");
+    assert.equal(c?.status, "pass", c?.asserted);
+    assert.match(c?.asserted ?? "", /^WARN: 1 of 1 outward ops declare no holdFamily: item_send \(agent\)/);
+    assert.ok(warn.notes.some((n) => n.includes("M2.outward_family WARN") && n.includes("item_send")), warn.notes.join("\n"));
+    const dir = mkdtempSync(join(tmpdir(), "tbconf-c107-"));
+    try {
+      const p = join(dir, "tealbrick.manifest.json");
+      writeFileSync(p, JSON.stringify({ ...manifest, operations: [...(manifest.operations as unknown[]), send] }));
+      const t = await runManifestTarget({ manifestPath: p });
+      assert.ok(t.notes.some((n) => n.includes("M2.outward_family WARN")), t.notes.join("\n"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("M2.hook_ops reports own vs foreign hook counts; foreign hooks are left to Core (M-HK-3)", async () => {
     const own = (manifest.hooks as Record<string, unknown>[])[0] as { match: { products: string[] } };
     assert.deepEqual(own.match.products, ["conf-sample"], "the fixture declares one own-product hook");

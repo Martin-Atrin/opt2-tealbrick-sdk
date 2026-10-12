@@ -1,7 +1,7 @@
 // Drives an app the way the bridge does (CORE §8, BRIDGE §8.1 step 10, §9.1): op calls with a grant + `TB-Call` op
 // proof, hook calls with a hook proof, bridge ops with a bridge-op proof, and person launch (K11) + session + person
 // ops. Every call can be tampered with in one named way so negative cases stay one line in the checks.
-import { bridgeOpProofClaims, type Ed25519KeyPair, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
+import { bridgeOpProofClaims, DEFAULT_HELD_FAMILIES, type Ed25519KeyPair, ulid, withStandardOps } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type FreeCaps, type HoldVerdictClaim, type InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { AgentMode, CrudAction, HoldFamily, HookPhase } from "@opt2-tealbrick/spec/manifest";
@@ -39,7 +39,8 @@ export interface CallOptions {
   caller?: InstanceId;
   crud?: CrudAction[];
   mode?: AgentMode;
-  held?: HoldFamily[];
+  /** grant `held` (default: an agent card's DEFAULT_HELD_FAMILIES; an app caller: the workspace apps policy, CORE I8) */
+  held?: readonly (HoldFamily | (string & {}))[];
   caps?: FreeCaps;
   wf?: string[];
   context?: Record<string, Json>;
@@ -162,7 +163,8 @@ export class AppClient {
       aud,
       crud: opts.crud ?? view?.crud ?? ["read"],
       mode,
-      held: opts.held ?? [],
+      // v0.1.15 (C105 / C105a, L1): a new agent card holds DEFAULT_HELD_FAMILIES; a companion grant holds appsPolicy.held
+      held: opts.held ?? (opts.caller ? [...b.appsPolicy.held] : [...DEFAULT_HELD_FAMILIES]),
       caps: opts.caps ?? {},
       wf: opts.wf ?? (mode === "bound" ? [op] : []),
       ...(opts.grantKey ? { key: opts.grantKey } : {}),

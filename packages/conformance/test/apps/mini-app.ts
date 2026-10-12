@@ -14,6 +14,7 @@ import {
   exportPrivateKey,
   generateKeyPair,
   importKeyPair,
+  KNOWN_HOLD_FAMILIES,
   kekFromEnv,
   keySetFrom,
   keySetFromPortalKeys,
@@ -78,7 +79,22 @@ export interface MiniAppFaults {
   noStatusChanged?: boolean;
   /** v0.1.13: status pendingHolds always 0 (fails A17.pending_count) */
   pendingHoldsZero?: boolean;
+  /** v0.1.14 (C102): names app callers by their instance id, ignoring slice companionCallers (fails A12.caller_name) */
+  callerNameIgnoresSlice?: boolean;
+  /** v0.1.15 (C105a): never holds an app caller (ignores the companion grant's held; fails A12.app_caller_held) */
+  appCallerNoHold?: boolean;
+  /** v0.1.16 (C107): resolve answers drop holdFamily (outward / money entries; fails A11.resolve_family) */
+  resolveNoFamily?: boolean;
+  /** pre-C108 strict reader: a grant whose held names an unknown family is refused grant_invalid (fails C3.grant_held_unknown) */
+  strictHeld?: boolean;
 }
+
+/** Catalog of every dynamic op of the mini app (DynamicCatalogEntry): a read entry, an outward and a money entry. */
+const DYN_ENTRIES = [
+  { name: "dyn_read", title: "Read entry", description: "Generated read entry.", inputSchema: { type: "object", properties: {} }, crud: ["read"], effect: "read" },
+  { name: "dyn_send", title: "Send entry", description: "Generated outward entry.", inputSchema: { type: "object", properties: {} }, crud: ["create"], effect: "outward", holdFamily: "first_contact" },
+  { name: "dyn_pay", title: "Pay entry", description: "Generated money entry.", inputSchema: { type: "object", properties: {} }, crud: ["create"], effect: "money", holdFamily: "money" },
+] as const;
 
 interface Receipt {
   id: string;
@@ -379,6 +395,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     let callerId: string;
     let callerType: "agent" | "app" = "agent";
     let held: string[] = [];
+    if (faults.strictHeld && Array.isArray(g0.held) && g0.held.some((f) => !(KNOWN_HOLD_FAMILIES as readonly unknown[]).includes(f))) throw new E(401, "grant_invalid");
     if (!faults.skipGrantVerify) {
       const g = verifyGrant(grant, t);
       if (!g.ok) throw new E(g.code.startsWith("grant_") ? 401 : 403, g.code);
@@ -460,12 +477,16 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       approval: approved && !(faults.hvIgnoresApproval && holdVerdict) ? "approved" : "none",
       holdVerdict,
     });
-    if (faults.skipGrantVerify && d.decision === "refuse" && d.reason.startsWith("grant_")) {
+    if (faults.appCallerNoHold && callerType === "app" && d.decision === "hold") {
+      // a broken app that runs every app→app call (C105a violated)
+    } else if (faults.skipGrantVerify && d.decision === "refuse" && d.reason.startsWith("grant_")) {
       // a broken app that never verifies the grant runs anyway
     } else if (d.decision === "refuse") throw new E(403, d.reason);
+    // C102: an app caller is named from slice companionCallers (verified grant sub), fallback the instance id
+    const callerName = callerType === "app" && !faults.callerNameIgnoresSlice ? ((slice?.companionCallers ?? []).find((x) => x.ins === callerId)?.name ?? callerId) : callerId;
     const base = {
       callId,
-      caller: { type: "agent" as const, id: callerId, name: callerId },
+      caller: { type: callerType, id: callerId, name: callerName },
       op: op.id,
       effect: op.effect,
       inputDigest,
@@ -477,7 +498,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       decidedBy: null,
       ...(faults.storesRawInput ? { input: body.input } : {}),
     };
-    if (d.decision === "hold") {
+    if (d.decision === "hold" && !(faults.appCallerNoHold && callerType === "app")) {
       const h: Receipt = { ...base, id: newId("hld"), holdFamily: d.holdFamily ?? null, heldBy: d.heldBy ?? null, reason: d.heldBy && holdVerdict ? holdVerdict.reason : d.reason, status: "held", expiresAt: Date.now() + 15 * 60_000, view: op.title };
       st.receipts.push(h);
       if (ik) st.idem[ik] = { inputDigest, kind: "held", holdId: h.id };
@@ -597,6 +618,15 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const p = verifyBridgeOpProof(String(req.headers["tb-call"] ?? ""), t, bridgeOpBinding(bop as never, b), replay);
         if (!p.ok) throw new E(401, "call_proof_invalid");
         if (bop === "scope_summary") return json(res, 200, (slice?.agents ?? []).map((a) => ({ agent: a.id, label: `${st.scopes.filter((r) => r.agent === a.id).length} spaces` })));
+        if (bop === "catalog" || bop === "resolve") {
+          const dyn = ops.find((o) => o.id === b.op && !o.standard && o.dynamic);
+          if (!dyn) throw new E(404, "unknown_tool");
+          if (bop === "catalog") return json(res, 200, DYN_ENTRIES);
+          const e = DYN_ENTRIES.find((x) => x.name === b.tool);
+          if (!e) throw new E(404, "unknown_tool");
+          const fam = "holdFamily" in e && !faults.resolveNoFamily ? { holdFamily: e.holdFamily } : {};
+          return json(res, 200, { tool: e.name, crud: e.crud, effect: e.effect, ...fam });
+        }
         if (bop === "mark") {
           const r = st.receipts.find((x) => x.callId === b.call);
           if (r) r.status = "after_failed";

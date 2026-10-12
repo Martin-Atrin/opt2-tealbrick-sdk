@@ -30,6 +30,12 @@ describe("app target", () => {
     assert.ok(r.payloadScan.payloads > 50);
     assert.match(r.specDigest, /^sha256:[0-9a-f]{64}$/);
     assert.deepEqual(r.sdk, { majors: [1, 0], reported: "1.0.0" });
+    // the sample has no first_contact op and no dynamic op; its receipt op names app callers (C102)
+    const st = (id: string) => r.checks.find((c) => c.id === id)?.status;
+    assert.equal(st("A12.app_caller_held"), "not_applicable");
+    assert.equal(st("A11.resolve_family"), "not_applicable");
+    assert.equal(st("A12.caller_name"), "pass");
+    assert.match(r.checks.find((c) => c.id === "C3.grant_held_unknown")?.asserted ?? "", /item_delete \(destructive\): 202 held/);
   });
 
   const cases: [string, MiniAppFaults, string[], number?][] = [
@@ -57,7 +63,62 @@ describe("app target", () => {
     ["makes an app-initiated call without its companion grant", { appInitiatedNoGrant: true }, ["A16.call_outside_handler"]],
     ["does not push its status when a hold changes", { noStatusChanged: true }, ["A17.status_changed"]],
     ["reports pendingHolds 0", { pendingHoldsZero: true }, ["A17.pending_count"]],
+    // v0.1.15 (spec 0.1.15, conformance 0.1.11)
+    ["names app callers by their instance id although companionCallers lists them", { callerNameIgnoresSlice: true }, ["A12.caller_name"]],
+    // v0.1.17 (C108)
+    ["refuses a grant whose held names an unknown family (strict reader)", { strictHeld: true }, ["C3.grant_held_unknown"]],
   ];
+  // v0.1.15 / v0.1.16 (conformance 0.1.11): a manifest with an outward first_contact op and a search-mode dynamic op
+  const c107 = structuredClone(manifest) as Manifest;
+  c107.operations.push(
+    {
+      id: "item_send",
+      title: "Send item",
+      description: "Send an item to a new recipient.",
+      input: { type: "object", required: ["space", "to"], properties: { space: { type: "string" }, to: { type: "string" } } },
+      output: { type: "object" },
+      crud: ["update"],
+      effect: "outward",
+      holdFamily: "first_contact",
+      scopeType: "space",
+      idempotency: "supported",
+      receipt: true,
+      audience: "agent",
+    } as Manifest["operations"][number],
+    {
+      id: "item_lookup",
+      title: "Look up items",
+      description: "Search-mode dynamic operation.",
+      crud: ["read"],
+      effect: "read",
+      idempotency: "supported",
+      receipt: false,
+      audience: "agent",
+      dynamic: { mode: "search", crudCeiling: ["read", "create"], effectCeiling: "money" },
+    } as Manifest["operations"][number],
+  );
+  const runC107 = (faults: MiniAppFaults = {}) => runApp({ manifest: c107, manifestPath: path, start: (env) => startMiniApp(c107, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  const statusOf = (r: Report, id: string) => r.checks.find((c) => c.id === id);
+
+  it("app callers (C102, C105a) + resolve families (C107): a correct app with a first_contact op and a dynamic op passes", async () => {
+    const r = await runC107();
+    assert.deepEqual(failing(r), [], renderMarkdown(r));
+    for (const id of ["A12.caller_name", "A12.app_caller_held", "A11.resolve_family", "M2.hold_family_known", "M2.outward_family"]) assert.equal(statusOf(r, id)?.status, "pass", `${id}: ${statusOf(r, id)?.asserted}`);
+    assert.match(statusOf(r, "A12.app_caller_held")?.asserted ?? "", /item_send .*first 202 held .*same input \+ key 200 ok; again \(new key\) 202 held/);
+    assert.match(statusOf(r, "A11.resolve_family")?.asserted ?? "", /outward\/first_contact/);
+  });
+
+  for (const [name, faults, id] of [
+    ["never holds an app caller (ignores the companion grant held)", { appCallerNoHold: true }, "A12.app_caller_held"],
+    ["drops holdFamily from outward / money resolve answers", { resolveNoFamily: true }, "A11.resolve_family"],
+  ] as const) {
+    it(`an app that ${name} fails ${id}`, async () => {
+      const r = await runC107(faults);
+      assert.equal(statusOf(r, id)?.status, "fail", statusOf(r, id)?.asserted);
+      assert.equal(r.ok, false);
+    });
+  }
+
   it("--no-test-roots: a strict app refuses every fake-bridge slice, the run fails at boot with the pinned-roots note", async () => {
     const r = await run({}, { testRoots: false, bootTimeoutMs: 3000 });
     assert.equal(r.ok, false);

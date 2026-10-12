@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   activeKeyRequirements,
+  DEFAULT_HELD_FAMILIES,
   digest,
   type Ed25519KeyPair,
   generateKeyPair,
@@ -27,7 +28,7 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { AppEntry, EnrolCodeEntry, HookEntry, KeyRequirementEntry, SkillFile, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, type BridgeId, type ConnectionId, type Ed25519PublicJwk, type InstanceId, type PersonId, type StandaloneState, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { AgentMode, CrudAction, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
+import type { AgentMode, CrudAction, HoldFamily, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import { FakeApp, type FakeAppWorld } from "./fake-app.ts";
 import { FakePortal } from "./fake-portal.ts";
@@ -87,6 +88,8 @@ export function peerManifest(base: Manifest): Manifest | null {
   const m = structuredClone(base) as Manifest & Record<string, unknown>;
   m.id = comp.product;
   m.name = `${base.name} peer`;
+  // C107 (B16.resolve_family): the search op admits outward / money resolutions (effectCeiling money), so the refusal
+  // of a family-less one is the bridge's family rule, not its ceiling rule
   const dyn = (id: string, mode: "list" | "search"): Operation => ({
     id,
     title: `Generated ${id}`,
@@ -96,7 +99,7 @@ export function peerManifest(base: Manifest): Manifest | null {
     idempotency: "supported",
     receipt: false,
     audience: "agent",
-    dynamic: { mode, crudCeiling: ["read", "create"], effectCeiling: "write" },
+    dynamic: { mode, crudCeiling: ["read", "create"], effectCeiling: mode === "search" ? "money" : "write" },
   });
   m.operations = [
     ...comp.operations.map((id) => peerOp(id, comp.crud, "agent")),
@@ -194,8 +197,11 @@ export class BridgeWorld {
   readonly grants = new Map<string, string>();
   /** companion grants by caller ins */
   readonly companionGrants = new Map<InstanceId, string>();
+  /** v0.1.15 (C105a, CORE I8): workspace apps policy = `held` of every companion grant and slice `appsPolicy` (default imported) */
+  appsPolicy: { held: HoldFamily[] } = { held: [...DEFAULT_HELD_FAMILIES] };
   /** live K4 grant specs, rebuilt into JWS by `publish()` */
-  grantSpecs: { role: AgentRole; app: FakeApp; crud: CrudAction[]; mode: AgentMode; wf: string[] }[] = [];
+  /** `held` overrides the agent card default (DEFAULT_HELD_FAMILIES); v0.1.17 (C108) it may name unknown families */
+  grantSpecs: { role: AgentRole; app: FakeApp; crud: CrudAction[]; mode: AgentMode; wf: string[]; held?: readonly string[] }[] = [];
   hooksOn = true;
   enrolCodes: EnrolCodeEntry[] = [];
   claimCode = "";
@@ -430,19 +436,28 @@ export class BridgeWorld {
     p.bridgePublicUrl = this.advertisedUrl || p.bridgePublicUrl;
     this.grants.clear();
     for (const g of this.grantSpecs) {
-      this.grants.set(`${g.role}|${g.app.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents[g.role].agt}`, aud: `tb:ins:${g.app.ins}`, crud: g.crud, mode: g.mode, wf: g.wf, iat: nowS() - 5 }));
+      // v0.1.15 (C105, L1): agent grants carry the agent card default held families (Core mints a new card's policy so)
+      this.grants.set(`${g.role}|${g.app.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents[g.role].agt}`, aud: `tb:ins:${g.app.ins}`, crud: g.crud, mode: g.mode, held: [...(g.held ?? DEFAULT_HELD_FAMILIES)], wf: g.wf, iat: nowS() - 5 }));
     }
     const real = this.realApp?.listed ? this.realApp : null;
-    if (real) this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", wf: [], iat: nowS() - 5 }));
+    if (real) this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", held: [...DEFAULT_HELD_FAMILIES], wf: [], iat: nowS() - 5 }));
     this.companionGrants.clear();
     // C85 (B26): the listed real SDK app gets the companion grant of its manifest edge too (app-initiated callApp)
     const callers: { ins: InstanceId; manifest: Manifest }[] = [...this.apps, ...(real ? [real] : [])];
+    /** v0.1.14 (C90 / C102): per instance, the targets it holds a companion grant for and the callers that hold one to it */
+    const targetsOf = new Map<string, { product: string; ins: InstanceId }[]>();
+    const callersOf = new Map<string, { product: string; ins: InstanceId; name: string }[]>();
     for (const caller of callers)
       for (const comp of caller.manifest.companions ?? []) {
         const target = this.apps.find((a) => a.product === comp.product);
         if (!target) continue;
-        this.companionGrants.set(caller.ins, await this.mint.grant({ sub: `tb:ins:${caller.ins}`, aud: `tb:ins:${target.ins}`, crud: comp.crud, mode: "bound", wf: comp.operations, held: ["money"] }));
+        // CORE I8 (C105a): companion grants hold the workspace apps policy (default DEFAULT_HELD_FAMILIES, imported)
+        this.companionGrants.set(caller.ins, await this.mint.grant({ sub: `tb:ins:${caller.ins}`, aud: `tb:ins:${target.ins}`, crud: comp.crud, mode: "bound", wf: comp.operations, held: [...this.appsPolicy.held] }));
+        // one companionTargets entry per grant: the world keeps one companion grant per caller (its last edge)
+        targetsOf.set(caller.ins, [{ product: target.product, ins: target.ins }]);
       }
+    for (const caller of callers)
+      for (const t of targetsOf.get(caller.ins) ?? []) callersOf.set(t.ins, [...(callersOf.get(t.ins) ?? []), { product: caller.manifest.id, ins: caller.ins, name: caller.manifest.name.slice(0, 80) }]);
     const portalKeys = o.standalone ? [] : p.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
     // §9.5 Standalone: the FINAL Portal-signed document (the one that carries `standalone`) is verified under the KSS rule,
     // so it carries the current statement; only the later bridge-issued documents drop it (Lead · Bridge request, 0.1.8)
@@ -478,6 +493,10 @@ export class BridgeWorld {
           grants: this.companionGrants.has(a.ins) ? [this.companionGrants.get(a.ins) as string] : [],
           agents: p.agents.map((x) => ({ id: x.agt, name: x.name, mode: x.mode, status: p.pause.agents.has(x.agt) ? ("paused" as const) : ("active" as const) })),
           ...(standalone ? { standalone } : {}),
+          // the shared slice shape (spec 0.1.15 InstanceSlice): companionTargets (C90), companionCallers (C102), appsPolicy (C105a)
+          companionTargets: targetsOf.get(a.ins) ?? [],
+          companionCallers: callersOf.get(a.ins) ?? [],
+          appsPolicy: { held: [...this.appsPolicy.held] },
         },
         p.activeKey(),
       );

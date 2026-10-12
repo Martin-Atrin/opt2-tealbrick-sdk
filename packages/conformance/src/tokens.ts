@@ -69,7 +69,8 @@ export interface GrantSpec {
   aud: `tb:ins:${InstanceId}`;
   crud: CrudAction[];
   mode: AgentMode;
-  held?: HoldFamily[];
+  /** v0.1.17 (C108): may name families this build does not know (a newer Core); signGrant checks the shape only */
+  held?: readonly (HoldFamily | (string & {}))[];
   caps?: FreeCaps;
   wf?: string[];
   iat?: number;
@@ -101,7 +102,7 @@ export class Mint {
         cnf: { brg: s.brg ?? this.#w.bridge },
         crud: [...new Set(s.crud)],
         mode: s.mode,
-        held: [...new Set(s.held ?? [])],
+        held: [...new Set(s.held ?? [])] as HoldFamily[],
         caps: s.caps ?? {},
         wf: s.wf ?? [],
         polrev: 1,

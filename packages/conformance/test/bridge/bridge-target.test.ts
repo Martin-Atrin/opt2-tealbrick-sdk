@@ -35,6 +35,14 @@ describe("bridge target", () => {
     assert.equal(r.ok, false, "a partial run never passes");
   });
 
+  it("C98a + C107 (conformance 0.1.11): a correct bridge derives keys for supported ops and refuses family-less outward / money resolutions", async () => {
+    const r = await run({}, ["call", "dynamic"]);
+    for (const id of ["B8.idempotency_derived", "B5.grant_held_unknown", "B5.restored", "B16.resolve_family", "B16.dynamic_call_resolved", "B16.dynamic_ceiling_exceeded", "B16.dynamic_entry_call", "B7.dynamic_list", "B7.dynamic_search"]) {
+      assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
+    }
+    assert.match(r.checks.find((c) => c.id === "B8.idempotency_derived")?.asserted ?? "", /supported \w+: .* key derived, retry .* key same/);
+  });
+
   it("key page on its own origin (C59): a correct bridge passes every keys_origin check and is restored after the unset probe", async () => {
     const r = await run({}, ["keys_origin"]);
     for (const id of KEYS_ORIGIN_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
@@ -125,6 +133,10 @@ describe("bridge target", () => {
     ["skips the pause gate", { skipPause: true }, ["pause.workspace"], ["P1.workspace.mcp"]],
     ["forwards without a call proof", { noProof: true }, ["call"], ["B8.grant_and_proof", "B8.forward"]],
     ["refuses a required op without _meta (no derived key, pre-C98)", { noDerivedKey: true }, ["call"], ["B8.idempotency_derived"]],
+    // spec 0.1.15 / 0.1.16 (conformance 0.1.11)
+    ["derives the key for required ops only (supported forwarded keyless, pre-C98a)", { deriveRequiredOnly: true }, ["call"], ["B8.idempotency_derived"]],
+    ["forwards an outward / money resolution without holdFamily (pre-C107)", { resolveNoFamilyCheck: true }, ["dynamic"], ["B16.resolve_family"]],
+    ["drops a config grant whose held names an unknown family (strict reader, pre-C108)", { strictHeld: true }, ["call"], ["B5.grant_held_unknown"]],
     ["lists person ops in tools/list", { listPerson: true }, ["mcp"], ["B7.no_person_ops", "B7.list_exact"]],
     ["sends tool payloads to Portal", { leakToPortal: true }, ["call", "scan"], ["B9.no_payload"]],
     ["accepts a person token at MCP", { acceptPerson: true }, ["auth"], ["cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo"]],

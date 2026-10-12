@@ -6,6 +6,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   assertPublicJwk,
+  DEFAULT_HELD_FAMILIES,
   digestEqual,
   type Ed25519KeyPair,
   gate,
@@ -44,7 +45,7 @@ import type {
   Sha256Digest,
   WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
-import type { AgentMode, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { AgentMode, HoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { AppClient } from "./app-client.ts";
 import { closeServer, HttpError, header, listen, parseJson, readRaw, sendError, sendJson } from "./http.ts";
@@ -173,6 +174,14 @@ export class FakeBridge {
   configExpired = false;
   hooks: { phase: "before" | "context"; behaviour: HookBehaviour }[] = [];
   companionResponder: CompanionResponder = () => ({ status: "ok", output: {} });
+  /**
+   * v0.1.15 (C105a, CORE I8): the workspace apps policy. Its `held` is the `held` claim of every companion grant (the
+   * slice's own grants and the inbound app-caller grants the client mints) and the slice field `appsPolicy`.
+   * Default: the spec's DEFAULT_HELD_FAMILIES (imported, L1).
+   */
+  appsPolicy: { held: HoldFamily[] } = { held: [...DEFAULT_HELD_FAMILIES] };
+  /** v0.1.14 (C102): instances listed in slice `companionCallers` (Core: the apps holding a companion grant to this one) */
+  companionCallers: NonNullable<InstanceSlice["companionCallers"]> = [];
   readonly #replay = memoryReplayGuard();
   readonly #waiters = new Set<() => void>();
   readonly #statusWaiters = new Set<() => void>();
@@ -288,7 +297,7 @@ export class FakeBridge {
           aud: `tb:ins:${this.ids.peers[c.product]}`,
           crud: c.crud,
           mode: "bound",
-          held: ["destructive", "money"],
+          held: [...this.appsPolicy.held],
           caps: {},
           wf: c.operations,
         }),
@@ -325,6 +334,11 @@ export class FakeBridge {
       personNbf: this.personNbf,
       grants: await this.companionGrants(),
       agents: this.agentEntries(),
+      // the shared slice shape (spec 0.1.15 InstanceSlice): one companionTargets entry per companion grant (C90), the
+      // listed inbound callers (C102) and the workspace apps policy (C105a)
+      companionTargets: (this.manifest.companions ?? []).filter((c) => this.ids.peers[c.product]).map((c) => ({ product: c.product, ins: this.ids.peers[c.product] })),
+      companionCallers: this.companionCallers.map((x) => ({ ...x })),
+      appsPolicy: { held: [...this.appsPolicy.held] },
     };
     for (const g of body.grants) this.sliceGrants.add(g);
     const signedSlice = await signSlice(body, over?.signer ?? this.activePortalKey());
@@ -714,6 +728,16 @@ export class FakeBridgeControl {
   }
   clearHooks(): void {
     this.#b.hooks = [];
+  }
+  /** v0.1.14 (C102): lists an app caller in slice `companionCallers` and publishes the slice. */
+  listCompanionCaller(caller: NonNullable<InstanceSlice["companionCallers"]>[number]): Promise<number> {
+    this.#b.companionCallers = [...this.#b.companionCallers.filter((x) => x.ins !== caller.ins), caller];
+    return this.#b.rebuildSlice();
+  }
+  /** v0.1.15 (C105a): sets the workspace apps policy (companion grant `held` + slice `appsPolicy`) and publishes the slice. */
+  setAppsPolicy(held: readonly HoldFamily[]): Promise<number> {
+    this.#b.appsPolicy = { held: [...held] };
+    return this.#b.rebuildSlice();
   }
   setCompanionResponder(fn: CompanionResponder): void {
     this.#b.companionResponder = fn;

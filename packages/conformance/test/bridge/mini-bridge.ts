@@ -20,6 +20,7 @@ import {
   holdVerdictClaim,
   hookResponseProblem,
   isPrivateInternalUrl,
+  KNOWN_HOLD_FAMILIES,
   keySetFrom,
   keySetFromPortalKeys,
   mcpToolName,
@@ -49,8 +50,14 @@ import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/s
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 
 export interface MiniFlags {
-  /** pre-C98: a required op without a _meta key is refused input_invalid (no derived key) */
+  /** pre-C98: a required op without a _meta key is refused input_invalid, a supported one is forwarded keyless (no derived key) */
   noDerivedKey?: boolean;
+  /** pre-C98a (bridge 0.1.16): derives the key for required ops only; a supported op is forwarded keyless (fails B8.idempotency_derived) */
+  deriveRequiredOnly?: boolean;
+  /** pre-C107: forwards a resolve answer with effect outward / money and no holdFamily (fails B16.resolve_family) */
+  resolveNoFamilyCheck?: boolean;
+  /** pre-C108 strict reader: drops a config grant whose held names an unknown family (fails B5.grant_held_unknown) */
+  strictHeld?: boolean;
   skipPause?: boolean;
   noProof?: boolean;
   listPerson?: boolean;
@@ -298,9 +305,14 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     return !!d && x.crud.every((c) => (d.crudCeiling as string[]).includes(c)) && (RANK[x.effect] ?? 9) <= (RANK[d.effectCeiling] ?? 0);
   };
 
+  /** the pre-C108 strict reader: any family outside this build's vocabulary invalidates the grant */
+  const strictRefused = (jws: string) => {
+    const held = (JSON.parse(Buffer.from(jws.split(".")[1] as string, "base64url").toString()) as { held?: unknown }).held;
+    return Array.isArray(held) && held.some((f) => !(KNOWN_HOLD_FAMILIES as readonly unknown[]).includes(f));
+  };
   const grantsOf = (agt: string) => {
     const c = cfg as WorkspaceConfig;
-    return c.grants.map((g) => verifyGrant(g, { now: nowS(), self: `tb:ins:${JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString()).aud.slice(7)}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) })).flatMap((v, i) => (v.ok && v.claims.sub === `tb:agt:${agt}` ? [{ jws: c.grants[i] as string, claims: v.claims }] : []));
+    return c.grants.map((g) => verifyGrant(g, { now: nowS(), self: `tb:ins:${JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString()).aud.slice(7)}` as never, ws: c.ws, bridge: enrol.bridgeId, issuers: keySetFromPortalKeys(trusted), bridgeKeys: { keys: [] }, revokedJtis: new Set(c.revoked.jtis.map((j) => j.jti)) })).flatMap((v, i) => (v.ok && v.claims.sub === `tb:agt:${agt}` && !(flags.strictHeld && strictRefused(c.grants[i] as string)) ? [{ jws: c.grants[i] as string, claims: v.claims }] : []));
   };
   const tools = (agt: string) => {
     const c = cfg as WorkspaceConfig;
@@ -347,7 +359,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
     return Math.max(1, Math.ceil((1 - b.tokens) / 2));
   };
-  const toolError = (code: string) => ({ isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code, message: code, requestId: "req_mini" } }) }], structuredContent: { error: { code, message: code, requestId: "req_mini" } } });
+  const toolError = (code: string, details?: Record<string, unknown>) => {
+    const error = { code, message: code, requestId: "req_mini", ...(details ? { details } : {}) };
+    return { isError: true, content: [{ type: "text", text: JSON.stringify({ error }) }], structuredContent: { error } };
+  };
 
   /** one hook call (hook proof, BRIDGE §8.1 steps 6/7/12); null on transport failure or timeout */
   const hookCall = async (h: HookEntry, phase: "before" | "context" | "after", sub: string, callId: string, call: Record<string, Json>, context: Record<string, Json>, output?: Json): Promise<{ status: number; body: unknown } | null> => {
@@ -460,10 +475,12 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     const g = grantsOf(agt).find((x) => x.claims.aud === `tb:ins:${t.ins}`);
     if (!declared || !g) return toolError("no_grant");
     if (!t.kind && !declared.standard && !validateInput(declared, args).ok) return toolError("input_invalid");
-    if (!t.kind && !declared.standard && declared.idempotency === "required" && !idem) {
-      // C98: derive the key (shared rule) instead of refusing model-driven clients that cannot set _meta
-      if (flags.noDerivedKey) return toolError("input_invalid");
-      idem = deriveIdempotencyKey({ connection: agt, session, op: declared.id, input: args, now: Date.now() });
+    if (!t.kind && !declared.standard && declared.idempotency !== "none" && !idem) {
+      // C98 / C98a: derive the key (shared rule) for required AND supported ops instead of refusing model-driven
+      // clients that cannot set _meta; `noDerivedKey` = the pre-C98 bridge (required refused, supported keyless)
+      if (flags.noDerivedKey) {
+        if (declared.idempotency === "required") return toolError("input_invalid");
+      } else if (declared.idempotency === "required" || !flags.deriveRequiredOnly) idem = deriveIdempotencyKey({ connection: agt, session, op: declared.id, input: args, now: Date.now() });
     }
     // dynamic ops (BRIDGE §7.2 / §8): _search answers from the catalog bridge op; _call resolves first; a list entry
     // carries its catalog crud / effect; gate() runs on the effective op
@@ -482,6 +499,10 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         const r = await bridgeOp(t.ins, "resolve", { op: t.op, tool });
         eff = r.status === 200 && isObj(r.body) && Array.isArray(r.body.crud) ? (r.body as { crud: string[]; effect: string }) : null;
         if (!eff) return toolError("unknown_tool");
+        // C107 (spec 0.1.16): an outward / money resolution must name its hold family (money → money)
+        const hf = (r.body as { holdFamily?: unknown }).holdFamily;
+        const famOk = eff.effect === "money" ? hf === "money" : eff.effect !== "outward" || (typeof hf === "string" && (KNOWN_HOLD_FAMILIES as readonly string[]).includes(hf));
+        if (!famOk && !flags.resolveNoFamilyCheck) return toolError("dynamic_resolve_failed", { reason: "family_missing" });
       }
       if (!inCeiling(declared as Operation, eff as { crud: string[]; effect: string })) return toolError("dynamic_ceiling_exceeded");
       op = { ...declared, crud: (eff as { crud: string[] }).crud, effect: (eff as { effect: string }).effect } as OperationView;
