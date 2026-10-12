@@ -19,7 +19,7 @@ export const REAL_ENTRIES = { search: "real_found_entry", list: "real_listed_ent
 /** The subset of the SDK this suite uses (typed locally: the SDK is an optional run-time load). */
 export interface SdkModule {
   defineApp(def: Record<string, unknown>): unknown;
-  startApp(app: unknown, env: Record<string, string>, harness?: { portalRootKeys?: unknown[] }): Promise<RealRunningApp>;
+  startApp(app: unknown, env: Record<string, string>, harness?: { portalRootKeys?: unknown[]; privilegeProc?: { getuid?: () => number } }): Promise<RealRunningApp>;
 }
 export interface RealRunningApp {
   status(): string;
@@ -104,5 +104,7 @@ export async function startRealApp(sdk: SdkModule, manifest: Manifest, env: Reco
     dynamic: { [REAL_OPS.search]: dyn(REAL_ENTRIES.search), [REAL_OPS.list]: dyn(REAL_ENTRIES.list) },
     migrations,
   });
-  return sdk.startApp(app, env, portalRootKeys ? { portalRootKeys } : undefined);
+  // in-process app: a root CI runner must not be dropped to uid 1000 by it (harness-only privilege facade, C53/C54)
+  const privilegeProc = { getuid: () => 1000 };
+  return sdk.startApp(app, env, portalRootKeys ? { portalRootKeys, privilegeProc } : { privilegeProc });
 }
