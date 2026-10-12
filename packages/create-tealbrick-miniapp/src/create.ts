@@ -19,6 +19,7 @@ const RENAMES: Record<string, string> = {
   gitignore: ".gitignore",
   dockerignore: ".dockerignore",
   "woodpecker/ci.yaml": ".woodpecker/ci.yaml",
+  "github/workflows/opt2-release.yml": ".github/workflows/opt2-release.yml",
   "biome.template.json": "biome.json",
 };
 

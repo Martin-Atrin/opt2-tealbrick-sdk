@@ -10,6 +10,7 @@ import { CreateError, createMiniapp, defaultName, PLACEHOLDER, renderTemplate, T
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const PLATFORM_CI = fileURLToPath(new URL("../../../../opt2-tealbrick-platform/ci/woodpecker/ci.yaml", import.meta.url));
+const PLATFORM_GH = fileURLToPath(new URL("../../../../opt2-tealbrick-platform/ci/github/opt2-release.yml", import.meta.url));
 // same rule as the platform CI setup step (ci/tb-ci.ts RELEASE_URL_RE)
 const RELEASE_URL_RE =
   /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\/[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
@@ -49,6 +50,7 @@ describe("createMiniapp", () => {
       "skills/use-my-notes/SKILL.md",
       "Dockerfile",
       ".woodpecker/ci.yaml",
+      ".github/workflows/opt2-release.yml",
       "tealbrick-ci.json",
       "biome.json",
       "tsconfig.json",
@@ -160,6 +162,8 @@ describe("createMiniapp", () => {
     const pipeline = read(dir, ".woodpecker/ci.yaml");
     assert.match(pipeline, /GENERATED from Martin-Atrin\/opt2-tealbrick-platform: ci\/woodpecker\/ci\.yaml/);
     if (existsSync(PLATFORM_CI)) assert.equal(pipeline, readFileSync(PLATFORM_CI, "utf8"), "byte-identical copy of the platform template");
+    // ci-v9 (C72): releases publish through GitHub Actions with the built-in token
+    if (existsSync(PLATFORM_GH)) assert.equal(read(dir, ".github/workflows/opt2-release.yml"), readFileSync(PLATFORM_GH, "utf8"), "byte-identical copy of the platform release workflow");
 
     const docker = read(dir, "Dockerfile");
     const froms = [...docker.matchAll(/^FROM (\S+)/gm)].map((m) => m[1]);
