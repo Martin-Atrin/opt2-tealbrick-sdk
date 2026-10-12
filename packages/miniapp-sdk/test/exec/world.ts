@@ -104,7 +104,9 @@ export async function execWorld(opts: { helper?: boolean; backup?: boolean; drop
   };
 }
 
-export async function until(cond: () => boolean, ms = 5000): Promise<void> {
+// 20 s default: these waits cover child process starts, which take > 5 s when the workspace runs package tests in parallel
+// (the flaky "tb-exec with helper and backup" before-hook timeout, 2026-10-12); a passing run returns as soon as cond holds.
+export async function until(cond: () => boolean, ms = 20_000): Promise<void> {
   const end = Date.now() + ms;
   while (!cond()) {
     if (Date.now() > end) throw new Error("timeout waiting for condition");
