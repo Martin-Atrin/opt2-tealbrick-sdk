@@ -100,6 +100,16 @@ describe("createMiniapp", () => {
     assert.match(read(dir, "src/ui/index.html"), /<base href="\/a\/zz-top\/" \/>/);
   });
 
+  it("ships tealbrick-integrity.json pinning exactly the template's release-URL dependencies' tarballs (ci-v7)", (t) => {
+    const dir = join(temp(t), "app");
+    const r = createMiniapp({ dir, id: "pin-check" });
+    assert.ok(r.files.includes("tealbrick-integrity.json"));
+    const pins = JSON.parse(readFileSync(join(dir, "tealbrick-integrity.json"), "utf8")) as Record<string, string>;
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { dependencies: Record<string, string>; devDependencies: Record<string, string> };
+    for (const url of Object.values({ ...pkg.dependencies, ...pkg.devDependencies }).filter((u) => u.startsWith("https://github.com/"))) assert.ok(pins[url], `pin for ${url}`);
+    for (const v of Object.values(pins)) assert.match(v, /^sha512-[A-Za-z0-9+/]+=*$/);
+  });
+
   it("follows the platform CI standard and the release-URL dependency rule", (t) => {
     const dir = join(temp(t), "app");
     createMiniapp({ dir, id: "tasks", name: "Tasks" });
@@ -131,8 +141,8 @@ describe("createMiniapp", () => {
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
     assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /\/ui-v0\.1\.1\//);
-    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.6\//);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.3\//);
+    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.8\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.5\//);
     // BSA-07: the ONE app shell from ui, no local frame
     const ui = read(dir, "src/ui/App.tsx");
     assert.match(ui, /import \{[^}]*\bAppShell\b[^}]*\} from "@opt2-tealbrick\/ui";/);
