@@ -2,8 +2,12 @@
 // copies the browser dependencies next to it and writes dist/ui/index.html with an import map:
 // - ES module packages (@opt2-tealbrick/ui, @opt2-tealbrick/miniapp-sdk/client, ...) are copied file by file, only
 //   the files reachable from dist/ui/main.js;
-// - React ships CommonJS only, so each React entry it needs is wrapped once into an ES module (production build).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+// - React ships CommonJS only, so each React entry it needs is wrapped once into an ES module (production build);
+// - C61: everything except index.html is finally moved into dist/ui/assets-<content hash>/ (relative imports keep
+//   working: the layout inside is unchanged). The SDK serves that directory immutable and index.html no-cache, so a
+//   deploy is visible at once and assets are never re-downloaded while unchanged.
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +15,8 @@ import { importSpecifiers } from "./import-scan.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const out = join(root, "dist", "ui");
+// a previous build's hashed directory is stale output, never an input
+if (existsSync(out)) for (const d of readdirSync(out)) if (/^assets-[0-9a-f]+$/.test(d)) rmSync(join(out, d), { recursive: true, force: true });
 const VENDOR = "vendor";
 const STYLES = ["@opt2-tealbrick/ui/tokens.css", "@opt2-tealbrick/ui/components.css"];
 
@@ -134,6 +140,27 @@ const html = readFileSync(join(root, "src", "ui", "index.html"), "utf8");
 const marker = /<!-- tb:head[^>]*-->/;
 if (!marker.test(html)) fail("src/ui/index.html has no <!-- tb:head --> marker");
 const sorted = Object.fromEntries(Object.entries(importMap).sort(([a], [b]) => a.localeCompare(b)));
-const head = [...links, `<script type="importmap">${JSON.stringify({ imports: sorted })}</script>`].join("\n    ");
-writeFileSync(join(out, "index.html"), html.replace(marker, head));
-console.log(`build-ui: ${seen.size} modules, ${wrapped.size} CommonJS wrappers, ${links.length} stylesheets -> dist/ui`);
+// 4. content-hashed asset directory (C61): hash = sha256 over every emitted file (path + bytes), sorted
+const files: string[] = [];
+const walk = (dir: string) => {
+  for (const d of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, d.name);
+    if (d.isDirectory()) walk(p);
+    else if (p !== join(out, "index.html")) files.push(p);
+  }
+};
+walk(out);
+files.sort();
+const h = createHash("sha256");
+for (const f of files) h.update(posix(relative(out, f))).update("\0").update(readFileSync(f)).update("\0");
+const assets = `assets-${h.digest("hex").slice(0, 16)}`;
+mkdirSync(join(out, assets));
+for (const entryName of readdirSync(out)) if (entryName !== assets && entryName !== "index.html") renameSync(join(out, entryName), join(out, assets, entryName));
+const hashed = (url: string) => (url.startsWith("./") ? `./${assets}/${url.slice(2)}` : url);
+const hashedMap = Object.fromEntries(Object.entries(sorted).map(([k, v]) => [k, hashed(v)]));
+const hashedLinks = links.map((l) => l.replace(/href="(\.\/[^"]+)"/, (_m, u: string) => `href="${hashed(u)}"`));
+const headHashed = [...hashedLinks, `<script type="importmap">${JSON.stringify({ imports: hashedMap })}</script>`].join("\n    ");
+const page = html.replace(marker, headHashed).replace(/(<script\b[^>]*\bsrc=")(\.\/[^"]+)"/g, (_m, pre: string, u: string) => `${pre}${hashed(u)}"`);
+if (/src="\.\/main\.js"/.test(page)) fail("index.html still points at the un-hashed main.js");
+writeFileSync(join(out, "index.html"), page);
+console.log(`build-ui: ${seen.size} modules, ${wrapped.size} CommonJS wrappers, ${links.length} stylesheets -> dist/ui/${assets}`);

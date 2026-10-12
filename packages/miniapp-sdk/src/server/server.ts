@@ -35,6 +35,18 @@ export async function health(rt: Runtime): Promise<Health> {
   return { status: rt.health(), sdk: rt.sdkVersion, version: rt.manifest.version, manifestDigest: rt.digest, keys: await rt.keys.status() };
 }
 
+/** Content-hashed asset directory written by the template's build-ui (`assets-<hex>/…`): immutable for a year. */
+export const HASHED_ASSET_DIR = /^assets-[0-9a-f]{12,64}\//;
+
+/**
+ * C61: the HTML entry (and any un-hashed file) revalidates on every load (`no-cache`), so owners see a deploy at once;
+ * files under a content-hashed `assets-<hex>/` directory are immutable (a new build gets a new directory name).
+ */
+export function uiCacheControl(rel: string): string {
+  const path = rel.replace(/^\/+/, "");
+  return HASHED_ASSET_DIR.test(path) ? "private, max-age=31536000, immutable" : "no-cache";
+}
+
 /** Static UI from `dist/ui` beside the migrations directory's parent (template layout, SDK-API §15). */
 function serveUi(uiRoot: string, rel: string, res: ServerResponse): void {
   const notFound = () => sendError(res, requestId(), new TbError("not_found", "not found", 404));
@@ -66,7 +78,7 @@ function serveUi(uiRoot: string, rel: string, res: ServerResponse): void {
   }
   res.writeHead(200, {
     "content-type": MIME[extname(file)] ?? "application/octet-stream",
-    "cache-control": file.endsWith(".html") ? "no-store" : "private, max-age=300",
+    "cache-control": uiCacheControl(rel),
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
   });
