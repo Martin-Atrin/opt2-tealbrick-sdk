@@ -43,6 +43,11 @@ export interface RunBridgeOptions {
   /** forward the bridge's stdout/stderr to this process's stderr as well (debugging) */
   echoLogs?: boolean;
   /**
+   * with `start`: the bridge's captured log text so far (the CLI's `--start` collects the child's stdout/stderr). B11.no_log
+   * and the C85 audit checks (B26) read it; without it (and without `cmd`) they report not_run.
+   */
+  logs?: () => string;
+  /**
    * v0.1.11 (C62/C63): the bridge's start module honours `TBCONF_PORTAL_ROOT_KEYS` (JSON public JWKs; a harness-only
    * name the bridge itself never reads) by passing it to the bridge's programmatic start option for its pinned roots.
    * Default true (spec 0.1.12); `false` (CLI `--no-test-roots`): the B20 key-set group reports not_run, and a strict
@@ -229,7 +234,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
         world.bridge = running;
         await waitHttp(`${running.publicUrl}/healthz`, bootMs);
       },
-      logs: () => (opts.cmd ? logs.text : null),
+      logs: () => (opts.cmd ? logs.text : opts.logs ? opts.logs() : null),
       dataDir,
       timeoutMs,
       pauseLatencyMs: opts.pauseLatencyMs ?? 60_000,

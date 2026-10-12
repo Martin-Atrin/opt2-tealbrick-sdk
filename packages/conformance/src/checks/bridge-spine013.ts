@@ -18,7 +18,7 @@ const unb64 = (s: string) => JSON.parse(Buffer.from(s, "base64url").toString("ut
 const ON_BEHALF_OF_META = "tealbrick/onBehalfOf";
 
 /** Hook entries of `phase` that match a call of `op` at `app`, in chain order (order, then product). */
-function chainFor(c: BridgeCtx, app: FakeApp, op: Operation, phase: "before" | "context" | "after"): Chain {
+export function chainFor(c: BridgeCtx, app: FakeApp, op: Operation, phase: "before" | "context" | "after"): Chain {
   return c.w
     .hookEntries()
     .filter((h) => {

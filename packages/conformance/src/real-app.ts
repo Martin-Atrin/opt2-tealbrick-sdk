@@ -8,7 +8,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateManifest } from "@opt2-tealbrick/manifest";
-import type { DynamicCatalogEntry, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { DynamicCatalogEntry, Manifest, Operation } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 
 /** Op ids of the real app (generated; no product id). */
@@ -25,6 +25,20 @@ export interface RealRunningApp {
   status(): string;
   receipts: { list(q: { op?: string; limit?: number }): Promise<{ items: { id: string; op: string; status: string; callId: string | null; createdAt: number }[] }> };
   stop(): Promise<void>;
+}
+/** The subset of the SDK's StartContext the suite uses (C85: app-initiated companion calls, no parentCall). */
+export interface RealStartContext {
+  callApp(product: string, op: string, input: Json, opts?: { idempotencyKey?: string }): Promise<unknown>;
+}
+/** A started real app plus the StartContext its `onStart` received (null until the claim succeeded and onStart ran). */
+export interface RealApp extends RealRunningApp {
+  startContext(): RealStartContext | null;
+}
+/** A companion edge of the real app (manifest `companions[]`): the world mints its grant like any app's (B26). */
+export interface RealCompanion {
+  product: string;
+  operations: string[];
+  crud: Operation["crud"];
 }
 
 /** Loads the SDK (`spec` default: the installed `@opt2-tealbrick/miniapp-sdk`); null with the reason when it cannot. */
@@ -47,8 +61,11 @@ const entry = (name: string, title: string): DynamicCatalogEntry => ({
   effect: "read",
 });
 
-/** The real app's manifest: `base` (an example manifest) reduced to three generated ops, listening on `port`. */
-export function realAppManifest(base: Manifest, id: string, port: number): Manifest {
+/**
+ * The real app's manifest: `base` (an example manifest) reduced to three generated ops, listening on `port`; with
+ * `companion`, one companion edge (C85 app-initiated calls through StartContext.callApp, B26).
+ */
+export function realAppManifest(base: Manifest, id: string, port: number, companion?: RealCompanion): Manifest {
   const b = structuredClone(base) as Manifest & Record<string, unknown>;
   const m: Record<string, unknown> = {
     ...(b.$schema !== undefined ? { $schema: b.$schema } : {}),
@@ -81,6 +98,7 @@ export function realAppManifest(base: Manifest, id: string, port: number): Manif
       { id: REAL_OPS.search, title: "Generated search", description: "Generated search-mode dynamic operation.", crud: ["read"], effect: "read", idempotency: "supported", receipt: false, audience: "agent", dynamic: { mode: "search", crudCeiling: ["read"], effectCeiling: "read" } },
       { id: REAL_OPS.list, title: "Generated listing", description: "Generated list-mode dynamic operation.", crud: ["read"], effect: "read", idempotency: "supported", receipt: false, audience: "agent", dynamic: { mode: "list", crudCeiling: ["read"], effectCeiling: "read" } },
     ],
+    ...(companion ? { companions: [{ product: companion.product, operations: companion.operations, crud: companion.crud, purpose: "Generated companion edge for app-initiated calls" }] } : {}),
     ...(b.ui ? { ui: b.ui } : {}),
   };
   const v = validateManifest(m);
@@ -88,11 +106,15 @@ export function realAppManifest(base: Manifest, id: string, port: number): Manif
   return v.manifest;
 }
 
-/** defineApp + startApp with the given env (TB_* names) and test roots; `dataDir` gets a migrations folder. */
-export async function startRealApp(sdk: SdkModule, manifest: Manifest, env: Record<string, string>, dataDir: string, portalRootKeys: unknown[] | null): Promise<RealRunningApp> {
+/**
+ * defineApp + startApp with the given env (TB_* names) and test roots; `dataDir` gets a migrations folder. `onStart`
+ * keeps its StartContext (C85: callApp outside a handler) for the harness: `startContext()`.
+ */
+export async function startRealApp(sdk: SdkModule, manifest: Manifest, env: Record<string, string>, dataDir: string, portalRootKeys: unknown[] | null): Promise<RealApp> {
   const migrations = join(dataDir, "migrations");
   mkdirSync(migrations, { recursive: true });
   writeFileSync(join(migrations, "0001_init.sql"), "CREATE TABLE conformance_real (id TEXT PRIMARY KEY);\n");
+  let started: RealStartContext | null = null;
   const dyn = (name: string) => ({
     catalog: async () => [entry(name, `Generated ${name}`)],
     resolve: async (tool: string) => (tool === name ? { tool, crud: ["read"], effect: "read" } : null),
@@ -103,8 +125,12 @@ export async function startRealApp(sdk: SdkModule, manifest: Manifest, env: Reco
     handlers: { [REAL_OPS.plain]: async () => ({ written: true, real: true }) },
     dynamic: { [REAL_OPS.search]: dyn(REAL_ENTRIES.search), [REAL_OPS.list]: dyn(REAL_ENTRIES.list) },
     migrations,
+    onStart: async (ctx: RealStartContext) => {
+      started = ctx;
+    },
   });
   // in-process app: a root CI runner must not be dropped to uid 1000 by it (harness-only privilege facade, C53/C54)
   const privilegeProc = { getuid: () => 1000 };
-  return sdk.startApp(app, env, portalRootKeys ? { portalRootKeys, privilegeProc } : { privilegeProc });
+  const running = await sdk.startApp(app, env, portalRootKeys ? { portalRootKeys, privilegeProc } : { privilegeProc });
+  return { status: () => running.status(), receipts: running.receipts, stop: () => running.stop(), startContext: () => started };
 }

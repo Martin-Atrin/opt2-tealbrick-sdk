@@ -1103,7 +1103,7 @@ export async function scanChecks(c: BridgeCtx): Promise<PayloadScan> {
   const secretValues = [...c.secrets.keyValues, ...c.secrets.tickets, ...c.secrets.pairing, ...c.accessTokens, ...c.refreshTokens, c.h.env.TB_KEK ?? "", c.h.env.TB_ENROL_CODE ?? "", ...enrolRequests(c).map((e) => e.code)].filter((v) => v && v.length >= 16);
   await c.run("B11.no_log", "secrets never logged", "bridge stdout/stderr contain no key value, ticket, pairing code, token, enrolment code or KEK", () => {
     const logs = c.h.logs();
-    if (logs === null) return notRun("this harness cannot capture the bridge's logs (use --cmd)");
+    if (logs === null) return notRun("this harness cannot capture the bridge's logs (use --cmd or --start)");
     const hits = secretValues.filter((v) => logs.includes(v)).length;
     const jws = [...logs.matchAll(JWS_RE)].length;
     return verdict(hits === 0 && jws === 0, `${logs.length} log bytes; secret values found ${hits}; compact JWS found ${jws}`);

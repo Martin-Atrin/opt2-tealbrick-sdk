@@ -14,12 +14,13 @@ const status = (r: Report, id: string) => r.checks.find((c) => c.id === id)?.sta
 /** C91 group real_app: the workspace SDK source (no build needed: node strips the types outside node_modules) */
 const SDK_MODULE = new URL("../../../miniapp-sdk/src/server/index.ts", import.meta.url).href;
 const run = (flags: MiniFlags, groups: string[], state: MiniState = {}, keyset: { testRoots?: boolean; keysetRequired?: boolean; bootTimeoutMs?: number } = {}) =>
-  runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, sdkModule: SDK_MODULE, ...keyset });
+  runBridgeTarget({ start: (env) => startMiniBridge(env, flags, state), logs: () => (state.logs ?? []).join("\n"), groups, timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, sdkModule: SDK_MODULE, ...keyset });
 const ADDRESS_IDS = ["B21.own_infra_allowed", "B21.internal_url_external", "B21.own_infra_flag_required", "B21.neighbour_url_refused"];
 const KEYSET_IDS = ["B20.kss_enrolled", "B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise", "B20.kss_reenrol_missing"];
 
 const SPINE013_IDS = ["B22.hold_verdict", "B22.hold_retry_refused", "B22.hv_tamper", "B23.on_behalf_of", "B23.reserved_tb_namespace", "B24.app_initiated", "B24.no_grant"];
-const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark"];
+const B26_IDS = ["B26.app_initiated_real", "B26.app_initiated_rate", "B26.app_initiated_audit", "B26.parent_call_forged", "B26.parent_call_foreign", "B26.parent_call_expired"];
+const REAL_APP_IDS = ["B25.real_catalog_search", "B25.real_dynamic_call", "B25.real_op_call", "B25.real_mark", ...B26_IDS];
 const KEYS_ORIGIN_IDS = ["B11.main_origin_keys_404", "B11.keys_origin_only", "B11.keys_origin_csp", "B11.keys_origin_unset_503"];
 const GOOD_IDS = ["B1.health", "B1.mcp_requires_auth", "B1.internal_not_public", "C1.K5", "cred.p1.bridge_rejects_clerk_jwt", "cred.p1.bridge_rejects_tbo", "B7.list_exact", "B7.no_person_ops", "B8.forward", "B8.grant_and_proof", "B5.bound_outside_wf", "P1.workspace.mcp", "B9.portal_paths", "B9.no_payload"];
 
@@ -88,9 +89,9 @@ describe("bridge target", () => {
     for (const id of ["B20.portal_keys_ignored", "B20.kss_unknown_root", "B20.kss_rollback", "B20.kss_missing", "B20.kss_compromise"]) assert.equal(status(r, id), "fail", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
   });
 
-  it("spec 0.1.13 spine (spine013): a correct bridge passes every B22–B24 check", async () => {
-    const r = await run({}, ["spine013"]);
-    for (const id of SPINE013_IDS) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
+  it("spec 0.1.13 spine (spine013) + companion: a correct bridge passes every B22–B24 check and B16 re-entry / depth (valid parentCall)", async () => {
+    const r = await run({}, ["spine013", "companion"]);
+    for (const id of [...SPINE013_IDS, "B16.hook_reentry", "B16.call_depth", "C1.K10_companion"]) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
     assert.equal(status(r, "B6.order"), "not_run", "an older bridge deselects spine013 the same way");
   });
 
@@ -104,6 +105,12 @@ describe("bridge target", () => {
     for (const id of ["B25.real_catalog_search", "B16.search_uses_catalog"]) assert.equal(status(r, id), "fail", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
     assert.match(r.checks.find((c) => c.id === "B25.real_catalog_search")?.asserted ?? "", /call_proof_invalid/);
     assert.equal(status(r, "B25.real_op_call"), "pass", "only the catalog binding is broken");
+  });
+
+  it("C85 audit without captured logs: B26.app_initiated_audit is not_run (the call checks still run)", async () => {
+    const r = await runBridgeTarget({ start: (env) => startMiniBridge(env, {}, {}), groups: ["real_app"], timeoutMs: 3000, bootTimeoutMs: 15_000, pauseLatencyMs: 4000, sdkModule: SDK_MODULE });
+    assert.equal(status(r, "B26.app_initiated_audit"), "not_run", r.checks.find((c) => c.id === "B26.app_initiated_audit")?.asserted);
+    for (const id of ["B26.app_initiated_real", "B26.parent_call_forged", "B26.parent_call_foreign"]) assert.equal(status(r, id), "pass", `${id}: ${r.checks.find((c) => c.id === id)?.asserted}`);
   });
 
   it("cspFormActionSelf accepts exactly form-action 'self'", () => {
@@ -134,6 +141,13 @@ describe("bridge target", () => {
     ["lets a context hook write tb.* keys", { allowTbContext: true }, ["spine013"], ["B23.reserved_tb_namespace"]],
     ["skips the hooks for app-initiated calls", { appCallsSkipHooks: true }, ["spine013"], ["B24.app_initiated"]],
     ["does not gate companion calls by the grant's workflow", { companionNoWfCheck: true }, ["spine013"], ["B24.no_grant"]],
+    // C85 + v0.1.14 A2A-10 (group real_app, B26)
+    ["shows app-initiated calls to hooks as caller type system", { appInitiatedAsSystem: true }, ["real_app"], ["B26.app_initiated_real"]],
+    ["does not rate-limit app-initiated calls", { noAppRateLimit: true }, ["real_app"], ["B26.app_initiated_rate"]],
+    ["does not audit app-initiated calls", { noAppInitiatedAudit: true }, ["real_app"], ["B26.app_initiated_audit"]],
+    ["trusts a forged parentCall (child call, not app-initiated)", { parentTrusted: true }, ["real_app"], ["B26.parent_call_forged"]],
+    ["accepts another instance's in-flight call as parentCall", { parentAnyInstance: true }, ["real_app"], ["B26.parent_call_foreign"]],
+    ["keeps finished calls as valid parentCalls", { parentKeepsFinished: true }, ["real_app"], ["B26.parent_call_expired"]],
   ];
   for (const [name, flags, groups, ids] of broken) {
     it(`fails a bridge that ${name}`, async () => {

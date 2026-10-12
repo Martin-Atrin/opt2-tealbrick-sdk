@@ -3,6 +3,9 @@
 // Key page on its own origin (BRIDGE §3.1 / §9.3 v0.1.10, C59): keys-ticket POST → form + session, session GET.
 // v0.1.13 (spine013): before / context / after hooks with the hold-verdict chain (hv in the op proof), the reserved
 // `tb.` context namespace + `_meta` tealbrick/onBehalfOf, and the companion path /tb/v1/call (app-initiated calls).
+// C85 + v0.1.14 (A2A-10): calls in flight per instance (target or answering one of its hooks), hook re-entry and depth
+// from a VALID parentCall only; anything else is app-initiated: per-caller token bucket (burst 30, 2/s → rate_limited +
+// Retry-After) and a `call.app_initiated` JSON log line (kept in MiniState.logs, which the tests hand the runner).
 // Flags break exactly one rule each so a test can assert the matching check flips from pass to fail.
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -85,6 +88,18 @@ export interface MiniFlags {
   companionNoWfCheck?: boolean;
   /** C91 (QA S1): signs catalog bridge-op proofs with `in` (the SDK binds {bop, op} only; fails B25.real_catalog_search) */
   catalogWithIn?: boolean;
+  /** C85: hooks of an app-initiated call see caller type `system`, not `app` (fails B26.app_initiated_real) */
+  appInitiatedAsSystem?: boolean;
+  /** C85: no rate limit for app-initiated calls (fails B26.app_initiated_rate) */
+  noAppRateLimit?: boolean;
+  /** C85: no `call.app_initiated` log line (fails B26.app_initiated_audit) */
+  noAppInitiatedAudit?: boolean;
+  /** A2A-10: any parentCall makes a child call, even an id the bridge never issued (fails B26.parent_call_forged) */
+  parentTrusted?: boolean;
+  /** A2A-10: a parentCall in flight for ANY instance counts (fails B26.parent_call_foreign: hook_reentry) */
+  parentAnyInstance?: boolean;
+  /** A2A-10: finished calls stay valid parents (fails B26.parent_call_expired) */
+  parentKeepsFinished?: boolean;
 }
 
 /** Identity kept across restarts of one mini bridge (same volume): a restart does not enrol again. */
@@ -98,6 +113,8 @@ export interface MiniState {
   code?: string;
   /** one volume per TB_DATA_DIR (a fresh data dir is a fresh bridge) */
   byDir?: Record<string, MiniState>;
+  /** the bridge's log lines (JSON), across restarts: the tests pass them to the runner as captured logs */
+  logs?: string[];
 }
 
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -123,6 +140,8 @@ const peekJwt = (t: string): Record<string, unknown> => {
 
 export async function startMiniBridge(env: Record<string, string>, flags: MiniFlags = {}, root: MiniState = {}) {
   root.byDir ??= {};
+  root.logs ??= [];
+  const logLines = root.logs;
   root.byDir[env.TB_DATA_DIR as string] ??= {};
   const state = root.byDir[env.TB_DATA_DIR as string] as MiniState;
   const portal = env.TB_PORTAL_URL as string;
@@ -312,15 +331,42 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
     }
     return out;
   };
+  /** calls in flight (A2A-10): target instance, apps answering one of its hooks now, chain depth, finished */
+  const calls = new Map<string, { target: string; inHook: Map<string, number>; depth: number; done: boolean }>();
+  /** C85: per-caller-instance token bucket for app-initiated calls (burst 30, 120/min) */
+  const buckets = new Map<string, { tokens: number; at: number }>();
+  const take = (ins: string): number => {
+    const now = Date.now();
+    const b = buckets.get(ins) ?? { tokens: 30, at: now };
+    b.tokens = Math.min(30, b.tokens + ((now - b.at) / 1000) * 2);
+    b.at = now;
+    buckets.set(ins, b);
+    if (b.tokens >= 1) {
+      b.tokens -= 1;
+      return 0;
+    }
+    return Math.max(1, Math.ceil((1 - b.tokens) / 2));
+  };
   const toolError = (code: string) => ({ isError: true, content: [{ type: "text", text: JSON.stringify({ error: { code, message: code, requestId: "req_mini" } }) }], structuredContent: { error: { code, message: code, requestId: "req_mini" } } });
 
   /** one hook call (hook proof, BRIDGE §8.1 steps 6/7/12); null on transport failure or timeout */
   const hookCall = async (h: HookEntry, phase: "before" | "context" | "after", sub: string, callId: string, call: Record<string, Json>, context: Record<string, Json>, output?: Json): Promise<{ status: number; body: unknown } | null> => {
     const app = (cfg as WorkspaceConfig).apps.find((a) => a.ins === h.ins);
     if (!app) return null;
+    const live = calls.get(callId);
+    live?.inHook.set(h.ins, (live.inHook.get(h.ins) ?? 0) + 1);
+    try {
+      return await hookFetch(app.internalUrl, h, phase, sub, callId, call, context, output);
+    } finally {
+      const n = (live?.inHook.get(h.ins) ?? 1) - 1;
+      if (n > 0) live?.inHook.set(h.ins, n);
+      else live?.inHook.delete(h.ins);
+    }
+  };
+  const hookFetch = async (internalUrl: string, h: HookEntry, phase: "before" | "context" | "after", sub: string, callId: string, call: Record<string, Json>, context: Record<string, Json>, output?: Json): Promise<{ status: number; body: unknown } | null> => {
     const proof = await signHookProof({ iss: brg, sub: sub as never, aud: `tb:ins:${h.ins}` as never, call: callId as never, hook: h.hookId, phase, ctx: digest(context), in: digest(call.input ?? null), iat: nowS() }, key);
     try {
-      const r = await fetch(`${app.internalUrl}/tb/v1/hooks/${h.hookId}`, {
+      const r = await fetch(`${internalUrl}/tb/v1/hooks/${h.hookId}`, {
         method: "POST",
         headers: { "content-type": "application/json", "TB-Call": proof },
         body: JSON.stringify({ phase, call, context, ...(phase === "after" ? { output: output ?? null } : {}) }),
@@ -335,10 +381,20 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
    * The call pipeline after gate(): before chain (refuse > hold > allow, first hold kept: reduceBeforeChain), context
    * hooks (namespace + reserved tb.), the op call with grant + op proof (hv when a hold is kept), after hooks.
    */
-  const pipeline = async (o: { caller: { type: "agent" | "app"; id: string; mode?: string }; grant: string; grantJti: string; ins: string; m: Manifest; op: OperationView; input: Json; context: Record<string, Json>; idem?: string; hooks: boolean }): Promise<{ error: string } | { status: number; body: Record<string, unknown> }> => {
+  const pipeline = async (o: { caller: { type: "agent" | "app" | "system"; id: string; mode?: string }; grant: string; grantJti: string; ins: string; m: Manifest; op: OperationView; input: Json; context: Record<string, Json>; idem?: string; hooks: boolean; depth?: number }): Promise<{ error: string } | { status: number; body: Record<string, unknown> }> => {
+    const callId = `call_${ulid()}`;
+    const live = { target: o.ins, inHook: new Map<string, number>(), depth: o.depth ?? 0, done: false };
+    calls.set(callId, live);
+    try {
+      return await runPipeline(o, callId);
+    } finally {
+      live.done = true;
+      if (!flags.parentKeepsFinished) calls.delete(callId);
+    }
+  };
+  const runPipeline = async (o: Parameters<typeof pipeline>[0], callId: string): Promise<{ error: string } | { status: number; body: Record<string, unknown> }> => {
     const c = cfg as WorkspaceConfig;
     const sub = `tb:${o.caller.type === "agent" ? "agt" : "ins"}:${o.caller.id}`;
-    const callId = `call_${ulid()}`;
     const op = o.op;
     const call: Record<string, Json> = { id: callId, ws: c.ws, caller: o.caller as unknown as Json, target: { instance: o.ins, product: o.m.id, op: op.id, crud: op.crud, effect: op.effect }, input: o.input };
     const matching = (phase: string) =>
@@ -593,7 +649,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       if (!c) return err(503, "config_expired");
       const ins = instanceOf(req, raw);
       if (!ins) return err(401, "unauthenticated");
-      const env = JSON.parse(raw.toString() || "{}") as { target?: string; op?: string; input?: Json; idempotencyKey?: string };
+      const env = JSON.parse(raw.toString() || "{}") as { target?: string; op?: string; input?: Json; idempotencyKey?: string; parentCall?: string };
       const grant = String(req.headers["tb-grant"] ?? "");
       if (!grant || peekJwt(grant).sub !== `tb:ins:${ins}`) return err(403, "grant_invalid");
       const target = c.apps.find((a) => a.product === env.target);
@@ -608,7 +664,23 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         const d = gate({ paused, grant, trust, op, declaredScopeTypes: (m.scopes ?? []).map((x) => x.type) });
         if (d.decision === "refuse") return err(403, d.reason);
       }
-      const fwd = await pipeline({ caller: { type: "app", id: ins }, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: {}, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks });
+      // A2A-10: a parentCall counts only while that call is in flight FOR this caller (its target, or the caller answers
+      // one of its hooks now); anything else (forged, foreign, finished) is ignored → app-initiated (C85)
+      const parent = typeof env.parentCall === "string" ? calls.get(env.parentCall) : undefined;
+      const valid = !!parent && (flags.parentKeepsFinished || !parent.done) && (flags.parentAnyInstance || parent.target === ins || parent.inHook.has(ins));
+      let depth = 1;
+      if (valid && parent) {
+        if (parent.inHook.size > 0) return err(409, "hook_reentry");
+        depth = parent.depth + 1;
+        if (depth > 3) return err(409, "call_depth_exceeded");
+      } else if (!(flags.parentTrusted && typeof env.parentCall === "string")) {
+        const wait = flags.noAppRateLimit ? 0 : take(ins);
+        if (wait > 0) return send(res, 429, { error: { code: "rate_limited", message: "rate_limited", requestId: "req_mini" } }, { "retry-after": String(wait) });
+        if (!flags.noAppInitiatedAudit) logLines.push(JSON.stringify({ ts: new Date().toISOString(), level: "info", evt: "call.app_initiated", ins, product: target.product, op: op.id, parentCall: null }));
+      }
+      const appInitiated = !valid && !(flags.parentTrusted && typeof env.parentCall === "string");
+      const caller = { type: appInitiated && flags.appInitiatedAsSystem ? ("system" as const) : ("app" as const), id: ins };
+      const fwd = await pipeline({ caller, grant, grantJti: g.claims.jti, ins: target.ins, m, op, input: (env.input ?? null) as Json, context: {}, ...(env.idempotencyKey ? { idem: env.idempotencyKey } : {}), hooks: !flags.appCallsSkipHooks, depth });
       if ("error" in fwd) return err(fwd.error === "hook_denied" ? 403 : 502, fwd.error);
       return send(res, fwd.status, fwd.body);
     }

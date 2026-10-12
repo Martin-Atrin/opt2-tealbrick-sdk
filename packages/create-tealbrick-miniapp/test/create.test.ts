@@ -148,8 +148,8 @@ describe("createMiniapp", () => {
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
     assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /\/ui-v0\.1\.1\//);
-    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.14\//);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.10\//);
+    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.13\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.9\//);
     // BSA-07: the ONE app shell from ui, no local frame
     const ui = read(dir, "src/ui/App.tsx");
     assert.match(ui, /import \{[^}]*\bAppShell\b[^}]*\} from "@opt2-tealbrick\/ui";/);

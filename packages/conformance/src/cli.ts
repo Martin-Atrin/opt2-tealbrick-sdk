@@ -49,7 +49,8 @@ const USAGE = `usage:
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
       --groups: e.g. spine013 = the spec 0.1.13 checks B22–B24 (hold verdict, reserved context, app-initiated calls); leave it out for a bridge older than 0.1.14;
-        real_app = B25: a REAL @opt2-tealbrick/miniapp-sdk app (started in this process) behind the bridge (C91)
+        real_app = B25: a REAL @opt2-tealbrick/miniapp-sdk app (started in this process) behind the bridge (C91); B26: its app-initiated
+          callApp (C85: rate limit, call.app_initiated audit from the --cmd / --start logs) and ignored parentCalls (v0.1.14 A2A-10)
       --sdk-module <specifier|file URL>: the SDK for real_app (default: the installed @opt2-tealbrick/miniapp-sdk)
       test roots (default): the start module (or --cmd command) passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option
       --no-test-roots: B20 not_run; a spec-0.1.12 bridge then refuses the fake Portal's enrolment and the run fails at boot
@@ -104,9 +105,9 @@ function commandHarness(cmd: string, url: string, bootMs: number) {
 
 /** `--start <module>`: default export (or named `start`) = the harness `start(env)`, checked up front (usage error),
  * then run in a child process per start (forkStart). */
-async function loadStart<T extends object>(path: string): Promise<(env: Record<string, string>) => Promise<T>> {
+async function loadStart<T extends object>(path: string, output?: (chunk: Buffer) => void): Promise<(env: Record<string, string>) => Promise<T>> {
   await checkStartModule(path);
-  return forkStart<T>(path);
+  return forkStart<T>(path, output ? { output } : {});
 }
 
 function emit(report: Report, json: boolean, base?: string): void {
@@ -240,8 +241,14 @@ export async function main(argv: string[]): Promise<number> {
       };
       const timeoutMs = ms(values.timeout, "timeout");
       const pauseLatencyMs = ms(values["pause-latency"], "pause-latency");
+      // --start: the child's stdout/stderr still go to this process's stderr and are kept for the log checks (B11, B26)
+      const startLogs = { text: "" };
+      const keep = (chunk: Buffer) => {
+        startLogs.text += chunk.toString("utf8");
+        process.stderr.write(chunk);
+      };
       report = await runBridgeTarget({
-        ...(values.start ? { start: await loadStart<BridgeStartResult>(values.start), subject: `start(env) module ${values.start} (child process)` } : { cmd: values.cmd as string }),
+        ...(values.start ? { start: await loadStart<BridgeStartResult>(values.start, keep), subject: `start(env) module ${values.start} (child process)`, logs: () => startLogs.text } : { cmd: values.cmd as string }),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         ...(pauseLatencyMs !== undefined ? { pauseLatencyMs } : {}),
         ...(values.groups ? { groups: values.groups.split(",").map((g) => g.trim()).filter(Boolean) } : {}),

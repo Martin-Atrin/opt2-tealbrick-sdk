@@ -118,6 +118,13 @@ export const BRIDGE_GROUPS: Readonly<Record<string, readonly PendingCheck[]>> = 
     "B25.real_dynamic_call": "_call (resolve + op call) and a list-mode entry tool reach the real SDK app and answer ok",
     "B25.real_op_call": "a plain op passes the real SDK's proof / grant verification and authorize() and writes its receipt",
     "B25.real_mark": "a failing after hook marks the real SDK app's receipt after_failed (bridge op mark)",
+    // C85 + v0.1.14 A2A-10: app-initiated companion calls (the real SDK app as the CALLER; fake apps for parentCall)
+    "B26.app_initiated_real": "StartContext.callApp of the real SDK app reaches a fake app: ok, hooks see caller type app, no parentCall forwarded",
+    "B26.app_initiated_rate": "app-initiated calls are rate-limited per caller instance (burst 30, then rate_limited; a refilled token passes)",
+    "B26.app_initiated_audit": "the bridge log has a call.app_initiated line (caller instance) for every app-initiated call answered ok",
+    "B26.parent_call_forged": "parentCall = an id the bridge never issued → ignored: ok as app-initiated (no hook_reentry / call_depth_exceeded), audited",
+    "B26.parent_call_foreign": "parentCall = another instance's in-flight call (inside a hook) → ignored: ok as app-initiated, not hook_reentry, audited",
+    "B26.parent_call_expired": "parentCall = a finished call of the caller → ignored: ok as app-initiated, audited",
   }),
   claim: ids({
     "C1.K6": "claim with a one-time enrolment code",

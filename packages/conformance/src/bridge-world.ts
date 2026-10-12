@@ -435,7 +435,9 @@ export class BridgeWorld {
     const real = this.realApp?.listed ? this.realApp : null;
     if (real) this.grants.set(`free|${real.ins}`, await this.mint.grant({ sub: `tb:agt:${this.agents.free.agt}`, aud: `tb:ins:${real.ins}`, crud: [...ALL_CRUD], mode: "free", wf: [], iat: nowS() - 5 }));
     this.companionGrants.clear();
-    for (const caller of this.apps)
+    // C85 (B26): the listed real SDK app gets the companion grant of its manifest edge too (app-initiated callApp)
+    const callers: { ins: InstanceId; manifest: Manifest }[] = [...this.apps, ...(real ? [real] : [])];
+    for (const caller of callers)
       for (const comp of caller.manifest.companions ?? []) {
         const target = this.apps.find((a) => a.product === comp.product);
         if (!target) continue;

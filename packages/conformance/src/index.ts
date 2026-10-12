@@ -26,7 +26,7 @@ export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
 export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } from "./fork-start.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
-export { loadSdk, REAL_ENTRIES, REAL_OPS, type RealRunningApp, realAppManifest, type SdkModule, startRealApp } from "./real-app.ts";
+export { loadSdk, REAL_ENTRIES, REAL_OPS, type RealApp, type RealCompanion, type RealRunningApp, type RealStartContext, realAppManifest, type SdkModule, startRealApp } from "./real-app.ts";
 export {
   applyWaivers,
   buildReport,
