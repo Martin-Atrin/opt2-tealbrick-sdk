@@ -8,6 +8,9 @@ import { TbError } from "./errors.ts";
 import { metaGet, metaSet, type RawDb, type Row, tx } from "./store.ts";
 
 const SUMMARY_MAX = 80;
+/** v0.1.14 (Connect Q-C2): caller type of a scope caller id (companion app callers are instances). */
+const callerKind = (id: string): "agent" | "app" => (id.startsWith("ins_") ? "app" : "agent");
+const appliesTo = (g: { callers?: readonly ("agent" | "app")[] }, id: string): boolean => !g.callers || g.callers.includes(callerKind(id));
 
 function toRow(r: Row): ScopeGrantRow {
   return { agent: String(r.agent) as AgentId, type: String(r.type), instanceId: String(r.instance_id), access: String(r.access) };
@@ -61,12 +64,15 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
    * seen later get it on first sight as before. INSERT OR IGNORE: an existing row (an owner edit) always wins.
    */
   const shareWithSeen = (s: Scope, id: string): boolean => {
-    const g = s.defaultGrants.find((x) => x.kind === "shared");
-    if (!g) return false;
+    const shared = s.defaultGrants.filter((x) => x.kind === "shared");
+    if (shared.length === 0) return false;
     const seen = (db.prepare("SELECT agent FROM tb_scope_defaults WHERE type = ?").all(s.type) as Row[]).map((r) => String(r.agent));
     let n = 0;
     const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access) VALUES (?, ?, ?, ?)");
-    for (const agent of seen) n += Number(grant.run(agent, s.type, id, g.access).changes ?? 0);
+    for (const agent of seen) {
+      const g = shared.find((x) => appliesTo(x, agent));
+      if (g) n += Number(grant.run(agent, s.type, id, g.access).changes ?? 0);
+    }
     return n > 0;
   };
 
@@ -90,6 +96,7 @@ export function createScopeStore(db: RawDb, manifest: Manifest, audit: AuditLog,
         if (db.prepare("SELECT 1 FROM tb_scope_defaults WHERE agent = ? AND type = ?").get(caller, s.type)) continue;
         const grant = db.prepare("INSERT OR IGNORE INTO tb_scopes (agent, type, instance_id, access) VALUES (?, ?, ?, ?)");
         for (const g of s.defaultGrants) {
+          if (!appliesTo(g, caller)) continue;
           let ids: string[];
           if (g.kind === "own") {
             ids = (db.prepare("SELECT id FROM tb_scope_instances WHERE type = ? AND owner_agent = ?").all(s.type, caller) as Row[]).map((r) => String(r.id));

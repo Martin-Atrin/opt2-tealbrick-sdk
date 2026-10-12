@@ -82,6 +82,7 @@ export async function slice(
     portalKeySet?: string | null;
     /** spec 0.1.14 addition (not in the 0.1.13 types): companion grant targets */
     companionTargets?: { product: string; ins: string }[];
+    companionCallers?: { product: string; ins: string; name: string }[];
   } = {},
 ): Promise<string> {
   w.rev += 1;
@@ -110,6 +111,7 @@ export async function slice(
       ...(over.portalKeySet === null ? {} : { portalKeySet: over.portalKeySet ?? w.portalKeySet }),
       ...(over.portalUrl ? { portalUrl: over.portalUrl } : {}),
       ...(over.companionTargets ? { companionTargets: over.companionTargets } : {}),
+      ...(over.companionCallers ? { companionCallers: over.companionCallers } : {}),
     } as Parameters<typeof signSlice>[0],
     w.portal,
   );

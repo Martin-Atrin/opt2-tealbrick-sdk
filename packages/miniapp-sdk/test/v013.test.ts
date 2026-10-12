@@ -90,7 +90,7 @@ async function boot(opts: Opts = {}): Promise<Booted> {
         note_get: async (_input, ctx) => {
           b.runs.note_get += 1;
           const c = ctx as SdkOpContext;
-          return { link: c.ownerLink("/notes/1"), targets: c.companionTargets() };
+          return { link: c.ownerLink("/notes/1"), targets: c.companionTargets(), caller: c.caller.name };
         },
         note_delete: async () => ({}),
         notebook_rename: async () => ({}),
@@ -462,6 +462,17 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
     assert.equal(call && "parentCall" in call.body, false);
     await assert.rejects(ctx.callApp("beta", "tb.holds_pending", {}), (e: unknown) => e instanceof TbError && e.code === "no_grant");
     await assert.rejects(ctx.callApp("alpha", "note_get", {}), (e: unknown) => e instanceof TbError && e.code === "companion_undeclared");
+  });
+
+  test("v0.1.14 (C102): an app caller is named from slice companionCallers (verified grant sub); fallback the instance id", async () => {
+    const callerIns = `ins_${ulid()}` as InstanceId;
+    const g = await signGrant({ iss: "tb:portal", sub: `tb:ins:${callerIns}`, aud: `tb:ins:${b.w.ins}`, iat: nowS(), ws: b.w.ws, cnf: { brg: b.w.brg }, crud: ["read"], mode: "bound", held: ["money"], caps: {}, wf: ["note_get"], polrev: 1 }, b.w.portal);
+    const anon = await callOp(b, "note_get", { id: "c102-a" }, { grantToken: g });
+    assert.equal(anon.body.output.caller, callerIns, "no companionCallers entry → instance id");
+    b.bridge.push(await slice(b.w, PRODUCT, { companionCallers: [{ product: "evolution", ins: callerIns, name: "Evolution" }, { product: "other", ins: `ins_${ulid()}`, name: "Other" }] }));
+    await until(async () => (await callOp(b, "note_get", { id: "c102-probe" }, { grantToken: g })).body.output.caller === "Evolution");
+    const named = await callOp(b, "note_get", { id: "c102-b" }, { grantToken: g });
+    assert.equal(named.body.output.caller, "Evolution");
   });
 
   test("Fleet: agentsChanged once after boot, on rename/pause/removal only; EventContext is complete; once again after a restart", async () => {

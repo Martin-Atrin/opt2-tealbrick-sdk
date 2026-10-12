@@ -67,3 +67,25 @@ test("switching an instance to shared applies the default once; owner edits win;
     cleanup();
   }
 });
+
+test("v0.1.14 (Connect Q-C2): defaultGrants[].callers limits first-sight and shared-on-share grants to caller types", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tb-scopes-"));
+  try {
+    const db = openStore(dir);
+    const m = fixtureManifest(1) as Manifest;
+    const sc = m.scopes?.[0];
+    if (!sc) throw new Error("fixture has no scope");
+    sc.defaultGrants = [{ kind: "shared", access: "read_write", callers: ["app"] }];
+    const store = createScopeStore(db, m, createAuditLog(db, []), () => {});
+    await store.instances.create("notebook", "sender:buzz", "Buzz sender", { shared: true });
+    store.applyDefaultsFor("agt_a", "A");
+    store.applyDefaultsFor("ins_caller", "Caller app");
+    assert.equal(await store.access("agt_a" as never, "notebook", "sender:buzz"), null, "agents get nothing");
+    assert.equal((await store.access("ins_caller" as never, "notebook", "sender:buzz"))?.access, "read_write");
+    await store.instances.create("notebook", "sender:slack", "Slack sender", { shared: true });
+    assert.equal(await store.access("agt_a" as never, "notebook", "sender:slack"), null);
+    assert.equal((await store.access("ins_caller" as never, "notebook", "sender:slack"))?.access, "read_write");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

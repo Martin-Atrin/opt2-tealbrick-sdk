@@ -258,7 +258,8 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     const caller: Caller = {
       type: g.caller.type,
       id: callerId,
-      name: sliceAgent?.name ?? callerId,
+      // v0.1.14 (C102): app callers are named from slice companionCallers (verified grant sub), fallback the instance id
+      name: sliceAgent?.name ?? (g.caller.type === "app" ? (rt.trust.companionCallers().find((x) => x.ins === callerId)?.name ?? callerId) : callerId),
       mode: g.caller.type === "agent" ? (sliceAgent?.mode ?? g.claims.mode) : null,
     };
     const callId = proof.claims.call;
@@ -302,7 +303,7 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     // first sight (§7.2): agent from the slice, or a companion app caller on its first call
     if (sliceAgent) await rt.ensureAgent(sliceAgent);
     else if (g.caller.type === "agent") await rt.ensureAgent({ id: callerId as AgentId, name: callerId, mode: g.claims.mode, status: "active" });
-    else rt.scopes.applyDefaultsFor(callerId, callerId);
+    else rt.scopes.applyDefaultsFor(callerId, caller.name);
 
     // idempotency (§4.4)
     const idemKey = idempotencyKeyFor(op, body.idempotencyKey);

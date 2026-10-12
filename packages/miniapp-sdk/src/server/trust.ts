@@ -180,6 +180,16 @@ export class TrustState {
    * Companion grant targets `{product, ins}` from the verified slice (Core fills it).
    * SPEC-GAP: spec 0.1.14 InstanceSlice.companionTargets — not in the 0.1.13 types; malformed entries are skipped.
    */
+  /**
+   * v0.1.14 (C102): the apps holding companion grants that target this instance (slice `companionCallers`); the SDK
+   * names app callers from it (matched by the verified grant `sub`). Malformed entries are skipped.
+   */
+  companionCallers(): { product: string; ins: string; name: string }[] {
+    const raw = this.slice?.companionCallers;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((e) => e && typeof e.product === "string" && typeof e.ins === "string" && typeof e.name === "string" && e.name !== "").map((e) => ({ product: e.product, ins: e.ins, name: e.name }));
+  }
+
   companionTargets(): { product: string; ins: string }[] {
     const raw = (this.slice as (InstanceSlice & { companionTargets?: unknown }) | null)?.companionTargets;
     if (!Array.isArray(raw)) return [];
