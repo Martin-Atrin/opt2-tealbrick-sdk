@@ -75,3 +75,14 @@ it("result label and exit code: PASS (n not_run) only when nothing failed; --all
   assert.equal(exitCode(notImpl, { allowNotRun: true }), 1);
   assert.equal(resultLabel({ ok: true, counts: { pass: 1 } } as never), "PASS");
 });
+
+it("--allow-not-run rewrites the report note so the text matches the exit rule", async () => {
+  const { applyAllowNotRun } = await import("../src/report.ts");
+  const r = { ok: false, counts: { pass: 3, fail: 0, not_run: 2, not_applicable: 0, not_implemented: 0 }, notes: ["summary: …", "not_run checks fail the run (CONFORMANCE §6: exit 0 only if every check passes)"] } as never as { notes: string[] };
+  applyAllowNotRun(r as never);
+  assert.equal(r.notes.some((n) => n.startsWith("not_run checks fail the run")), false);
+  assert.ok(r.notes.some((n) => n.includes("do not fail this run")));
+  const f = { ok: false, counts: { pass: 1, fail: 1, not_run: 1, not_applicable: 0, not_implemented: 0 }, notes: [] } as never as { notes: string[] };
+  applyAllowNotRun(f as never);
+  assert.ok(f.notes.some((n) => n.includes("still fails")));
+});

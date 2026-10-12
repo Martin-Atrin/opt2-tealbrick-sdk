@@ -103,6 +103,22 @@ export function exitCode(report: Report, opts: { allowNotRun?: boolean } = {}): 
   return opts.allowNotRun && onlyNotRun(report) ? 0 : 1;
 }
 
+/**
+ * `--allow-not-run`: the report text must match the exit rule actually used — drop the default "not_run checks fail
+ * the run" note and say what this run did instead.
+ */
+export function applyAllowNotRun(report: Report): void {
+  report.notes = report.notes.filter((n) => !n.startsWith("not_run checks fail the run"));
+  const nr = (report.counts as Record<string, number>).not_run ?? 0;
+  if (nr > 0) {
+    report.notes.push(
+      onlyNotRun(report)
+        ? `--allow-not-run: ${nr} not_run checks do not fail this run (nothing failed; exit 0)`
+        : `--allow-not-run: ${nr} not_run checks are tolerated, but the run still fails (fail / not_implemented present)`,
+    );
+  }
+}
+
 /** True when nothing failed: the only non-passes are not_run / not_applicable. */
 export function onlyNotRun(report: Report): boolean {
   const c = report.counts as Record<string, number>;

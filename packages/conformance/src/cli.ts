@@ -22,7 +22,7 @@ import type { BridgeStartResult } from "./bridge-world.ts";
 import { spawnCommand } from "./command.ts";
 import { checkStartModule, forkStart } from "./fork-start.ts";
 import { request } from "./http.ts";
-import { exitCode, type Report, renderMarkdown, resultLabel } from "./report.ts";
+import { applyAllowNotRun, exitCode, type Report, renderMarkdown, resultLabel } from "./report.ts";
 import { type AppStartResult, loadManifest, runApp } from "./run-app.ts";
 import { runBridgeTarget } from "./run-bridge.ts";
 import { runCoreTarget } from "./run-core.ts";
@@ -218,6 +218,7 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown target ${target}\n${USAGE}\n`);
       return 2;
   }
+  if (values["allow-not-run"] === true) applyAllowNotRun(report);
   emit(report, values.json, values.report);
   return exitCode(report, { allowNotRun: values["allow-not-run"] === true });
 }
