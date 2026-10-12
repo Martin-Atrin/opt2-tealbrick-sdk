@@ -23,12 +23,12 @@
     "gen": "tb-gen all"
   },
   "dependencies": {
-    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.6/opt2-tealbrick-manifest-0.1.6.tgz",
-    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.11/opt2-tealbrick-miniapp-sdk-0.1.11.tgz"
+    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz",
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.7/opt2-tealbrick-conformance-0.1.7.tgz",
+    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz",
     "@opt2-tealbrick/ui": "https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",
