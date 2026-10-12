@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 // tb-conformance — CONFORMANCE §2 targets:
 //   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file> [options]
-//     --start: the module default-exports `start(env) → Promise<{ url, stop, backupNow? }>` (runApp's harness contract)
+//     --start: the module default-exports `start(env) → Promise<{ url, stop, backupNow? }>` (runApp's harness contract);
+//     the CLI runs it in a child process (forkStart), a fresh one per (re)start, so the app's own process changes (the
+//     SDK's root → uid 1000 drop) never reach the suite
 //   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>]
 //   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>]
 //     static route-table checks; with --url also live probes (--live-readonly: no sign-in, no writes)
 //   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups a,b] [--pause-latency <ms>]
-//     --start: default export `start(env) → Promise<{ publicUrl, internalUrl, stop }>`; --cmd: a separate process with
+//     --start: default export `start(env) → Promise<{ publicUrl, internalUrl, stop }>`, run in a child process like the
+//     app's; --cmd: a separate process with
 //     the suite env (TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) merged
 //   tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"]
 // Output: markdown (default) or JSON (--json); --report <base> also writes <base>.json and <base>.md. Exit code 0 only
 // when every check passes (CONFORMANCE §6).
 import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import type { BridgeStart } from "./bridge-world.ts";
+import type { BridgeStartResult } from "./bridge-world.ts";
+import { checkStartModule, forkStart } from "./fork-start.ts";
 import { request } from "./http.ts";
-import { exitCode, type Report, renderMarkdown } from "./report.ts";
+import { exitCode, type Report, renderMarkdown, resultLabel } from "./report.ts";
 import { type AppStartResult, loadManifest, runApp } from "./run-app.ts";
 import { runBridgeTarget } from "./run-bridge.ts";
 import { runCoreTarget } from "./run-core.ts";
@@ -31,7 +34,8 @@ const USAGE = `usage:
   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--json] [--report <base>]
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--timeout <ms>] [--json] [--report <base>]
-  tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"] [--timeout <ms>] [--json] [--report <base>]`;
+  tb-conformance relay --cmd "<stdio relay command>" [--login-cmd "<agent login command>"] [--timeout <ms>] [--json] [--report <base>]
+  every target: [--allow-not-run]  exit 0 when nothing failed and the only non-passes are not_run (default: not_run fails, CONFORMANCE §6)`;
 
 const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf8"));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -74,12 +78,11 @@ function commandHarness(cmd: string, url: string, bootMs: number) {
   };
 }
 
-/** `--start <module>`: default export (or named `start`) = runApp's harness `start(env) → { url, stop, backupNow? }`. */
-async function loadStart(path: string): Promise<(env: Record<string, string>) => Promise<AppStartResult>> {
-  const mod = (await import(pathToFileURL(resolve(path)).href)) as { default?: unknown; start?: unknown };
-  const fn = typeof mod.default === "function" ? mod.default : mod.start;
-  if (typeof fn !== "function") throw new Error(`--start ${path}: no default-exported start(env) function`);
-  return fn as (env: Record<string, string>) => Promise<AppStartResult>;
+/** `--start <module>`: default export (or named `start`) = the harness `start(env)`, checked up front (usage error),
+ * then run in a child process per start (forkStart). */
+async function loadStart<T extends object>(path: string): Promise<(env: Record<string, string>) => Promise<T>> {
+  await checkStartModule(path);
+  return forkStart<T>(path);
 }
 
 function emit(report: Report, json: boolean, base?: string): void {
@@ -113,6 +116,7 @@ export async function main(argv: string[]): Promise<number> {
       "login-cmd": { type: "string" },
       "echo-logs": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
+      "allow-not-run": { type: "boolean", default: false },
       report: { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -139,7 +143,7 @@ export async function main(argv: string[]): Promise<number> {
       const manifest = loadManifest({ manifestPath: values.manifest }) as { runtime?: { port?: number } };
       const timeoutMs = values.timeout ? Number(values.timeout) : 20_000;
       const url = (values.url ?? `http://127.0.0.1:${manifest.runtime?.port ?? 8080}`).replace(/\/$/, "");
-      const harness = values.start ? await loadStart(values.start) : null;
+      const harness = values.start ? await loadStart<AppStartResult>(values.start) : null;
       report = await runApp({
         manifestPath: values.manifest,
         ...(harness
@@ -177,7 +181,7 @@ export async function main(argv: string[]): Promise<number> {
         ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
       });
       const k = report.counts;
-      process.stderr.write(`tb-conformance core: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_implemented} not_implemented → ${report.ok ? "PASS" : "FAIL"}\n`);
+      process.stderr.write(`tb-conformance core: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_implemented} not_implemented → ${resultLabel(report)}\n`);
       break;
     }
     case "bridge": {
@@ -191,14 +195,14 @@ export async function main(argv: string[]): Promise<number> {
       const timeoutMs = ms(values.timeout, "timeout");
       const pauseLatencyMs = ms(values["pause-latency"], "pause-latency");
       report = await runBridgeTarget({
-        ...(values.start ? { start: (await loadStart(values.start)) as unknown as BridgeStart } : { cmd: values.cmd as string }),
+        ...(values.start ? { start: await loadStart<BridgeStartResult>(values.start), subject: `start(env) module ${values.start} (child process)` } : { cmd: values.cmd as string }),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         ...(pauseLatencyMs !== undefined ? { pauseLatencyMs } : {}),
         ...(values.groups ? { groups: values.groups.split(",").map((g) => g.trim()).filter(Boolean) } : {}),
         echoLogs: values["echo-logs"],
       });
       const k = report.counts;
-      process.stderr.write(`tb-conformance bridge: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_applicable} not_applicable → ${report.ok ? "PASS" : "FAIL"}\n`);
+      process.stderr.write(`tb-conformance bridge: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_applicable} not_applicable → ${resultLabel(report)}\n`);
       break;
     }
     case "relay": {
@@ -206,7 +210,7 @@ export async function main(argv: string[]): Promise<number> {
       const timeoutMs = values.timeout ? Number(values.timeout) : undefined;
       report = await runRelayTarget({ cmd: values.cmd, ...(values["login-cmd"] ? { loginCmd: values["login-cmd"] } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
       const k = report.counts;
-      process.stderr.write(`tb-conformance relay: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run → ${report.ok ? "PASS" : "FAIL"}\n`);
+      process.stderr.write(`tb-conformance relay: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run → ${resultLabel(report)}\n`);
       break;
     }
     default:
@@ -214,7 +218,7 @@ export async function main(argv: string[]): Promise<number> {
       return 2;
   }
   emit(report, values.json, values.report);
-  return exitCode(report);
+  return exitCode(report, { allowNotRun: values["allow-not-run"] === true });
 }
 
 const isEntry = (() => {

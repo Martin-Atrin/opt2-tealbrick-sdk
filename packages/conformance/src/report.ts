@@ -93,8 +93,27 @@ export function buildReport(input: {
   };
 }
 
-export function exitCode(report: Report): 0 | 1 {
-  return report.ok ? 0 : 1;
+/**
+ * Exit code (CONFORMANCE §6): 0 only if every check passes. Explicit opt-in `allowNotRun` (CLI `--allow-not-run`):
+ * a run whose only non-passes are `not_run` / `not_applicable` exits 0 — use it where the missing checks are owned
+ * elsewhere (e.g. sign-in checks owned by QA in a read-only live run). Any `fail` or `not_implemented` still exits 1.
+ */
+export function exitCode(report: Report, opts: { allowNotRun?: boolean } = {}): 0 | 1 {
+  if (report.ok) return 0;
+  return opts.allowNotRun && onlyNotRun(report) ? 0 : 1;
+}
+
+/** True when nothing failed: the only non-passes are not_run / not_applicable. */
+export function onlyNotRun(report: Report): boolean {
+  const c = report.counts as Record<string, number>;
+  return (c.fail ?? 0) === 0 && (c.not_implemented ?? 0) === 0;
+}
+
+/** Human result label: `PASS`, `PASS (n not_run)` when nothing failed but some checks did not run, else `FAIL`. */
+export function resultLabel(report: Report): string {
+  if (report.ok) return "PASS";
+  const n = (report.counts as Record<string, number>).not_run ?? 0;
+  return onlyNotRun(report) && n > 0 ? `PASS (${n} not_run)` : "FAIL";
 }
 
 const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
@@ -104,7 +123,7 @@ export function renderMarkdown(r: Report): string {
     `# Conformance report: ${r.target}`,
     "",
     `- Subject: ${r.subject}`,
-    `- Result: **${r.ok ? "PASS" : "FAIL"}** (${Object.entries(r.counts)
+    `- Result: **${resultLabel(r)}** (${Object.entries(r.counts)
       .filter(([, n]) => n > 0)
       .map(([k, n]) => `${n} ${k}`)
       .join(", ")})`,

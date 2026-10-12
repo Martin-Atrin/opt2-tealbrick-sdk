@@ -106,6 +106,19 @@ describe("kit", () => {
     assert.match(files.get(`${k}/README.md`) as string, /`itemCreate` \| `demo-items__item_create` \| write \| required/);
   });
 
+  test("person-audience ops: PERSON_OPS, IDEMPOTENCY facts and the PersonOps io map (Connect request, BSA-08/12)", (t) => {
+    const dir = temp(t);
+    writeRepo(dir, notesJson());
+    const m = loadManifest(join(dir, "tealbrick.manifest.json"));
+    const src = generate("kit", m).get(`${kitDirName(m.manifest.id)}/src/index.ts`) as string;
+    const person = m.manifest.operations.filter((o) => o.audience === "person");
+    assert.ok(person.length > 0, "fixture has a person op");
+    assert.ok(src.includes(`export const PERSON_OPS = ${JSON.stringify(person.map((o) => o.id))} as const;`));
+    for (const o of m.manifest.operations) assert.match(src, new RegExp(`  ${o.id}: "${o.idempotency}",`));
+    for (const o of person) assert.ok(src.includes(`"${o.id}": { input: `), o.id);
+    assert.ok(!src.includes(`"${m.manifest.operations.find((o) => o.audience === "agent")?.id}": { input: `), "agent ops are not in PersonOps");
+  });
+
   test("refuses a missing skill file", (t) => {
     const dir = temp(t);
     writeFileSync(join(dir, "tealbrick.manifest.json"), JSON.stringify(notesJson()));

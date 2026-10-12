@@ -1,6 +1,7 @@
 // Bridge target runner (CONFORMANCE §2 "Bridge (deployed form)"): builds the world (fake Portal, fake apps from the
 // example manifests, agents), starts the bridge under test with the BRIDGE §4.1 env (TB_PORTAL_URL, TB_ENROL_CODE,
-// TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) either in-process (`start(env)` module) or as a separate
+// TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR, PORT, TB_INTERNAL_PORT) either through `start(env)` (in-process; the CLI's
+// `--start` wraps it in a child process with forkStart) or as a separate
 // process (`cmd`), waits for enrolment and the first applied config, runs every check group and returns the §6 report.
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -19,8 +20,10 @@ import { buildReport, type PayloadScan, type Report } from "./report.ts";
 import { bad, notRun, Suite, verdict } from "./suite.ts";
 
 export interface RunBridgeOptions {
-  /** in-process harness: default export of `--start <module>` */
+  /** programmatic harness, called in-process (the CLI's `--start <module>` passes forkStart(module): a child process) */
   start?: BridgeStart;
+  /** report subject override */
+  subject?: string;
   /** shell command started as a separate process with the suite env merged into the current env */
   cmd?: string;
   /** per-wait timeout in ms (acks, notifications); default 15 000 */
@@ -153,7 +156,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
   };
   world.env = env;
   world.portal.bridgePublicUrl = env.TB_PUBLIC_URL as string;
-  const subject = opts.cmd ? `process: ${opts.cmd}` : "in-process start(env) module";
+  const subject = opts.subject ?? (opts.cmd ? `process: ${opts.cmd}` : "in-process start(env) module");
   let running: BridgeStartResult | null = null;
   const selected = opts.groups ? new Set(opts.groups) : null;
   try {

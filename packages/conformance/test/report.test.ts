@@ -61,3 +61,17 @@ describe("report", () => {
     assert.equal(exitCode(c), 1);
   });
 });
+
+it("result label and exit code: PASS (n not_run) only when nothing failed; --allow-not-run is an explicit opt-in", async () => {
+  const { exitCode, resultLabel } = await import("../src/report.ts");
+  const base = { ok: false, counts: { pass: 3, fail: 0, not_run: 2, not_applicable: 1, not_implemented: 0 } } as never;
+  assert.equal(resultLabel(base), "PASS (2 not_run)");
+  assert.equal(exitCode(base), 1, "default: not_run fails the run");
+  assert.equal(exitCode(base, { allowNotRun: true }), 0);
+  const failed = { ok: false, counts: { pass: 3, fail: 1, not_run: 2, not_applicable: 0, not_implemented: 0 } } as never;
+  assert.equal(resultLabel(failed), "FAIL");
+  assert.equal(exitCode(failed, { allowNotRun: true }), 1);
+  const notImpl = { ok: false, counts: { pass: 3, fail: 0, not_run: 0, not_applicable: 0, not_implemented: 1 } } as never;
+  assert.equal(exitCode(notImpl, { allowNotRun: true }), 1);
+  assert.equal(resultLabel({ ok: true, counts: { pass: 1 } } as never), "PASS");
+});

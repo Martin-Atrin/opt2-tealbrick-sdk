@@ -23,6 +23,7 @@ export {
 } from "./fake-bridge.ts";
 export { createFakePortal, FAKE_PORTAL_ROUTES, FakePortal, FakePortalControl, type FakePortalOptions } from "./fake-portal.ts";
 export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
+export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } from "./fork-start.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
 export { buildReport, type CheckResult, type CheckStatus, exitCode, FAILING_STATUSES, type PayloadScan, type Report, renderMarkdown, specDigest, type Target } from "./report.ts";

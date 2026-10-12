@@ -106,4 +106,26 @@ describe("fake portal", () => {
       await q.close();
     }
   });
+
+  it("key rotation reaches the config even when a world froze portalKeys into configExtra (Lead · Bridge finding, C5)", async () => {
+    const q = await createFakePortal({ pollIntervalS: 0, maxWaitS: 1 });
+    try {
+      // what BridgeWorld.publish() does: freeze the current key list into configExtra (merged last)
+      q.configExtra = { ...q.configExtra, portalKeys: q.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })) };
+      const statuses = () => (q.configBody(q.rev).portalKeys ?? []).map((k) => k.status);
+      assert.deepEqual(statuses(), ["active"]);
+      await q.control.rotateKey("announce");
+      assert.deepEqual(statuses(), ["active", "pending"], "announce carries the pending key");
+      await q.control.rotateKey("activate");
+      assert.deepEqual(statuses(), ["retired", "active"], "activate applied");
+      await q.control.rotateKey("retire");
+      assert.deepEqual(statuses(), ["active"], "retired key dropped");
+      // standalone worlds keep their empty list
+      q.configExtra = { ...q.configExtra, portalKeys: [] };
+      await q.control.rotateKey("announce");
+      assert.deepEqual(statuses(), []);
+    } finally {
+      await q.close();
+    }
+  });
 });

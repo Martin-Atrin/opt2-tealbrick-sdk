@@ -7,11 +7,11 @@
     "node": ">=24"
   },
   "scripts": {
-    "typecheck": "pnpm --filter @opt2-tealbrick/manifest run build && pnpm -r run typecheck",
+    "typecheck": "node \"$npm_execpath\" --filter @opt2-tealbrick/manifest run build && node \"$npm_execpath\" -r run typecheck",
     "lint": "biome check .",
-    "test": "pnpm --filter @opt2-tealbrick/manifest run build && pnpm -r run test",
-    "conformance": "pnpm --filter @opt2-tealbrick/manifest run build && pnpm -r --if-present run conformance",
-    "build": "pnpm -r run build"
+    "test": "node \"$npm_execpath\" --filter @opt2-tealbrick/manifest run build && node \"$npm_execpath\" -r run test",
+    "conformance": "node \"$npm_execpath\" --filter @opt2-tealbrick/manifest run build && node \"$npm_execpath\" -r --if-present run conformance",
+    "build": "node \"$npm_execpath\" -r run build"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15"

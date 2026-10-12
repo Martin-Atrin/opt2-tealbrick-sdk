@@ -94,7 +94,7 @@ function kitIndex(lm: LoadedManifest): string {
   for (const u of m.unlocks ?? []) for (const id of u.provides.operations ?? []) unlockedBy.set(id, u.requires);
 
   // Reserved names of the fixed runtime section.
-  for (const n of ["KitMcp", "KitToolResult", "KitHeld", "KitCall", "KitCallOptions", "KitIdempotent", "KitError", "KitClient", "KitSkill", "KitCatalogEntry", "KitSearchInput", "KitDynamicCallInput", "TbHoldStatusInput", "TbHoldStatusOutput", "OpId", "ToolName"])
+  for (const n of ["KitMcp", "KitToolResult", "KitHeld", "KitCall", "KitCallOptions", "KitIdempotent", "KitError", "KitClient", "KitSkill", "KitCatalogEntry", "KitSearchInput", "KitDynamicCallInput", "TbHoldStatusInput", "TbHoldStatusOutput", "OpId", "ToolName", "PersonOpId", "PersonOps"])
     em.reserve(n);
 
   const types: string[] = [];
@@ -192,6 +192,17 @@ function kitIndex(lm: LoadedManifest): string {
   out.push("/** Manifest operation ids (manifest order). Person ops are reachable only from the app UI, never as MCP tools. */");
   out.push(`export const OP = ${objectLiteral([...opKeys].map(([id, key]) => [key, id]))} as const;`);
   out.push("export type OpId = (typeof OP)[keyof typeof OP];", "");
+  // Person-audience ops (app UI only; Connect REQUESTS "no person-op types in tb-gen", BSA-08/12): ids, idempotency facts
+  // and an id → {input, output} map so the UI types `callOp` from the kit instead of hand-written wrappers.
+  const personOps = m.operations.filter((o) => o.audience === "person");
+  out.push("/** Person-audience operation ids (called from the app UI with the client `callOp`, never MCP tools). */");
+  out.push(`export const PERSON_OPS = ${JSON.stringify(personOps.map((o) => o.id))} as const;`);
+  out.push("export type PersonOpId = (typeof PERSON_OPS)[number];", "");
+  out.push("/** Manifest idempotency per operation id (`required` ops need an Idempotency key; the client `callOp` adds one itself). */");
+  out.push(`export const IDEMPOTENCY = ${objectLiteral(m.operations.map((o) => [o.id, o.idempotency]))} as const;`, "");
+  const io = (o: (typeof m.operations)[number], part: "Input" | "Output") => ((part === "Input" ? o.input : o.output) ? `${pascal(o.id)}${part}` : part === "Input" ? "Record<string, never>" : "unknown");
+  out.push("/** Input/output types of every person-audience operation, keyed by op id. */");
+  out.push(`export interface PersonOps {${personOps.map((o) => `\n  ${JSON.stringify(o.id)}: { input: ${io(o, "Input")}; output: ${io(o, "Output")} };`).join("")}${personOps.length ? "\n" : ""}}`, "");
   out.push(`/** MCP tool names the bridge derives (\`<product>${TOOL_NAME_RULE.separator}<op>\`, search-mode \`_search\`/\`_call\`, hold status). */`);
   out.push(`export const TOOL = ${objectLiteral(tools)} as const;`);
   out.push("export type ToolName = (typeof TOOL)[keyof typeof TOOL];", "");

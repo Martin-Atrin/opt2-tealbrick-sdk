@@ -1,7 +1,8 @@
 // App target runner (CONFORMANCE §2 "App, Portal mode"): boots (or points at) an app wired to the fake bridge through
 // the SDK-API §13 env names, waits for its claim and first slice, runs the manifest checks and every app check, and
 // returns the §6 report. `start(env)` is the programmatic harness: it boots the app with `env` and returns its URL,
-// a stop function and optionally `backupNow` (RunningApp.backups.runNow) for the A7 round-trip.
+// a stop function and optionally `backupNow` (RunningApp.backups.runNow) for the A7 round-trip. `start` runs IN this
+// process; the CLI's `--start <module>` passes forkStart(module), which boots the module in a child process per start.
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,7 +31,7 @@ export interface RunAppOptions {
   /** parsed manifest JSON (or use `manifestPath`) */
   manifest?: unknown;
   manifestPath?: string;
-  /** programmatic harness: boot the app with `env` */
+  /** programmatic harness: boot the app with `env` (called in-process; wrap with forkStart(module) for a child process) */
   start?: (env: Record<string, string>) => Promise<AppStartResult>;
   /** an app booted elsewhere with the env passed to `onEnv` (no restart / backup checks: they report not_run) */
   url?: string;

@@ -386,6 +386,12 @@ export class FakePortalControl {
       next.status = "active";
     }
     if (phase === "retire") p.keys = p.keys.filter((k) => k.status !== "retired");
+    // A world may have frozen `portalKeys` into configExtra (merged last); refresh it from the key list so the
+    // announce / activate / retire revisions actually carry the rotation (Lead · Bridge finding on C5.portal_key_rotation).
+    // A standalone world (portalKeys: []) keeps its empty list.
+    if (p.configExtra.portalKeys && p.configExtra.portalKeys.length > 0) {
+      p.configExtra = { ...p.configExtra, portalKeys: p.keys.map((k) => ({ jwk: k.key.publicJwk, status: k.status })) };
+    }
     return p.mintRevision();
   }
   /** Portal down (B4): connections are dropped without an answer. */
