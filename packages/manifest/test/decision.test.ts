@@ -43,6 +43,7 @@ async function setup(grant: Partial<Issue<GrantClaims>> = {}) {
     access: { level: "read", crud: ["read"] },
     usage: {},
     approval: "none",
+    holdVerdict: null,
     ...over,
   });
   return { w, token, bad, gateIn, authIn };
@@ -144,4 +145,25 @@ test("authorize: tb.hold_status skips the scope step (I4)", async () => {
   const hs = { id: "tb.hold_status", crud: ["read"] as "read"[], effect: "read" as const };
   assert.equal(authorize(authIn({ op: hs, access: null })).decision, "run");
   assert.equal(authorize(authIn({ op: hs, access: null, grant: bad })).reason, "grant_invalid");
+});
+
+test("authorize v0.1.13 (G1): a hook hold verdict holds after scope; approval runs once; scope refusal wins", async () => {
+  const { authIn } = await setup({ crud: ["read", "create"] });
+  const access = { level: "rw", crud: ["read", "create"] as ("read" | "create")[] };
+  const add = { id: "notes_add", crud: ["create"] as "create"[], effect: "write" as const, scopeType: "area" };
+  const hv = { family: "policy" as const, reason: "needs owner review", by: "rules/rules_gate" };
+  assert.deepEqual(authorize(authIn({ op: add, access, holdVerdict: hv })), { decision: "hold", reason: "held_by_hook", holdFamily: "policy", heldBy: "rules/rules_gate" });
+  assert.equal(authorize(authIn({ op: add, access, holdVerdict: hv, approval: "approved" })).decision, "run");
+  assert.equal(authorize(authIn({ op: add, access: { level: "r", crud: ["read"] }, holdVerdict: hv })).reason, "scope_denied");
+  // a read op is held too when a hook says so
+  assert.equal(authorize(authIn({ holdVerdict: { ...hv, family: "first_contact" } })).holdFamily, "first_contact");
+});
+
+test("gate + authorize v0.1.13 (G4): tb.holds_pending needs only a valid grant (I4)", async () => {
+  const { authIn, gateIn, bad } = await setup({ crud: ["create"], mode: "bound", wf: ["notes_add"] });
+  const hp = { id: "tb.holds_pending", crud: ["read"] as "read"[], effect: "read" as const };
+  assert.equal(authorize(authIn({ op: hp, access: null })).decision, "run");
+  const view = { standard: true as const, id: "tb.holds_pending" as const, title: "Pending approvals", crud: ["read"] as "read"[], effect: "read" as const, audience: "agent" as const, idempotency: "none" as const, receipt: false as const };
+  assert.equal(gate(gateIn({ op: view })).decision, "pass");
+  assert.equal(gate(gateIn({ op: view, grant: bad })).reason, "grant_invalid");
 });

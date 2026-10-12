@@ -1,0 +1,128 @@
+// Hook answers, the before-chain reducer, the reserved `tb.onBehalfOf` carrier and the launch path rule
+// (spec 0.1.13: BRIDGE §8.1 step 6 / §8.5, PORTAL-API v0.1.13, SDK-API §18). ONE implementation for bridge, SDK,
+// Core and conformance.
+
+import type { HookHoldVerdict, OnBehalfOfClaim, OnBehalfOfContext } from "@opt2-tealbrick/spec/bridge";
+import { RESERVED_CONTEXT_PREFIX } from "@opt2-tealbrick/spec/bridge";
+import { HOOK_HOLD_FAMILIES, type HookPhase } from "@opt2-tealbrick/spec/manifest";
+import { canonicalize } from "./jcs.ts";
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const POINTER_RE = /^(\/([^~/]|~[01])*)*$/;
+
+/**
+ * Phase shape of a hook answer (BRIDGE §8.1 steps 6, 7, 12; v0.1.13 hold verdict and reserved `tb.` namespace).
+ * `product` = the answering hook's product (context keys must start with `<product>.`). Returns the problem or null.
+ */
+export function hookResponseProblem(phase: HookPhase, body: unknown, product: string): string | null {
+  if (!isObj(body)) return "answer is not an object";
+  const keys = Object.keys(body);
+  if (phase === "before") {
+    const extra = keys.filter((k) => k !== "allow" && k !== "reason" && k !== "hold");
+    if (extra.length) return `unknown keys ${extra.join(",")}`;
+    if (typeof body.allow !== "boolean") return "allow not boolean";
+    if (body.reason !== undefined && typeof body.reason !== "string") return "reason not a string";
+    if (body.hold !== undefined) {
+      if (body.allow) return "hold with allow true";
+      const h = body.hold;
+      if (!isObj(h) || Object.keys(h).some((k) => k !== "family" && k !== "reason")) return "hold shape";
+      if (typeof h.family !== "string" || !(HOOK_HOLD_FAMILIES as readonly string[]).includes(h.family)) return "hold family";
+      if (typeof h.reason !== "string" || h.reason.length < 1 || h.reason.length > 280) return "hold reason (1..280)";
+    }
+    return null;
+  }
+  if (phase === "context") {
+    if (keys.some((k) => k !== "add")) return "unknown keys";
+    if (!isObj(body.add)) return "add not an object";
+    for (const k of Object.keys(body.add)) {
+      if (k.startsWith(RESERVED_CONTEXT_PREFIX)) return `reserved key ${k}`;
+      if (!k.startsWith(`${product}.`) || k.length === product.length + 1) return `key ${k} outside ${product}.`;
+    }
+    return null;
+  }
+  if (keys.some((k) => k !== "output" && k !== "redactions")) return "unknown keys";
+  if (body.redactions !== undefined && (!Array.isArray(body.redactions) || !body.redactions.every((p) => typeof p === "string" && POINTER_RE.test(p)))) return "redactions not JSON pointers";
+  return null;
+}
+
+export type BeforeChainResult =
+  | { kind: "allow" }
+  | { kind: "refuse"; by: string; reason: string | null }
+  | { kind: "hold"; by: string; verdict: HookHoldVerdict };
+
+/**
+ * The before-chain precedence (BRIDGE v0.1.13): answers in chain order (`by` = `<product>/<hookId>`, `answer` already
+ * shape-checked). The first refuse wins at once; else the FIRST hold is kept; else allow. Callers may stop calling
+ * hooks after a refuse; a kept hold never stops the chain.
+ */
+export function reduceBeforeChain(answers: readonly { by: string; answer: { allow: boolean; reason?: string; hold?: HookHoldVerdict } }[]): BeforeChainResult {
+  let hold: BeforeChainResult | null = null;
+  for (const { by, answer } of answers) {
+    if (!answer.allow && !answer.hold) return { kind: "refuse", by, reason: answer.reason ?? null };
+    if (!answer.allow && answer.hold && !hold) hold = { kind: "hold", by, verdict: { family: answer.hold.family, reason: answer.hold.reason } };
+  }
+  return hold ?? { kind: "allow" };
+}
+
+/** `hv` proof claim for a kept hold (CREDENTIALS v0.1.13). */
+export function holdVerdictClaim(r: Extract<BeforeChainResult, { kind: "hold" }>): { f: HookHoldVerdict["family"]; r: string; by: string } {
+  return { f: r.verdict.family, r: r.verdict.reason, by: r.by };
+}
+
+/** channel_sender id `"<channel>:<value>"` (SDK-API §18). */
+export const CHANNEL_SENDER_RE = /^[a-z0-9_-]{1,32}:.+$/;
+
+/** `channel_sender` id from Connect's channel and sender value. */
+export function channelSenderId(channel: string, value: string): string {
+  const id = `${channel}:${value}`;
+  if (!CHANNEL_SENDER_RE.test(id) || value.length === 0) throw new Error("channel_sender: channel must match [a-z0-9_-]{1,32} and value be non-empty");
+  return id;
+}
+
+/** Parses a `channel_sender` id; a bare `npub1…` reads as `buzz:` (compatibility). Null when not parseable. */
+export function parseChannelSender(id: string): { channel: string; value: string } | null {
+  if (id.startsWith("npub1")) return { channel: "buzz", value: id };
+  if (!CHANNEL_SENDER_RE.test(id)) return null;
+  const i = id.indexOf(":");
+  return { channel: id.slice(0, i), value: id.slice(i + 1) };
+}
+
+/**
+ * Bridge §8.5: `_meta["tealbrick/onBehalfOf"]` → context `tb.onBehalfOf` (unverified), or null when absent or invalid
+ * (kind unknown, id 1..256, display ≤ 128, no other keys, JCS ≤ 1024 bytes, channel_sender id `<channel>:<value>`).
+ */
+export function onBehalfOfFromMeta(value: unknown): OnBehalfOfContext | null {
+  if (!isObj(value)) return null;
+  if (Object.keys(value).some((k) => k !== "kind" && k !== "id" && k !== "display")) return null;
+  const { kind, id, display } = value;
+  if (kind !== "person" && kind !== "agent" && kind !== "channel_sender") return null;
+  if (typeof id !== "string" || id.length < 1 || id.length > 256) return null;
+  if (display !== undefined && (typeof display !== "string" || display.length > 128)) return null;
+  if (kind === "channel_sender" && !CHANNEL_SENDER_RE.test(id)) return null;
+  const claim: OnBehalfOfClaim = { kind, id, ...(display !== undefined ? { display } : {}) };
+  if (new TextEncoder().encode(canonicalize(claim as unknown as Parameters<typeof canonicalize>[0])).length > 1024) return null;
+  return { claim, verified: false, via: "mcp_meta" };
+}
+
+/**
+ * Launch path rule (PORTAL-API v0.1.13, C86): app-relative, starts with `/`, ≤ 512 chars, no scheme, host, `//`, `\`,
+ * control characters or `..` segment — checked on the raw string and after percent-decoding. A leading `/` without
+ * `//` already rules out a scheme or host.
+ */
+export function isValidLaunchPath(path: string): boolean {
+  if (typeof path !== "string" || path.length < 1 || path.length > 512) return false;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    return false;
+  }
+  for (const p of [path, decoded]) {
+    if (!p.startsWith("/") || p.startsWith("//")) return false;
+    if (p.includes("\\") || p.includes("//")) return false;
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the rule rejects control characters
+    if (/[\u0000-\u001f\u007f]/.test(p)) return false;
+    if (p.split(/[/?#]/).some((seg) => seg === "..")) return false;
+  }
+  return true;
+}

@@ -295,6 +295,15 @@ describe("M-HK, M-CP, M-UL, M-SK, M-HH, M-BK, M-AR, M-PR", () => {
   });
   test("M-CP-1 own product", refuses("M-CP-1", "companion_invalid", (m) => (m.companions[0].product = "notes")));
   test("M-CP-1 duplicate", refuses("M-CP-1", "companion_invalid", (m) => m.companions.push(structuredClone(m.companions[0]))));
+  test("M-CP-3 wildcard companion: tb.holds_pending / read is valid", () => {
+    assert.equal(mutate((m) => m.companions.push({ product: "*", operations: ["tb.holds_pending"], crud: ["read"], purpose: "Show pending approvals of all apps" })).ok, true);
+  });
+  test("M-CP-3 wildcard on another op", refuses("M-CP-3", "companion_invalid", (m) => m.companions.push({ product: "*", operations: ["event_get"], crud: ["read"], purpose: "x" })));
+  test("M-CP-3 wildcard with write crud", refuses("M-CP-3", "companion_invalid", (m) => m.companions.push({ product: "*", operations: ["tb.holds_pending"], crud: ["read", "update"], purpose: "x" })));
+  test("M-CP-3 other standard ops are never companion ops", () => {
+    // the schema refuses tb.holds_list already (only tb.holds_pending is allowed as a standard companion op)
+    assert.equal(mutate((m) => (m.companions[0].operations = ["tb.holds_list"])).ok, false);
+  });
   test("M-UL-1 requires non-companion", refuses("M-UL-1", "unlock_invalid", (m) => (m.unlocks[0].requires = "ghost")));
   test("M-UL-1 provides unknown op", refuses("M-UL-1", "unlock_invalid", (m) => (m.unlocks[0].provides.operations = ["ghost"])));
   test("M-UL-1 provides unknown skill", refuses("M-UL-1", "unlock_invalid", (m) => (m.unlocks[0].provides.skills = ["ghost"])));
@@ -342,6 +351,11 @@ describe("validateCompanions (M-CP-2)", () => {
   test("matching target passes", () => {
     const r = validateCompanions(base(), [target([op({})])]);
     assert.equal(r.ok, true);
+  });
+  test("v0.1.13: tb.holds_pending on a named target needs read; a wildcard is not checked against targets", () => {
+    const m = base();
+    m.companions = [{ product: "calendar", operations: ["tb.holds_pending"], crud: ["read"], purpose: "x" }, { product: "*", operations: ["tb.holds_pending"], crud: ["read"], purpose: "y" }];
+    assert.equal(validateCompanions(m, [target([op({})])]).ok, true);
   });
   test("missing target op", () => {
     expectIssue(validateCompanions(base(), [target([op({ id: "other" })])]), "M-CP-2", "companion_op_invalid");

@@ -21,9 +21,9 @@ import { validateAgainstSchema } from "../src/validate.ts";
 const m = (): Manifest => structuredClone(example) as Manifest;
 
 describe("withStandardOps", () => {
-  test("manifest ops first (standard: false), then the 10 standard ops in STANDARD_OPERATIONS order", () => {
+  test("manifest ops first (standard: false), then the 11 standard ops in STANDARD_OPERATIONS order", () => {
     const views = withStandardOps(m());
-    assert.equal(views.length, example.operations.length + 10);
+    assert.equal(views.length, example.operations.length + 11);
     assert.deepEqual(
       views.slice(0, example.operations.length).map((v) => [v.id, v.standard]),
       example.operations.map((o) => [o.id, false]),
@@ -69,11 +69,12 @@ describe("withStandardOps", () => {
 });
 
 describe("agentOperations", () => {
-  test("agent manifest ops + tb.hold_status, no person ops", () => {
+  test("agent manifest ops + tb.hold_status + tb.holds_pending (v0.1.13), no person ops", () => {
     const ids = agentOperations(m()).map((o) => o.id);
     assert.deepEqual(ids, [
       ...example.operations.filter((o) => o.audience === "agent").map((o) => o.id),
       "tb.hold_status",
+      "tb.holds_pending",
     ]);
     assert.ok(!ids.includes("notebook_rename"));
   });

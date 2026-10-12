@@ -15,6 +15,7 @@ import manifestSchema from "@opt2-tealbrick/spec/schemas/manifest.schema.json" w
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import { HOLDS_PENDING_OP } from "./decision.ts";
 import { canonicalize, digest } from "./jcs.ts";
 import { DYNAMIC_CALL_INPUT_SCHEMA, derivedToolNames, standardOpInputSchema, toolNameFits } from "./ops.ts";
 import { parseSkillFile, parseVariable, skillTextViolation, VARIABLE_RE } from "./skill-text.ts";
@@ -675,6 +676,13 @@ function companionRules(m: Manifest, add: Add): void {
   );
   companions.forEach((c, i) => {
     if (c.product === m.id) add("M-CP-1", "companion_invalid", ptr("companions", i, "product"), "an app is not its own companion");
+    // M-CP-3 (v0.1.13, G4/C82): the wildcard companion is ONLY tb.holds_pending / read; tb.holds_pending is the only
+    // standard op a companion may name
+    const std = c.operations.filter((o) => o.startsWith("tb."));
+    if (std.some((o) => o !== HOLDS_PENDING_OP)) add("M-CP-3", "companion_invalid", ptr("companions", i, "operations"), `standard op ${std.join(",")} cannot be a companion op (only ${HOLDS_PENDING_OP})`);
+    if (c.product === "*" && (c.operations.length !== 1 || c.operations[0] !== HOLDS_PENDING_OP || c.crud.length !== 1 || c.crud[0] !== "read")) {
+      add("M-CP-3", "companion_invalid", ptr("companions", i), `a wildcard companion ("*") needs exactly operations ["${HOLDS_PENDING_OP}"] and crud ["read"]`);
+    }
   });
 
   const unlocks = m.unlocks ?? [];
@@ -811,12 +819,18 @@ export function validateCompanions(manifest: Manifest, targets: readonly Manifes
   const { errors, add } = collector();
   const byId = new Map(targets.map((t) => [t.id, t]));
   manifest.companions?.forEach((c, ci) => {
+    if (c.product === "*") return; // M-CP-3: every app serves tb.holds_pending (standard op)
     const target = byId.get(c.product);
     if (!target) return;
     const p = ptr("companions", ci);
     const ops = new Map<string, Operation>(target.operations.map((o) => [o.id, o]));
     const union = new Set<string>();
     for (const id of c.operations) {
+      if (id === HOLDS_PENDING_OP) {
+        union.add("read");
+        if (!c.crud.includes("read")) add("M-CP-2", "companion_op_invalid", `${p}/crud`, `${c.product}.${id} needs crud read`);
+        continue;
+      }
       const op = ops.get(id);
       if (op?.audience !== "agent") {
         add("M-CP-2", "companion_op_invalid", `${p}/operations`, `${c.product} has no agent operation ${id}`);

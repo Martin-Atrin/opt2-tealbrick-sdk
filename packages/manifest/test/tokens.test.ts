@@ -289,3 +289,32 @@ test("verifyPairingCode / verifyAgentSession", async () => {
   assert.equal(code(verifyAgentSession(pc, { now: NOW, self: brg, ws: w.ws, keys: w.trust.issuers })), "invalid_token");
   await assert.rejects(signJws(TYP.agentSession, { iss: brg, sub: `tb:agt:${w.agt}`, aud: `tb:brg:brg_${ulid()}`, ws: w.ws, con: `con_${ulid()}`, gen: 1, iat: NOW, exp: NOW + 60, jti: ulid() }, w.bridgeKey));
 });
+
+test("verifyCallProof v0.1.13 (G1): `hv` is part of the signed op proof; malformed hv refused; hook proofs never carry it", async () => {
+  const { w, brg, opClaims, bind, call } = await proofs();
+  const hv = { f: "policy" as const, r: "needs owner review", by: "rules/rules_gate" };
+  const p = await signCallProof({ ...opClaims, hv }, w.bridgeKey);
+  const r = verifyCallProof(p, w.trust, bind);
+  assert.ok(r.ok);
+  assert.deepEqual(r.ok && r.claims.hv, hv);
+  for (const bad of [
+    { ...hv, f: "caps" },
+    { ...hv, r: "" },
+    { ...hv, r: "x".repeat(281) },
+    { ...hv, by: "rules" },
+    { ...hv, by: "Rules/x" },
+    { ...hv, by: "rules/tb_x" },
+    { ...hv, extra: 1 },
+  ]) {
+    // the closed claim set is enforced when signing too (the same check as verifier step 5)
+    await assert.rejects(signCallProof({ ...opClaims, hv: bad as typeof hv }, w.bridgeKey), /claim hv/, JSON.stringify(bad).slice(0, 60));
+  }
+  // `hv` belongs only to the op variant
+  await assert.rejects(signHookProof({ iss: brg, sub: `tb:agt:${w.agt}`, aud: `tb:ins:${w.ins}`, call, hook: "audit", phase: "before", ctx: bind.contextDigest, iat: NOW, hv } as never, w.bridgeKey), /hook proof shape/);
+  // an edited hv breaks the signature
+  const [h64, p64, s64] = p.split(".");
+  const payload = JSON.parse(Buffer.from(p64 as string, "base64url").toString());
+  payload.hv = { ...hv, f: "money" };
+  const forged = `${h64}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${s64}`;
+  assert.equal(code(verifyCallProof(forged, w.trust, bind)), "invalid_token");
+});

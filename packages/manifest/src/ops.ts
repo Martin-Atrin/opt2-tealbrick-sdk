@@ -14,7 +14,7 @@ function closed(properties: Record<string, unknown>, required: string[] = []): J
   return { type: "object", additionalProperties: false, required, properties };
 }
 
-/** The 10 standard operations with audience / crud / effect per SDK-API §6 and their input shapes. */
+/** The 11 standard operations with audience / crud / effect per SDK-API §6 and their input shapes. */
 const STANDARD_DEFS: Record<StandardOperationId, StandardDef> = {
   "tb.hold_status": {
     title: "Hold status",
@@ -114,6 +114,16 @@ const STANDARD_DEFS: Record<StandardOperationId, StandardDef> = {
     receipt: false,
     input: empty,
   },
+  // v0.1.13 (G4): pending holds as summaries; agent → own, companion app → all
+  "tb.holds_pending": {
+    title: "Pending approvals",
+    crud: ["read"],
+    effect: "read",
+    audience: "agent",
+    idempotency: "none",
+    receipt: false,
+    input: closed({ limit: { type: "integer", minimum: 1, maximum: 100 }, cursor }),
+  },
 };
 
 /** Input of every dynamic operation call and of the `<product>__<op>_call` tool (`DynamicCallInput`, MANIFEST §5.3). */
@@ -144,13 +154,13 @@ export function isStandardOpId(id: string): id is StandardOperationId {
   return (STANDARD_OPERATIONS as readonly string[]).includes(id);
 }
 
-/** Manifest operations (in manifest order) followed by the 10 standard operations: the one list bridge and SDK use. */
+/** Manifest operations (in manifest order) followed by the 11 standard operations: the one list bridge and SDK use. */
 export function withStandardOps(manifest: Manifest): OperationView[] {
   const own: OperationView[] = manifest.operations.map((op) => ({ ...op, standard: false as const }));
   return [...own, ...STANDARD_OPERATION_VIEWS.map((v) => ({ ...v, crud: [...v.crud] }))];
 }
 
-/** Agent-audience operations (manifest + `tb.hold_status`): the candidates for MCP tools. */
+/** Agent-audience operations (manifest + `tb.hold_status` + `tb.holds_pending`): the candidates for MCP tools. */
 export function agentOperations(manifest: Manifest): OperationView[] {
   return withStandardOps(manifest).filter((op) => op.audience === "agent");
 }

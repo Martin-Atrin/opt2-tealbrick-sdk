@@ -3,6 +3,7 @@
 export * from "./conditions.ts";
 export * from "./cron.ts";
 export * from "./decision.ts";
+export * from "./hooks.ts";
 export * from "./jcs.ts";
 export * from "./jws.ts";
 export * from "./keys.ts";
