@@ -25,6 +25,9 @@ export type { AppSecrets };
  */
 export interface CompanionTargetsView {
   companionTargets(): string[];
+  /** v0.1.15 (C105a): the workspace apps policy's held families from the slice (display only; enforcement is the
+   *  companion grant `held` claim at the target app), or null when the slice has none */
+  appsPolicy(): readonly string[] | null;
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */

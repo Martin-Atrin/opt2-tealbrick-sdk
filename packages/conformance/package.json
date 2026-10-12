@@ -25,7 +25,7 @@
     "gen:check": "node scripts/gen-sdk-exports.ts --check"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.15/opt2-tealbrick-spec-0.1.15.tgz",
     "@opt2-tealbrick/manifest": "workspace:*",
     "@opt2-tealbrick/miniapp-sdk": "workspace:*"
   },

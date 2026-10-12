@@ -31,3 +31,10 @@ test("compareSemver and requiredBridgeVersion (C104): feature table + declared, 
   assert.equal(requiredBridgeVersion({ companions: [{ product: "*", operations: ["tb.holds_pending"] }], requires: { bridge: "0.1.17" } }).bridge, "0.1.17");
   assert.equal(requiredBridgeVersion({ operations: [{ dynamic: {} }], requires: { bridge: "0.1.2" } }).bridge, "0.1.15");
 });
+
+test("C105: DEFAULT_HELD_FAMILIES / KNOWN_HOLD_FAMILIES are re-exported from the spec vocabulary (L1)", async () => {
+  const m = await import("../src/index.ts");
+  assert.deepEqual([...m.DEFAULT_HELD_FAMILIES], ["destructive", "money", "first_contact"]);
+  assert.deepEqual([...m.KNOWN_HOLD_FAMILIES], [...m.HOLD_FAMILIES]);
+  for (const f of m.DEFAULT_HELD_FAMILIES) assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes(f));
+});

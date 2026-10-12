@@ -83,6 +83,7 @@ export async function slice(
     /** spec 0.1.14 addition (not in the 0.1.13 types): companion grant targets */
     companionTargets?: { product: string; ins: string }[];
     companionCallers?: { product: string; ins: string; name: string }[];
+    appsPolicy?: { held: string[] };
   } = {},
 ): Promise<string> {
   w.rev += 1;
@@ -112,6 +113,7 @@ export async function slice(
       ...(over.portalUrl ? { portalUrl: over.portalUrl } : {}),
       ...(over.companionTargets ? { companionTargets: over.companionTargets } : {}),
       ...(over.companionCallers ? { companionCallers: over.companionCallers } : {}),
+      ...(over.appsPolicy ? { appsPolicy: over.appsPolicy } : {}),
     } as Parameters<typeof signSlice>[0],
     w.portal,
   );

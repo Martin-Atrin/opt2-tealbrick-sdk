@@ -61,6 +61,8 @@ export interface Runtime {
   ownerLink(path: string): string | null;
   /** v0.1.14 addition: product ids of the slice's companionTargets (sorted, unique) */
   companionTargets(): string[];
+  /** v0.1.15 (C105a) */
+  appsPolicy(): readonly string[] | null;
   /** v0.1.13: the ctx every event handler gets */
   eventContext(): SdkEventContext;
   /** v0.1.13 (Fleet): events.agentsChanged when the slice's agents differ from the last notified list (and once after boot) */

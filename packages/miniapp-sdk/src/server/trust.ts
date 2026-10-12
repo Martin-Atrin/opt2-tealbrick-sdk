@@ -190,6 +190,12 @@ export class TrustState {
     return raw.filter((e) => e && typeof e.product === "string" && typeof e.ins === "string" && typeof e.name === "string" && e.name !== "").map((e) => ({ product: e.product, ins: e.ins, name: e.name }));
   }
 
+  /** v0.1.15 (C105a): slice `appsPolicy.held`, or null */
+  appsPolicy(): string[] | null {
+    const held = this.slice?.appsPolicy?.held;
+    return Array.isArray(held) ? held.filter((h) => typeof h === "string") : null;
+  }
+
   companionTargets(): { product: string; ins: string }[] {
     const raw = (this.slice as (InstanceSlice & { companionTargets?: unknown }) | null)?.companionTargets;
     if (!Array.isArray(raw)) return [];

@@ -148,6 +148,7 @@ function buildContext(
     ownerLink: (path) => rt.ownerLink(path),
     // v0.1.14 addition (SPEC-GAP: InstanceSlice.companionTargets)
     companionTargets: () => rt.companionTargets(),
+    appsPolicy: () => rt.appsPolicy(),
   };
 }
 

@@ -207,7 +207,8 @@ export async function startApp(
   };
   const companionTargets = (): string[] => [...new Set(trust.companionTargets().map((t) => t.product))].sort();
   const statusChanged = (): void => pusher.request();
-  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets });
+  const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
+  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets, appsPolicy });
   /** Fleet: last agent list handed to events.agentsChanged in this process (null = none yet since boot) */
   let notifiedAgents: string | null = null;
   const keys = createKeys({
@@ -305,6 +306,7 @@ export async function startApp(
     },
     ownerLink,
     companionTargets,
+    appsPolicy,
     eventContext,
     async notifyAgents() {
       const agents = trust.slice?.agents;

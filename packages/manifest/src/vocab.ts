@@ -63,19 +63,25 @@ export {
   CATEGORIES,
   CRUD_ACTIONS,
   DEFAULT_GRANT_KINDS,
+  /** v0.1.15 (C105): held families of a new agent card and the default workspace apps policy (companion grants) */
+  DEFAULT_HELD_FAMILIES,
   DYNAMIC_MODES,
   EFFECTS,
   HARNESS_KINDS,
   HOLD_FAMILIES,
+  HOOK_HOLD_FAMILIES,
   HOOK_PHASES,
   IDEMPOTENCY_MODES,
   KEY_SOURCES,
+  /** v0.1.15 (C105): = HOLD_FAMILIES, the families an op may declare */
+  KNOWN_HOLD_FAMILIES,
   MANIFEST_SCHEMA,
   OPERATION_AUDIENCES,
   PUBLIC_ROUTE_PURPOSES,
   SETTING_TYPES,
   STANDARD_OPERATIONS,
   VOLUME_PURPOSES,
+  WILDCARD_COMPANION_OPS,
 } from "@opt2-tealbrick/spec/manifest";
 export type { OperationView, SkillVars, StandardOpId } from "@opt2-tealbrick/spec/sdk";
 

@@ -424,6 +424,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
     const ctx = b.startCtx as StartContext;
     assert.equal(ctx.ownerLink("/holds/x"), null);
     assert.deepEqual(ctx.companionTargets(), []);
+    assert.equal(ctx.appsPolicy(), null, "v0.1.15 (C105a): no appsPolicy in the slice → null");
     for (const bad of ["//evil.example/x", "https://evil.example", "/a/../b", "/a\\b", "relative", ""]) {
       assert.throws(
         () => ctx.ownerLink(bad),
@@ -436,6 +437,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
       await slice(b.w, PRODUCT, {
         grants: [peerGrant, alphaGrant],
         portalUrl: "https://portal.example/",
+        appsPolicy: { held: ["destructive", "money", "first_contact"] },
         companionTargets: [
           { product: "zeta", ins: `ins_${ulid()}` },
           { product: "alpha", ins: alphaIns },
@@ -447,6 +449,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
     await until(async () => ctx.ownerLink("/x") !== null);
     assert.equal(ctx.ownerLink("/holds/hld_1?tab=a b"), `https://portal.example/w/${b.w.ws}/open?product=${PRODUCT}&path=${encodeURIComponent("/holds/hld_1?tab=a b")}`);
     assert.deepEqual(ctx.companionTargets(), ["alpha", PEER, "zeta"].sort());
+    assert.deepEqual(ctx.appsPolicy(), ["destructive", "money", "first_contact"]);
     // same agents → no agentsChanged
     assert.equal(b.agentsChanged.length, before);
     // OpContext has both too
@@ -476,7 +479,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
   });
 
   test("Fleet: agentsChanged once after boot, on rename/pause/removal only; EventContext is complete; once again after a restart", async () => {
-    const ctxKeys = ["callApp", "companionTargets", "db", "log", "ownerLink", "scopes", "statusChanged"];
+    const ctxKeys = ["appsPolicy", "callApp", "companionTargets", "db", "log", "ownerLink", "scopes", "statusChanged"];
     assert.ok(b.agentsChanged.length >= 1);
     assert.deepEqual(b.agentsChanged[0]?.ctxKeys, ctxKeys);
     const n = b.agentsChanged.length;
