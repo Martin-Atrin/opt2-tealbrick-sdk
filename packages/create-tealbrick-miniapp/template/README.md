@@ -51,5 +51,5 @@ Before the first push, check `publisher` and `source.repo` in the manifest. The 
 image name in `tealbrick-ci.json` (`opt2-tealbrick-__APP_ID__`).
 
 ## Dependency pins and caching
-- `tealbrick-integrity.json` pins the sha512 of every GitHub-release tarball (CI rule since ci-v7). After changing an `@opt2-tealbrick/*` dependency run `node <opt2-tealbrick-platform>/ci/tb-ci.ts pin-tarballs .` and commit the file.
+- `pnpm-lock.yaml` carries the sha512 integrity of every GitHub-release tarball (CI rule ci-v8). After changing an `@opt2-tealbrick/*` dependency run `pnpm install`, then `node <opt2-tealbrick-platform>/ci/tb-ci.ts pin-tarballs .`, then `pnpm install --frozen-lockfile`, and commit the lockfile. Image builds run `pnpm install --frozen-lockfile --ignore-scripts`.
 - `pnpm build` writes the UI to `dist/ui/index.html` + `dist/ui/assets-<content hash>/`; the SDK serves index.html `no-cache` and the hashed directory immutable, so a deploy is visible at once (C61).
