@@ -105,6 +105,8 @@ export interface MiniAppFaults {
   emptyCatalog?: boolean;
   /** v0.1.23 (C115): the tag-filtered read treats `anyOf: []` as "no constraint" (manifest 0.1.15 bug; fails A11.narrowing_empty_anyof) */
   emptyAnyOfNoFilter?: boolean;
+  /** package 0.1.15 (NOT a fault, Knowledge-like): the recall output also carries a status array `areas` next to `items` */
+  recallStatusArray?: boolean;
 }
 
 /**
@@ -569,7 +571,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         const tags = faults.emptyAnyOfNoFilter && mt?.anyOf?.length === 0 ? { ...(mt.noneOf ? { noneOf: mt.noneOf } : {}) } : mt;
         items = items.filter((x) => tagsMatch(tags, x.tags));
       }
-      return json(res, 200, { status: "ok", output: { items: items.map((x) => ({ id: x.id, tags: [...x.tags] })), nextCursor: null } });
+      return json(res, 200, { status: "ok", output: { items: items.map((x) => ({ id: x.id, tags: [...x.tags] })), nextCursor: null, ...(faults.recallStatusArray ? { areas: [{ id: "a1", state: "ok" }, { id: "a2", state: "ok" }] } : {}) } });
     }
     // read ops also read the companion product (app→app through the bridge)
     const companion = op.crud.includes("read") ? await callCompanion(callId) : null;

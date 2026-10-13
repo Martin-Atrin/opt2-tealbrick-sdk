@@ -248,6 +248,15 @@ describe("app target", () => {
     assert.equal(r.ok, false);
   });
 
+  it("conformance 0.1.15: a second array field (status list) is not counted; without itemsPath the check is not_run, with itemsPath it passes", async () => {
+    const amb = statusOf(await runNr({ recallStatusArray: true }), "A11.narrowing_empty_anyof");
+    assert.equal(amb?.status, "not_run", amb?.asserted);
+    assert.match(amb?.asserted ?? "", /several array fields \(items, areas\): name the result items with narrowing\.itemsPath/);
+    const named = statusOf(await runNr({ recallStatusArray: true }, narrowingConfig({ op: RECALL_OP, tag: RECALL_TAG, itemsPath: "/items" })), "A11.narrowing_empty_anyof");
+    assert.equal(named?.status, "pass", named?.asserted);
+    assert.throws(() => narrowingConfig({ op: RECALL_OP, itemsPath: "items" }), /itemsPath must be a JSON pointer/);
+  });
+
   it("v0.1.23 (C115): narrowing config keys are checked (usage error); narrowing.op must be a static agent read op", async () => {
     for (const bad of [{ narrowing: [] }, { narrowing: {} }, { narrowing: { op: "" } }, { narrowing: { op: RECALL_OP, extra: 1 } }, { narrowing: { op: RECALL_OP, tag: "" } }, { narrowing: { op: RECALL_OP, tag: "x".repeat(65) } }, { narrowing: { op: RECALL_OP, input: { space: "${nope}" } } }]) {
       assert.throws(() => parseConformanceConfig(bad, "test config"), /narrowing/, JSON.stringify(bad));

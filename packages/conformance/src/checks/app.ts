@@ -17,7 +17,7 @@ import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";
 import { scanPayloads } from "../scan.ts";
 import { SDK_COVERAGE } from "../sdk-coverage.ts";
-import { resolvePlaceholders, runSetup } from "../setup.ts";
+import { jsonPointer, resolvePlaceholders, runSetup } from "../setup.ts";
 import { bad, na, notRun, type Outcome, ok, refusedWith, type Suite, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek } from "../tokens.ts";
 import type { ConformanceConfig, InputCaller, NarrowingFixture, SetupStep } from "../waivers.ts";
@@ -904,14 +904,27 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
       } else input = inputFor(op);
       const narrowed = (memoryTags: { anyOf: string[] } | null) =>
         c().callOp(op.id, input, { agent: agentA.id, ...(idemKey(op) ? { idempotencyKey: idemKey(op) } : {}), context: memoryTags ? { "rules.narrowing": { v: 1, ruleId: "conf", reason: "conformance", memoryTags } } : {} });
+      // package 0.1.15 (Knowledge sweep): ONE items array — narrowing.itemsPath, else the output itself when it is an
+      // array, else its only array field; several array fields (e.g. a status list next to the results) and no itemsPath
+      // → not_run (counting every array gave a false FAIL)
+      let ambiguous: string[] | null = null;
       const itemsOf = (a: OpAnswer): unknown[] => {
         const out = isObj(a.body) ? a.body.output : undefined;
-        return Array.isArray(out) ? out : isObj(out) ? Object.values(out).filter(Array.isArray).flat() : [];
+        if (cfg.itemsPath !== undefined) {
+          const v = jsonPointer(out, cfg.itemsPath);
+          return Array.isArray(v) ? v : [];
+        }
+        if (Array.isArray(out)) return out;
+        if (!isObj(out)) return [];
+        const arrays = Object.entries(out).filter(([, v]) => Array.isArray(v));
+        if (arrays.length > 1) ambiguous = arrays.map(([k]) => k);
+        return arrays.length === 1 ? (arrays[0]?.[1] as unknown[]) : [];
       };
       const unsupported = (a: OpAnswer) => a.status === 409 && errorCode(a.body) === "narrowing_unsupported";
       const plain = await narrowed(null);
       if (!isOk(plain)) return bad(`${op.id} without rules.narrowing: ${show(plain)} (expected 200 ok)`);
       const all = itemsOf(plain).length;
+      if (ambiguous) return notRun(`${op.id} output has several array fields (${(ambiguous as string[]).join(", ")}): name the result items with narrowing.itemsPath (JSON pointer) in tealbrick-conformance.json`);
       if (all === 0) return notRun(`${op.id} without rules.narrowing returned no items: the fixture (setup + narrowing.input) must yield tagged items, else an empty anyOf cannot be told apart`);
       const empty = await narrowed({ anyOf: [] });
       const emptyN = isOk(empty) ? itemsOf(empty).length : null;

@@ -84,12 +84,15 @@ export interface ConformanceConfig {
 /**
  * `narrowing` (CONFORMANCE v0.1.23, C115): `op` = an agent read op that filters its items by `rules.narrowing`
  * memoryTags; `input` = its input (placeholders allowed; default: generated from the schema); `tag` = a tag the
- * setup gave at least one item (optional: without it the `anyOf: [tag]` part is not checked).
+ * setup gave at least one item (optional: without it the `anyOf: [tag]` part is not checked); `itemsPath` (package
+ * 0.1.15) = JSON pointer to the result items array in the op output (default: the output itself when it is an array, else
+ * its ONLY array field; several array fields and no itemsPath → the check reports not_run naming them).
  */
 export interface NarrowingFixture {
   op: string;
   input?: Json;
   tag?: string;
+  itemsPath?: string;
 }
 
 export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
@@ -99,7 +102,7 @@ export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const TOP_KEYS = new Set(["waivers", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "$schema", "$comment"]);
-const NARROWING_KEYS = new Set(["op", "input", "tag"]);
+const NARROWING_KEYS = new Set(["op", "input", "tag", "itemsPath"]);
 const STEP_KEYS = new Set(["id", "as", "op", "input", "capture"]);
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -184,12 +187,13 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
     const n = doc.narrowing;
     const shape = `${where}: narrowing must be {op: "<agent read op id>", input?: <input>, tag?: "<tag>"}`;
     if (!isRecord(n)) throw new WaiverError(shape);
-    for (const k of Object.keys(n)) if (!NARROWING_KEYS.has(k)) throw new WaiverError(`${where}: narrowing: unknown key ${JSON.stringify(k)} (allowed: op, input, tag)`);
+    for (const k of Object.keys(n)) if (!NARROWING_KEYS.has(k)) throw new WaiverError(`${where}: narrowing: unknown key ${JSON.stringify(k)} (allowed: op, input, tag, itemsPath)`);
     if (typeof n.op !== "string" || n.op.length === 0) throw new WaiverError(`${shape}; op missing`);
     // SDK-API §18: tags ≤ 64 chars (compared after normalizeTag = trim + lower case)
     if (n.tag !== undefined && (typeof n.tag !== "string" || n.tag.trim().length === 0 || n.tag.length > 64)) throw new WaiverError(`${where}: narrowing.tag must be a non-empty string of ≤ 64 characters`);
+    if (n.itemsPath !== undefined && (typeof n.itemsPath !== "string" || !(n.itemsPath === "" || n.itemsPath.startsWith("/")))) throw new WaiverError(`${where}: narrowing.itemsPath must be a JSON pointer ("" or "/…")`);
     if (n.input !== undefined) known(placeholderNames(n.input), "narrowing.input", "any setup step");
-    narrowing = { op: n.op, ...(n.input !== undefined ? { input: n.input as Json } : {}), ...(typeof n.tag === "string" ? { tag: n.tag } : {}) };
+    narrowing = { op: n.op, ...(n.input !== undefined ? { input: n.input as Json } : {}), ...(typeof n.tag === "string" ? { tag: n.tag } : {}), ...(typeof n.itemsPath === "string" ? { itemsPath: n.itemsPath } : {}) };
   }
   return { waivers, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}) };
 }
