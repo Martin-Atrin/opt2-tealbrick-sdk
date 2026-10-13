@@ -4,7 +4,7 @@
 
 
 import type { KeySetStatementClaims, PortalKeysAudience, PortalRootChannel, PortalRootRef } from "@opt2-tealbrick/spec/credentials";
-import { type Ed25519PublicJwk, KEYSET_REFUSAL, MAX_JWS_BYTES, PORTAL_ROOT_KEYS, type PortalKeyEntry } from "@opt2-tealbrick/spec/credentials";
+import { type Ed25519PublicJwk, KEYSET_REFUSAL, MAX_JWS_BYTES, PORTAL_ROOT_KEYS } from "@opt2-tealbrick/spec/credentials";
 import type { Ed25519KeyPair, KeySet, PinnedKeySet, Refusal, VerifiedKeySet } from "@opt2-tealbrick/spec/sdk";
 import { type ExternalSigner, KEYSET_TYP, signCompact, verifySignedCompact } from "./jws.ts";
 import { assertPublicJwk, keySetFrom, keySetFromPortalKeys, thumbprint } from "./keys.ts";
@@ -99,31 +99,19 @@ export function verifyKeySetStatement(jws: string, roots: readonly Ed25519Public
 }
 
 /**
- * The ONE trust rule for a config / slice / enrolment-response body (CREDENTIALS §9.5, transition rule included):
- * - body carries `portalKeySet` → verifyKeySetStatement against `roots` and `pinned` (`changed` = newer than pinned);
- * - no `portalKeySet` and a statement is pinned → `keyset_missing` (no downgrade; also a bridge's re-enrolment);
- * - no pin and no `portalKeySet`, or no pin and no roots pinned for the build → `{ legacy: true }`: the caller keeps
- *   its pre-v0.1.11 key set (`portalKeys` / `TB_PORTAL_KEYS`) and logs a warning. Spec 0.1.11 only.
- * `opts.required` (spec 0.1.12, the fallback removed): a build that pins roots refuses a body without a statement even
- * when nothing is pinned yet (first enrolment, first slice) → `keyset_missing`.
+ * The ONE trust rule for a config / slice / enrolment-response body (CREDENTIALS §9.5): the body MUST carry
+ * `portalKeySet`, verified against the build-pinned `roots` and `pinned` (`changed` = newer than pinned).
+ * - no `portalKeySet` → `keyset_missing` (pinned or not; no downgrade, no first-use fallback);
+ * - not a string → `keyset_invalid`; no roots pinned for the build → `keyset_invalid` ("no pinned roots").
+ * There is no transition path (C133, spec 0.1.26).
  */
-export function trustedPortalKeys(
-  body: { portalKeySet?: unknown },
-  pinned: PinnedKeySet | null,
-  roots: readonly Ed25519PublicJwk[],
-  opts: { required?: boolean } = {},
-): (VerifiedKeySet & { legacy: false; changed: boolean }) | { ok: true; legacy: true; reason: string } | Refusal {
+export function trustedPortalKeys(body: { portalKeySet?: unknown }, pinned: PinnedKeySet | null, roots: readonly Ed25519PublicJwk[]): (VerifiedKeySet & { changed: boolean }) | Refusal {
   const kss = isObj(body) ? body.portalKeySet : undefined;
-  if (kss === undefined) {
-    if (pinned) return refuse(KEYSET_REFUSAL.missing, `document without portalKeySet after seq ${pinned.seq} was pinned`);
-    if (opts.required && roots.length > 0) return refuse(KEYSET_REFUSAL.missing, "document without portalKeySet (statement required, spec 0.1.12)");
-    return { ok: true, legacy: true, reason: "document carries no portalKeySet (transition rule c)" };
-  }
+  if (kss === undefined) return refuse(KEYSET_REFUSAL.missing, pinned ? `document without portalKeySet after seq ${pinned.seq} was pinned` : "document without portalKeySet (statement required)");
   if (typeof kss !== "string") return refuse(KEYSET_REFUSAL.invalid, "portalKeySet not a string");
-  if (!pinned && roots.length === 0) return { ok: true, legacy: true, reason: "build pins no roots for its channel (transition rule c)" };
   const v = verifyKeySetStatement(kss, roots, pinned);
   if (!v.ok) return v;
-  return { ...v, legacy: false, changed: !pinned || v.seq > pinned.seq };
+  return { ...v, changed: !pinned || v.seq > pinned.seq };
 }
 
 // ── BSD-07: app addresses (BRIDGE §5.7) ──────────────────────────────────────

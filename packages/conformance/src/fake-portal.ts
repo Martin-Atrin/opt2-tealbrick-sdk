@@ -75,7 +75,7 @@ export class FakePortal {
   /** extra config fields merged into every minted revision (bridge target: apps, grants, hooks, skills, …) */
   // SPEC-GAP: @opt2-tealbrick/spec 0.1.10 types lack v0.1.11 `portalKeySet` (CREDENTIALS §9.5); typed here until 0.1.11.
   configExtra: Partial<Omit<WorkspaceConfig, "iat" | "exp" | "jti">> & { portalKeySet?: string } = {};
-  /** v0.1.11: key-set statement returned in the enrolment response (`portalKeySet`); null = omitted (transition) */
+  /** v0.1.11: key-set statement returned in the enrolment response (`portalKeySet`); null = omitted */
   enrolKeySet: string | null = null;
   /** v0.1.12 (conformance 0.1.8): the world's current statement after a key change (test roots on), else null */
   keySetSource: (() => Promise<string>) | null = null;

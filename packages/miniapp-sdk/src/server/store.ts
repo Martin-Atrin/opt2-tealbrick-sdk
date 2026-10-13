@@ -155,7 +155,11 @@ function guarded<T>(db: RawDb, fn: () => T): T {
   }
 }
 
-/** Fallback for runtimes without `setAuthorizer`: reject SQL naming any `tb_*` identifier. */
+/**
+ * Fallback for runtimes without `setAuthorizer`: reject SQL naming any `tb_*` identifier. KEPT on purpose (C133 audit V-19):
+ * `setAuthorizer` exists from Node 24.10.0, `engines` says `>=24`, so Node 24.0–24.9 still run this SDK and would
+ * otherwise let app SQL touch the SDK's reserved tables. It is a security guard, not an old-format reader.
+ */
 function legacyGuard(sql: string): void {
   if (/(^|[^a-z0-9_])tb_[a-z0-9_]*/i.test(sql)) throw new TbError("db_reserved", "tb_* tables are reserved for the SDK", 500);
 }

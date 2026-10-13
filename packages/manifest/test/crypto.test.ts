@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { type AgentId, type ConnectionId, type InstanceId, LEEWAY_S, type PersonId, TYP } from "@opt2-tealbrick/spec/credentials";
 import { sha256Bytes } from "../src/jcs.ts";
 import { memoryReplayGuard, signAssertion, signInstanceAssertion, signJws, verifyAssertion, verifyJws } from "../src/jws.ts";
-import { exportPrivateKey, generateKeyPair, importKeyPair, keySetAnnounce, keySetFrom, keySetFromPortalKeys, thumbprint } from "../src/keys.ts";
+import { exportPrivateKey, generateKeyPair, importKeyPair, keySetFrom, thumbprint } from "../src/keys.ts";
 import { digestEqual, opaqueDigest, opaqueValue, ULID_RE, ulid } from "../src/random.ts";
 import { kekFromEnv, needsReseal, seal, sealAad, unseal } from "../src/seal.ts";
 import { NOW, rawSign, world } from "./fixtures.ts";
@@ -62,27 +62,6 @@ test("keySetFrom rejects non-Ed25519 / private JWKs", async () => {
   assert.throws(() => keySetFrom({ keys: [{ ...k.publicJwk, d: "secret" } as never] }, "tb:portal"));
   assert.throws(() => keySetFrom({ keys: [{ kty: "EC", crv: "P-256", x: k.publicJwk.x } as never] }, "tb:portal"));
   assert.equal(keySetFrom({ keys: [k.publicJwk] }, "tb:portal").keys[0].status, "active");
-});
-
-test("keySetAnnounce: only a trusted signer's document replaces the set (adds, retires, removes)", async () => {
-  const a = await generateKeyPair();
-  const b = await generateKeyPair();
-  const evil = await generateKeyPair();
-  const trusted = keySetFrom({ keys: [a.publicJwk] }, "tb:portal");
-  // T0: A-signed document announces B pending
-  const t0 = keySetAnnounce(trusted, keySetFromPortalKeys([{ jwk: a.publicJwk, status: "active" }, { jwk: b.publicJwk, status: "pending" }]), { kid: a.kid });
-  assert.deepEqual(t0.keys.map((k) => [k.jwk.x, k.status]), [[a.publicJwk.x, "active"], [b.publicJwk.x, "pending"]]);
-  // T0+24h: B (pending at the verifier) signs the document that makes it active and retires A
-  const t1 = keySetAnnounce(t0, keySetFromPortalKeys([{ jwk: a.publicJwk, status: "retired" }, { jwk: b.publicJwk, status: "active" }]), { kid: b.kid });
-  assert.equal(t1.keys.find((k) => k.jwk.x === a.publicJwk.x)?.status, "retired");
-  // A removed later
-  const t2 = keySetAnnounce(t1, keySetFromPortalKeys([{ jwk: b.publicJwk, status: "active" }]), { kid: b.kid });
-  assert.equal(t2.keys.length, 1);
-  // a document signed by an unknown key changes nothing
-  const t3 = keySetAnnounce(t2, keySetFromPortalKeys([{ jwk: evil.publicJwk, status: "active" }]), { kid: evil.kid });
-  assert.equal(t3, t2);
-  // retired-and-removed A cannot re-announce
-  assert.equal(keySetAnnounce(t2, keySetFrom({ keys: [a.publicJwk] }, "tb:portal"), { kid: a.kid }), t2);
 });
 
 // ── JWS V0 ──

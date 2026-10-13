@@ -14,7 +14,7 @@ import { errorCode, type HttpAnswer, listen, request } from "../http.ts";
 import { type HtmlForm, type OAuthClient, parseForms, pkcePair, redirectParams } from "../mcp-agent.ts";
 import type { PayloadScan } from "../report.ts";
 import { type ScanNeedle, scanPayloads } from "../scan.ts";
-import { bad, na, notRun, type Outcome, ok, verdict } from "../suite.ts";
+import { bad, notRun, type Outcome, ok, verdict } from "../suite.ts";
 import { Mint, newId, nowS, peek, rawSign } from "../tokens.ts";
 import { enrolRequests } from "./bridge.ts";
 import { type BridgeCtx, describeCall, httpRefused, isObj, type KeySlot, sleep, toolRefused } from "./bridge-ctx.ts";
@@ -1207,8 +1207,6 @@ export async function addressChecks(c: BridgeCtx): Promise<void> {
 // ── B20 key-set statements at the bridge (CREDENTIALS §9.5, BRIDGE §4–5) ─────
 export async function keySetChecks(c: BridgeCtx): Promise<void> {
   if (!c.on("keyset")) return;
-  const STRICT_NA = "--keyset-transitional: 0.1.11 transition rules (strict since spec 0.1.12; drop the flag for the strict check)";
-  if (!c.w.keysetRequired) c.s.record("B20.kss_enrol_missing", "strict first enrolment", "first enrolment without a statement refused", na(STRICT_NA));
   if (!c.w.testRoots) {
     const why = "--no-test-roots: the bridge pins its build's Portal Root Keys; run with test roots (the default) and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to the bridge's programmatic start option (CONFORMANCE §7)";
     for (const x of BRIDGE_GROUPS.keyset ?? []) if (!c.s.has(x.id)) c.s.record(x.id, x.title, "bridge verifies configs against the newest root-signed statement", notRun(why));
@@ -1287,10 +1285,9 @@ export async function keySetChecks(c: BridgeCtx): Promise<void> {
 /** C63a: re-enrolment of a pinned bridge without a valid statement; strict first enrolment (spec 0.1.12). */
 async function reenrolKeySetChecks(c: BridgeCtx, stillWorks: () => Promise<string | null>): Promise<void> {
   const restart = c.h.restart;
-  const strict = c.w.keysetRequired;
   if (!restart) {
     c.s.record("B20.kss_reenrol_missing", "re-enrolment without a statement", "a restartable bridge (--start or --cmd)", notRun("the bridge cannot be restarted in this mode"));
-    if (strict) c.s.record("B20.kss_enrol_missing", "strict first enrolment", "a restartable bridge (--start or --cmd)", notRun("the bridge cannot be restarted in this mode"));
+    c.s.record("B20.kss_enrol_missing", "strict first enrolment", "a restartable bridge (--start or --cmd)", notRun("the bridge cannot be restarted in this mode"));
     return;
   }
   const p = c.w.portal;
@@ -1337,7 +1334,6 @@ async function reenrolKeySetChecks(c: BridgeCtx, stillWorks: () => Promise<strin
     }
     return verdict(pass, out.join("; "));
   });
-  if (!strict) return;
   await c.run("B20.kss_enrol_missing", "strict: first enrolment without portalKeySet refused (spec 0.1.12)", "a bridge on a fresh data dir gets an EnrolResponse without portalKeySet: no config is acked under the new key", async () => {
     const fresh = join(origDir, "kss-enrol-missing");
     mkdirSync(fresh, { recursive: true });

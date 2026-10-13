@@ -62,8 +62,6 @@ export interface MiniAppFaults {
   badHookShape?: boolean;
   /** ignores portalKeySet: keeps the pre-v0.1.11 rule (portalKeys replace the trusted set; CREDENTIALS §9.5) */
   ignoreKeySet?: boolean;
-  /** a spec-0.1.11 build: falls back to the pre-v0.1.11 rule while nothing is pinned (fails A13.kss_first_missing) */
-  keysetTransitional?: boolean;
   /** keeps a refused identity even when TB_ENROL_CODE changed (fails A1.reclaim_on_new_code, SDK-API §13 v0.1.12) */
   noReclaim?: boolean;
   /** v0.1.13: ignores the proof's hook hold verdict `hv` (fails A14.hook_hold) */
@@ -266,13 +264,14 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
   const roots = env.TBCONF_PORTAL_ROOT_KEYS ? (JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) as never[]) : portalRootKeys("dev");
   /** false when the slice was refused */
   function installSlice(token: string): boolean {
-    const t = faults.ignoreKeySet ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(peek(token), st.kss ? { seq: st.kss.seq, kss: st.kss.kss } : null, roots, { required: faults.keysetTransitional !== true });
-    if (!t.ok) return false;
-    const issuers = !t.legacy ? t.signers : slice ? keySetFromPortalKeys(slice.portalKeys) : keySetFrom(JSON.parse(env.TB_PORTAL_KEYS) as never, "tb:portal");
+    // `ignoreKeySet` = a DEFECTIVE app (fault injection): it skips the key-set rule and trusts the slice's `portalKeys`
+    const t = faults.ignoreKeySet ? null : trustedPortalKeys(peek(token), st.kss ? { seq: st.kss.seq, kss: st.kss.kss } : null, roots);
+    if (t && !t.ok) return false;
+    const issuers = t ? t.signers : slice ? keySetFromPortalKeys(slice.portalKeys) : keySetFrom(JSON.parse(env.TB_PORTAL_KEYS) as never, "tb:portal");
     const r = verifySlice(token, { now: nowS(), self: `tb:ins:${ins}`, ws: (slice?.ws ?? peek(token).ws) as WorkspaceId, bridge: st.bridgeId as BridgeId, issuers });
     if (!r.ok) return false;
     if (slice && r.slice.rev <= slice.rev) return true;
-    if (!t.legacy) st.kss = { seq: t.seq, kss: t.kss, keys: t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status })) };
+    if (t) st.kss = { seq: t.seq, kss: t.kss, keys: t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status })) };
     slice = r.slice;
     st.slice = token;
     for (const a of slice.agents) ensureAgent(a.id);

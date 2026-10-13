@@ -38,16 +38,15 @@ import { CONFORMANCE_VERSION, type ConformanceConfig, EMPTY_CONFIG, loadConforma
 
 const USAGE = `usage:
   tb-conformance app (--start <module.ts> | --cmd "<command>" [--url <origin>] | --url <origin> --env-out <file>) --manifest <file>
-                     [--inputs <file.json>] [--deploy-template <file.json>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
+                     [--inputs <file.json>] [--deploy-template <file.json>] [--no-test-roots] [--timeout <ms>] [--json] [--report <base>]
       test roots (default): the suite signs key-set statements with a TEST root and passes its public JWKs in env.TBCONF_PORTAL_ROOT_KEYS;
         the start module must pass them to startApp(app, env, { portalRootKeys }) (see create-tealbrick-miniapp conformance.start.ts);
         a --cmd / --url app must honour TBCONF_PORTAL_ROOT_KEYS the same way, or run with --no-test-roots
       --no-test-roots: no test roots (A13 not_run); a spec-0.1.12 app then refuses every fake-bridge slice and the run fails at boot
-      --test-roots, --keyset-required: accepted, no-op (both are the default)
-      --keyset-transitional: run the 0.1.11 transition rules instead (strict checks not_applicable) — only for builds released before spec 0.1.12
+      --test-roots: accepted, no-op (the default)
   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>] [--json] [--report <base>]
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
-  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--keyset-transitional] [--timeout <ms>] [--json] [--report <base>]
+  tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--timeout <ms>] [--json] [--report <base>]
       --groups: e.g. spine013 = the spec 0.1.13 checks B22–B24 (hold verdict, reserved context, app-initiated calls); leave it out for a bridge older than 0.1.14;
         c117 = B27.hook_*: chain from the hooks declared in the deployed manifests, config hooks[] enabled switch (spec 0.1.24); leave it out for an older bridge;
         real_app = B25: a REAL @opt2-tealbrick/miniapp-sdk app (started in this process) behind the bridge (C91); B26: its app-initiated
@@ -154,8 +153,6 @@ export async function main(argv: string[]): Promise<number> {
       "echo-logs": { type: "boolean", default: false },
       "test-roots": { type: "boolean", default: false },
       "no-test-roots": { type: "boolean", default: false },
-      "keyset-required": { type: "boolean", default: false },
-      "keyset-transitional": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       "allow-not-run": { type: "boolean", default: false },
       report: { type: "string" },
@@ -171,7 +168,6 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (values["test-roots"] && values["no-test-roots"]) throw new Error("use one of --test-roots (the default) and --no-test-roots");
   const testRoots = !values["no-test-roots"];
-  const keysetRequired = !values["keyset-transitional"];
   // waivers and the config file are checked before anything runs: an unknown id or a malformed entry is a usage error (exit 2)
   let waivers: Waiver[];
   let config: ConformanceConfig = EMPTY_CONFIG;
@@ -221,7 +217,6 @@ export async function main(argv: string[]): Promise<number> {
         config,
         ...(values["deploy-template"] ? { deployTemplate: readJson(values["deploy-template"]) } : {}),
         testRoots,
-        keysetRequired,
         timeoutMs,
       });
       break;
@@ -269,7 +264,6 @@ export async function main(argv: string[]): Promise<number> {
         echoLogs: values["echo-logs"],
         ...(values["sdk-module"] ? { sdkModule: values["sdk-module"] } : {}),
         testRoots,
-        keysetRequired,
       });
       const k = report.counts;
       process.stderr.write(`tb-conformance bridge: ${k.pass} pass, ${k.fail} fail, ${k.not_run} not_run, ${k.not_applicable} not_applicable → ${resultLabel(report)}\n`);

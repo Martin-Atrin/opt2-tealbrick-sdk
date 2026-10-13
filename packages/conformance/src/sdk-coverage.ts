@@ -10,7 +10,6 @@ export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   digest: ["M3", "A4.receipt_digest", "A2.tampered_context"],
   gate: ["B5.paused_first", "B5.bound_outside_wf", "B5.grant_revoked"],
   generateKeyPair: ["A1", "A1.key_persisted"],
-  keySetAnnounce: ["C5.portal_key_rotation"],
   keySetFrom: ["C5.grant_unannounced_kid", "C5.proof_unannounced_kid", "C5.bridge_key_rotation"],
   manifestDigest: ["M3", "A1", "A1.manifest_served", "A1.health"],
   RECEIPT_STATUSES: ["A4.holds_list", "A10", "A4.mark_after_failed"],

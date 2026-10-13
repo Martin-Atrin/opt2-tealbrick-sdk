@@ -1,11 +1,11 @@
-// TrustState slice installation under the key-set statement rule (CREDENTIALS §9.5, SDK-API §9 v0.1.11) and its
-// transition rule: legacy path (no portalKeySet) with one warning, pin on first statement, no downgrade after a pin.
+// TrustState slice installation under the key-set statement rule (CREDENTIALS §9.5, SDK-API §9): the statement is always
+// required (C133: no transition path), pinned on the first slice, no downgrade after a pin.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type Ed25519KeyPair, generateKeyPair, keySetFrom, signGrant, signKeySetStatement, signSlice, ulid, verifyGrant } from "@opt2-tealbrick/manifest";
 import type { BridgeId, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import { openStore } from "../src/server/store.ts";
-import { KEYSET_REQUIRED, PORTAL_ROOT_CHANNEL, TrustState } from "../src/server/trust.ts";
+import { PORTAL_ROOT_CHANNEL, TrustState } from "../src/server/trust.ts";
 import { nowS, tempDir } from "./helpers.ts";
 
 type Status = "pending" | "active" | "retired";
@@ -13,20 +13,17 @@ const ins = `ins_${ulid()}` as InstanceId;
 const ws = `ws_${ulid()}` as WorkspaceId;
 const brg = `brg_${ulid()}` as BridgeId;
 
-async function setup(opts: { roots?: Ed25519KeyPair[]; bootstrap?: Ed25519KeyPair; required?: boolean } = {}) {
+async function setup(opts: { roots?: Ed25519KeyPair[]; bootstrap?: Ed25519KeyPair } = {}) {
   const t = tempDir();
   const db = openStore(t.dir);
-  const warnings: string[] = [];
   const mk = () =>
     new TrustState(db, ins, {
       bootstrap: opts.bootstrap ? keySetFrom({ keys: [opts.bootstrap.publicJwk] }, "tb:portal") : null,
       ...(opts.roots ? { roots: opts.roots.map((r) => r.publicJwk) } : {}),
-      warn: (msg) => warnings.push(msg),
-      ...(opts.required !== undefined ? { required: opts.required } : {}),
     });
   const trust = mk();
   trust.setBridge(brg);
-  return { trust, warnings, reopen: mk, cleanup: () => {
+  return { trust, reopen: mk, cleanup: () => {
       db.close();
       t.cleanup();
     },
@@ -73,7 +70,6 @@ test("slice with portalKeySet: verified against the statement, pinned (persisted
     const k1 = await kss(root, 1, [[a, "active"]]);
     assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: k1 }), Date.now())), "ok", "signer from the KSS, not from the bootstrap set");
     assert.equal(s.trust.keySetSeq, 1);
-    assert.deepEqual(s.warnings, []);
     // persisted with the slice: a restarted TrustState keeps the pin and refuses a slice without a statement
     const again = s.reopen();
     again.setBridge(brg);
@@ -139,43 +135,26 @@ test("compromise rotation: the dropped kid's slices and grants are refused at on
   }
 });
 
-test("0.1.11 transition rule (required: false override): no portalKeySet and nothing pinned → pre-v0.1.11 rule with ONE warning; later statement pins", async () => {
-  const [root, a, evil] = await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair()]);
-  const s = await setup({ roots: [root], bootstrap: a, required: false });
-  try {
-    assert.equal(code(s.trust.install(await slice(1, a), Date.now())), "ok");
-    assert.equal(code(s.trust.install(await slice(2, a), Date.now())), "ok");
-    assert.deepEqual(s.warnings, ["slice_keyset_transition"]);
-    assert.equal(s.trust.keySetSeq, null);
-    assert.equal(code(s.trust.install(await slice(3, evil), Date.now())), "invalid_token", "legacy path still needs a trusted signer");
-    assert.equal(code(s.trust.install(await slice(3, a, { portalKeySet: await kss(root, 1, [[a, "active"]]) }), Date.now())), "ok");
-    assert.equal(s.trust.keySetSeq, 1);
-    assert.equal(code(s.trust.install(await slice(4, a), Date.now())), "keyset_missing", "no downgrade after the pin");
-  } finally {
-    s.cleanup();
-  }
-});
-
-test("transition: a build without pinned roots ignores portalKeySet (legacy path)", async () => {
+test("C133: a build without pinned roots refuses every slice (pinned roots are mandatory)", async () => {
   const a = await generateKeyPair();
   const s = await setup({ roots: [], bootstrap: a });
   try {
     const someRoot = await generateKeyPair();
-    assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(someRoot, 1, [[a, "active"]]) }), Date.now())), "ok");
+    assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(someRoot, 1, [[a, "active"]]) }), Date.now())), "keyset_invalid");
+    assert.equal(code(s.trust.install(await slice(1, a), Date.now())), "keyset_missing");
+    assert.equal(s.trust.slice, null);
     assert.equal(s.trust.keySetSeq, null);
-    assert.deepEqual(s.warnings, ["slice_keyset_transition"]);
   } finally {
     s.cleanup();
   }
 });
 
-test("spec 0.1.12 (KEYSET_REQUIRED): a first slice without a statement is refused by default", async () => {
-  assert.equal(KEYSET_REQUIRED, true, "0.1.12 build: the transition fallback is removed");
+test("a first slice without a statement is refused (no transition path)", async () => {
   const [root, a] = await Promise.all([generateKeyPair(), generateKeyPair()]);
   const s = await setup({ roots: [root], bootstrap: a });
   try {
     assert.equal(code(s.trust.install(await slice(1, a), Date.now())), "keyset_missing", "bootstrap-signed, statement-less first slice");
-    assert.deepEqual(s.warnings, [], "no transition warning: the legacy path is gone");
+    assert.equal(s.trust.slice, null);
     assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(root, 1, [[a, "active"]]) }), Date.now())), "ok");
   } finally {
     s.cleanup();

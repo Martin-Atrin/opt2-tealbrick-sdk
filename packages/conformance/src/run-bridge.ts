@@ -55,8 +55,6 @@ export interface RunBridgeOptions {
    * bridge (it pins its build's roots, which no test can sign for) cannot enrol at the fake Portal.
    */
   testRoots?: boolean;
-  /** C63a strict checks (spec 0.1.12, B20.kss_enrol_missing), default true; `false` (`--keyset-transitional`): not_applicable */
-  keysetRequired?: boolean;
   /** C91 group real_app: module specifier / URL of the SDK to start the real app with (default: the installed @opt2-tealbrick/miniapp-sdk) */
   sdkModule?: string;
 }
@@ -173,7 +171,7 @@ export async function runBridgeTarget(opts: RunBridgeOptions): Promise<Report> {
   const logs = { text: "" };
   const start = opts.start ?? processHarness(opts.cmd as string, logs, opts.echoLogs);
   const testRoots = opts.testRoots !== false;
-  const world = await BridgeWorld.create({ ...(opts.manifests ? { manifests: opts.manifests } : {}), testRoots, keysetRequired: opts.keysetRequired !== false });
+  const world = await BridgeWorld.create({ ...(opts.manifests ? { manifests: opts.manifests } : {}), testRoots });
   if (world.peer) world.peer.catalog = () => peerCatalog();
   const dataDir = mkdtempSync(join(tmpdir(), "tb-conformance-bridge-"));
   const [pub, int] = [await freePort(), await freePort()];

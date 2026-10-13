@@ -153,7 +153,7 @@ export class FakeBridge {
    * their channel's roots and never read that name.
    */
   readonly testRoot: Ed25519KeyPair;
-  /** key-set statement state: slices carry `portalKeySet` once `on` (runApp turns it on before the first slice unless --keyset-transitional / --no-test-roots) */
+  /** key-set statement state: slices carry `portalKeySet` once `on` (runApp turns it on before the first slice unless --no-test-roots) */
   keySet = { on: false, seq: 0, kss: null as string | null };
   /** one-shot override of the next slice (A13 negatives): `portalKeySet` (null = omitted), signer, extra portalKeys */
   sliceOverride: { portalKeySet?: string | null; signer?: Ed25519KeyPair; extraPortalKeys?: PortalKeyEntry[] } | null = null;

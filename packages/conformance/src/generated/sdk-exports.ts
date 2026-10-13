@@ -14,7 +14,6 @@ export const SDK_EXPORTS: readonly SdkExport[] = [
   { name: "gate", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "generateKeyPair", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "isPrivateInternalUrl", kind: "function", pkg: "@opt2-tealbrick/manifest" },
-  { name: "keySetAnnounce", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "keySetFrom", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "manifestDigest", kind: "function", pkg: "@opt2-tealbrick/manifest" },
   { name: "portalRootKeys", kind: "function", pkg: "@opt2-tealbrick/manifest" },

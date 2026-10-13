@@ -107,30 +107,28 @@ test("verifyKeySetStatement: root-signed, keys + signers, seq ordering, negative
   assert.equal(code(verifyKeySetStatement("not.a.jws", roots)), "keyset_invalid");
 });
 
-test("trustedPortalKeys: KSS rule, no downgrade after a pin, transition (legacy) path", async () => {
+test("trustedPortalKeys: KSS rule, no downgrade after a pin, no first-use fallback (C133)", async () => {
   const [root, a, b] = await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair()]);
   const roots = [root.publicJwk];
   const s1 = await signKeySetStatement(stmt(1, [[a, "active"]]), root);
   const s2 = await signKeySetStatement(stmt(2, [[a, "retired"], [b, "active"]]), root);
   const first = trustedPortalKeys({ portalKeySet: s1 }, null, roots);
-  assert.ok(first.ok && !first.legacy && first.changed);
+  assert.ok(first.ok && first.changed);
   const same = trustedPortalKeys({ portalKeySet: s1 }, { seq: 1, kss: s1 }, roots);
-  assert.ok(same.ok && !same.legacy && !same.changed);
+  assert.ok(same.ok && !same.changed);
   const next = trustedPortalKeys({ portalKeySet: s2 }, { seq: 1, kss: s1 }, roots);
-  assert.ok(next.ok && !next.legacy && next.changed);
-  assert.deepEqual(next.ok && !next.legacy && kids(next.signers), [b.kid]);
+  assert.ok(next.ok && next.changed);
+  assert.deepEqual(next.ok && kids(next.signers), [b.kid]);
   assert.equal(code(trustedPortalKeys({ portalKeySet: s1 }, { seq: 2, kss: s2 }, roots)), "keyset_rollback");
   assert.equal(code(trustedPortalKeys({}, { seq: 1, kss: s1 }, roots)), "keyset_missing");
   assert.equal(code(trustedPortalKeys({ portalKeySet: 7 }, null, roots)), "keyset_invalid");
-  const legacy = trustedPortalKeys({}, null, roots);
-  assert.ok(legacy.ok && legacy.legacy);
-  const noRoots = trustedPortalKeys({ portalKeySet: s1 }, null, []);
-  assert.ok(noRoots.ok && noRoots.legacy, "a build without pinned roots stays on the transition path");
-  assert.equal(code(trustedPortalKeys({ portalKeySet: s2 }, { seq: 1, kss: s1 }, [])), "keyset_invalid", "a pin without roots never passes");
-  // spec 0.1.12 (fallback removed): a build with roots refuses a first document without a statement
-  assert.equal(code(trustedPortalKeys({}, null, roots, { required: true })), "keyset_missing");
-  assert.ok((trustedPortalKeys({}, null, [], { required: true }) as { legacy?: boolean }).legacy, "no roots for the channel: nothing to require");
-  assert.equal(code(trustedPortalKeys({ portalKeySet: s1 }, null, roots, { required: true })), "ok");
+  // C133: a body without a statement is refused even when nothing is pinned (no transition path)
+  assert.equal(code(trustedPortalKeys({}, null, roots)), "keyset_missing");
+  // pinned roots are mandatory: a build without roots refuses every statement, pinned or not
+  assert.equal(code(trustedPortalKeys({ portalKeySet: s1 }, null, [])), "keyset_invalid");
+  assert.equal(code(trustedPortalKeys({ portalKeySet: s2 }, { seq: 1, kss: s1 }, [])), "keyset_invalid");
+  assert.equal(code(trustedPortalKeys({}, null, [])), "keyset_missing");
+  assert.equal("legacy" in (first as object), false);
 });
 
 /** Minimal config body signed by `key` (verifyConfig shape). */
@@ -167,8 +165,8 @@ test("normal rotation (3 statements): pending B announced, B active / A retired,
   let pinned = null as { seq: number; kss: string } | null;
   const step = async (seq: number, keys: [Ed25519KeyPair, Status][]) => {
     const t = trustedPortalKeys({ portalKeySet: await signKeySetStatement(stmt(seq, keys), root) }, pinned, roots);
-    assert.ok(t.ok && !t.legacy && t.changed, `seq ${seq} applied`);
-    if (!t.ok || t.legacy) throw new Error("unreachable");
+    assert.ok(t.ok && t.changed, `seq ${seq} applied`);
+    if (!t.ok) throw new Error("unreachable");
     pinned = { seq: t.seq, kss: t.kss };
     return t;
   };
@@ -194,11 +192,11 @@ test("compromise rotation: one statement drops the stolen kid; its configs and g
   const brg = `tb:brg:${w.brg}` as const;
   const s1 = await signKeySetStatement(stmt(1, [[stolen, "active"]]), root);
   const t1 = trustedPortalKeys({ portalKeySet: s1 }, null, roots);
-  assert.ok(t1.ok && !t1.legacy);
+  assert.ok(t1.ok);
   const s2 = await signKeySetStatement(stmt(2, [[fresh, "active"]]), root);
   const t2 = trustedPortalKeys({ portalKeySet: s2 }, { seq: 1, kss: s1 }, roots);
-  assert.ok(t2.ok && !t2.legacy && t2.changed);
-  if (!t2.ok || t2.legacy) return;
+  assert.ok(t2.ok && t2.changed);
+  if (!t2.ok) return;
   assert.equal(code(verifyConfig(await config(w, stolen, 5), { now: NOW, self: brg, issuers: t2.signers })), "invalid_token");
   assert.equal(code(verifyGrant(await signGrant(w.grantClaims(), stolen), { ...w.trust, issuers: t2.keys })), "grant_invalid");
   assert.equal(code(verifyConfig(await config(w, fresh, 5), { now: NOW, self: brg, issuers: t2.signers })), "ok");

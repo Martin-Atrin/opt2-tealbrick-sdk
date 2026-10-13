@@ -180,7 +180,6 @@ export async function startApp(
     bootstrap: cfg.portalKeys ? keySetFrom(cfg.portalKeys, "tb:portal") : null,
     ...(aloneWs ? { alone: { ws: aloneWs, ownKey: instanceKey.publicJwk } } : {}),
     ...(harness?.portalRootKeys ? { roots: harness.portalRootKeys } : {}),
-    warn: (msg, fields) => log.warn(msg, fields),
   });
 
   const ops = new Map(withStandardOps(manifest).map((o) => [o.id, o]));

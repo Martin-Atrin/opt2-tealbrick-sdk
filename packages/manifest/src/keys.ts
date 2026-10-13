@@ -78,24 +78,6 @@ export function keySetFromPortalKeys(entries: readonly PortalKeyEntry[], issuer:
   return { keys: entries.map((e) => entry(e.jwk, e.status, issuer)) };
 }
 
-/**
- * @deprecated v0.1.11 (C62/C63): NOT a trust path any more — the trusted Portal key set comes only from a root-signed
- * key-set statement (`trustedPortalKeys`, keyset.ts). Kept exported for one minor solely for the transition rule (c) of
- * CREDENTIALS §9.5 (a verifier that has pinned no statement and receives documents without `portalKeySet`; used by
- * miniapp-sdk's TrustState legacy path). Removed in v0.2.
- *
- * Pre-v0.1.11 CORE §4 trust rule. `announced` is the full key list of a document (config / slice `portalKeys`) whose signature was
- * verified with key `announcedBy.kid`. Only when that key is already in `trusted` does the document's list take effect,
- * and it then REPLACES the trusted set: new keys are added, keys the document dropped (rotation end, compromise,
- * standalone `portalKeys: []`) are no longer trusted, retired keys stay verifiable while the document still lists them.
- * Otherwise `trusted` is returned unchanged. Any status may verify: a `pending` key at the verifier is the normal state
- * at the moment Portal switches it to `active` (CREDENTIALS §9.2).
- */
-export function keySetAnnounce(trusted: KeySet, announced: KeySet, announcedBy: { kid: string }): KeySet {
-  if (!findKey(trusted, announcedBy.kid)) return trusted;
-  return { keys: announced.keys.map((k) => entry(k.jwk, k.status, k.issuer)) };
-}
-
 /** Key set entry whose thumbprint equals `kid`, or undefined. */
 export function findKey(keys: KeySet, kid: string): KeyEntry | undefined {
   return keys.keys.find((k) => kidOf(k.jwk) === kid);

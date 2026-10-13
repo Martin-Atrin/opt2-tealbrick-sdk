@@ -296,20 +296,8 @@ describe("app target", () => {
     assert.match(r.notes.join(" "), /app build pins Portal Root Keys: run with test roots .*the app did not pin them/);
   });
 
-  it("--no-test-roots with a 0.1.11 app (--keyset-transitional): it boots and the A13 key-set checks report not_run", async () => {
-    const r = await run({ keysetTransitional: true }, { testRoots: false, keysetRequired: false });
-    const a13 = r.checks.filter((c) => c.id.startsWith("A13.") && c.id !== "A13.kss_first_missing");
-    assert.equal(a13.length, 7);
-    for (const c of a13) assert.equal(c.status, "not_run", `${c.id}: ${c.asserted}`);
-    assert.match(a13[0]?.asserted ?? "", /--no-test-roots: the app pins its build's Portal Root Keys/);
-    const strict = r.checks.find((c) => c.id === "A13.kss_first_missing");
-    assert.equal(strict?.status, "not_applicable");
-    assert.match(strict?.asserted ?? "", /--keyset-transitional: 0\.1\.11 transition rules/);
-    assert.deepEqual(failing(r).filter((id) => !id.startsWith("A13.")), []);
-  });
-
-  it("strict by default (a spec-0.1.12 app passes it in the first test): a 0.1.11 app fails A13.kss_first_missing", async () => {
-    const lax = await run({ keysetTransitional: true });
+  it("an app that skips the key-set rule (trusts the slice's portalKeys) fails A13.kss_first_missing", async () => {
+    const lax = await run({ ignoreKeySet: true });
     const l = lax.checks.find((c) => c.id === "A13.kss_first_missing");
     assert.equal(l?.status, "fail", l?.asserted);
   });

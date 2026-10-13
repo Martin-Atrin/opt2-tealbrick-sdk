@@ -79,8 +79,6 @@ export interface MiniFlags {
   ignoreKeySet?: boolean;
   /** accepts a re-enrolment whose EnrolResponse carries no valid portalKeySet (drops its pin) */
   acceptStrippedReenrol?: boolean;
-  /** a spec-0.1.11 build: accepts a first enrolment without a statement (fails B20.kss_enrol_missing) */
-  keysetTransitional?: boolean;
   /** v0.1.13: a kept hold stops the before chain (a later refuse cannot win; fails B22.hold_verdict) */
   holdStopsChain?: boolean;
   /** v0.1.13: the verdict travels in a separate header, not signed in the proof (fails B22.hold_verdict, B22.hv_tamper) */
@@ -187,15 +185,16 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
       })
     ).json()) as EnrolResponse;
     const lax = flags.ignoreKeySet || (flags.acceptStrippedReenrol && !!state.enrol);
-    const t = lax ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(enrol as { portalKeySet?: string }, state.pinned ?? null, roots, { required: flags.keysetTransitional !== true });
-    if (!t.ok) {
+    // `lax` = a DEFECTIVE bridge (fault injection): it skips the key-set rule and trusts the document's `portalKeys`
+    const t = lax ? null : trustedPortalKeys(enrol as { portalKeySet?: string }, state.pinned ?? null, roots);
+    if (t && !t.ok) {
       if (!state.enrol) throw new Error(`enrolment refused: ${t.code}`);
       // re-enrolment refused: keep S1 (old key, identity, pin)
     } else {
       state.key = key;
       state.enrol = enrol;
       state.code = env.TB_ENROL_CODE;
-      if (!t.legacy) {
+      if (t) {
         state.pinned = { seq: t.seq, kss: t.kss };
         state.trusted = t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
       } else {
@@ -254,8 +253,8 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
         if (r.status === 200) {
           const jws = await r.text();
           const peeked = JSON.parse(Buffer.from(jws.split(".")[1] ?? "", "base64url").toString() || "{}") as { portalKeySet?: string };
-          const t = flags.ignoreKeySet ? ({ ok: true, legacy: true } as const) : trustedPortalKeys(peeked, pinned, roots);
-          const signers = !t.ok ? null : t.legacy ? keySetFromPortalKeys(trusted) : t.signers;
+          const t = flags.ignoreKeySet ? null : trustedPortalKeys(peeked, pinned, roots);
+          const signers = t === null ? keySetFromPortalKeys(trusted) : t.ok ? t.signers : null;
           const v = signers ? verifyConfig(jws, { now: nowS(), self: brg, issuers: signers }) : null;
           const body = v?.ok ? (v.body as WorkspaceConfig) : null;
           if (body && body.ws === enrol.workspaceId && (!cfg || body.rev > cfg.rev)) {
@@ -265,7 +264,7 @@ export async function startMiniBridge(env: Record<string, string>, flags: MiniFl
             }
             cfg = body;
             await refreshCatalogs();
-            if (t.ok && !t.legacy) {
+            if (t?.ok) {
               pinned = { seq: t.seq, kss: t.kss };
               trusted = t.keys.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
             } else trusted = body.portalKeys;

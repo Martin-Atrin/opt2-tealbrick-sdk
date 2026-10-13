@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/manifest",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "description": "Teal Brick opt2 contract primitives: manifest validator, JCS, digests, Ed25519 JWS, key sets, token verifiers, sealing, gate()/authorize().",
   "license": "MIT",
@@ -20,7 +20,7 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.24/opt2-tealbrick-spec-0.1.24.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.26/opt2-tealbrick-spec-0.1.26.tgz",
     "ajv": "8.17.1"
   },
   "devDependencies": {

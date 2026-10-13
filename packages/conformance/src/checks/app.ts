@@ -40,8 +40,6 @@ export interface AppTargetContext {
   timeoutMs: number;
   /** v0.1.11: the app pins the fake bridge's TEST root pair (runApp `testRoots`, default on); A13 runs only then */
   testRoots?: boolean;
-  /** C63a: strict spec-0.1.12 check A13.kss_first_missing */
-  keysetRequired?: boolean;
   /** v0.1.18: per-caller fixtures (`inputsAs.<caller>.<op>` overrides `inputs.<op>` for that caller) */
   inputsAs?: ConformanceConfig["inputsAs"];
   /** v0.1.18: setup steps run once before the checks; their captures fill `${name}` placeholders */
@@ -1430,22 +1428,20 @@ export function coverageOutcome(): Outcome {
 
 /** A13 ids (CONFORMANCE §4.5 v0.1.11): the slice key-set rule at the app. */
 export const A13_IDS = {
-  "A13.kss_pinned": "slice with a root-signed portalKeySet installed and pinned (transition rule b)",
+  "A13.kss_pinned": "slice with a root-signed portalKeySet installed and pinned",
   "A13.portal_keys_ignored": "a key added only to slice portalKeys is not trusted",
   "A13.kss_unknown_root": "statement signed by an unknown root → slice refused",
   "A13.kss_rollback": "statement with a lower seq → slice refused",
   "A13.kss_missing": "slice without portalKeySet after a pin → refused (no downgrade)",
   "A13.kss_rotation": "normal rotation (announce / activate / retire statements) applied",
   "A13.kss_compromise": "compromise rotation: slices and grants by the dropped kid refused at once",
-  "A13.kss_first_missing": "strict (default since spec 0.1.12): first slice without portalKeySet refused",
+  "A13.kss_first_missing": "first slice without portalKeySet refused",
 } as const;
-const STRICT_NA = "--keyset-transitional: 0.1.11 transition rules (strict since spec 0.1.12; drop the flag for the strict check)";
 
 async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<void> {
   const b = ctx.bridge;
   const c = () => ctx.client();
   const T = ctx.timeoutMs;
-  if (!ctx.keysetRequired) s.record("A13.kss_first_missing", A13_IDS["A13.kss_first_missing"], "first slice without a statement refused", na(STRICT_NA));
   if (!ctx.testRoots) {
     const why = "--no-test-roots: the app pins its build's Portal Root Keys; run with test roots (the default) and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys })";
     for (const [id, title] of Object.entries(A13_IDS)) if (!s.has(id)) s.record(id, title, "app verifies slices against the newest root-signed statement", notRun(why));
@@ -1526,7 +1522,6 @@ async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<
     const g = good ? await grantRefused(stolen) : { pass: false, shown: "not reached" };
     return verdict(bad1.pass === true && good && g.pass, `${bad1.asserted}; fresh-key slice ${good ? "installed" : "NOT installed"}; stolen-key grant ${g.shown}`);
   });
-  if (!ctx.keysetRequired) return;
   // runs last: it leaves the app on a fresh data dir (only A11 and the payload scan follow)
   await s.run("A13.kss_first_missing", A13_IDS["A13.kss_first_missing"], "an app on a fresh data dir claims and gets a first slice without portalKeySet: it never reports that slice revision", async () => {
     if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");

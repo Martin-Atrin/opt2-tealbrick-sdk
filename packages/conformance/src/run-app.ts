@@ -67,12 +67,6 @@ export interface RunAppOptions {
    * strict app cannot boot against the fake bridge (the boot failure says so).
    */
   testRoots?: boolean;
-  /**
-   * C63a strict rule (spec 0.1.12), default true: the fake bridge emits `portalKeySet` from the first slice and
-   * A13.kss_first_missing runs. `false` (CLI `--keyset-transitional`): the 0.1.11 transition rules, for builds released
-   * before spec 0.1.12 only.
-   */
-  keysetRequired?: boolean;
 }
 
 /** Harness-only env name carrying the test root JWKs (never read by the SDK or the bridge; CONFORMANCE §7). */
@@ -142,10 +136,9 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
 
   const config = opts.config === undefined ? (opts.manifestPath ? loadConformanceConfig(opts.manifestPath) : EMPTY_CONFIG) : (opts.config ?? EMPTY_CONFIG);
   const testRoots = opts.testRoots !== false;
-  const keysetRequired = opts.keysetRequired !== false;
   const bridge = await createFakeBridge({ manifest: manifest as Manifest, ...(opts.agents ? { agents: opts.agents } : {}) });
-  // strict run: an app that requires a statement must get one in its very first slice (claim answer)
-  if (keysetRequired && testRoots) await bridge.control.publishKeySet();
+  // an app that requires a statement must get one in its very first slice (claim answer)
+  if (testRoots) await bridge.control.publishKeySet();
   const ownDir = opts.dataDir === undefined;
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "tb-conformance-"));
   // v0.1.21 (conformance 0.1.13): a free port per run (TBCONF_PORT; the start module passes it to startApp's harness port), so two
@@ -206,7 +199,6 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       ...(config.narrowing ? { narrowing: config.narrowing } : {}),
       notes,
       testRoots,
-      keysetRequired,
       ...(opts.deployTemplate !== undefined ? { deployTemplate: opts.deployTemplate } : {}),
       timeoutMs,
     });

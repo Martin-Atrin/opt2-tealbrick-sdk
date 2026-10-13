@@ -174,8 +174,6 @@ export interface WorldOptions {
   manifests?: Manifest[];
   /** v0.1.11: the bridge under test pins the world's TEST root pair (start module honours TBCONF_PORTAL_ROOT_KEYS); enrolment, configs and slices then carry `portalKeySet` */
   testRoots?: boolean;
-  /** C63a strict checks (spec 0.1.12 behaviour): the bridge must refuse a first enrolment without a statement */
-  keysetRequired?: boolean;
 }
 
 /** The fake counterparts of one bridge run and the state the signed config is built from. */
@@ -224,7 +222,6 @@ export class BridgeWorld {
   /** v0.1.11 (C62/C63): TEST Portal Root Key pair; statements are emitted only when `testRoots` */
   readonly root!: Ed25519KeyPair;
   testRoots = false;
-  keysetRequired = false;
   /** current statement: `seq`, the JWS and the key list it signs (re-signed by publish() when the Portal keys change) */
   keySet: { seq: number; jws: string; keys: string } | null = null;
   /** per-instance overrides of the config `apps[]` entry (BSD-07 checks: foreign internalUrl, missing ownInfra) */
@@ -248,7 +245,6 @@ export class BridgeWorld {
     const w = new BridgeWorld(await FakePortal.create({ maxWaitS: 60 }), await generateKeyPair());
     (w as { root: Ed25519KeyPair }).root = await generateKeyPair();
     w.testRoots = o.testRoots === true;
-    w.keysetRequired = o.keysetRequired === true;
     if (w.testRoots) {
       await w.ensureKeySet();
       w.portal.keySetSource = () => w.ensureKeySet();
