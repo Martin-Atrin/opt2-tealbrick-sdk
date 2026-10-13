@@ -8,11 +8,14 @@ import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { generateKeyPair, opaqueValue } from "@opt2-tealbrick/manifest";
 import { DEVICE_FLOW, OPAQUE_PREFIX } from "@opt2-tealbrick/spec/credentials";
-import { type DeviceOwnerTokenResult, type DeviceStart, ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
+import { type DeviceOwnerTokenResult, type DeviceStart, type HarnessOptionId, ROUTES, type RouteOp } from "@opt2-tealbrick/spec/routes";
 import type { CheckResult } from "../report.ts";
 import { bad, notRun, type Outcome, Suite, verdict } from "../suite.ts";
 import { newId } from "../tokens.ts";
 import { authProbeRows, CORE_LIVE_CHECKS } from "./core-ids.ts";
+
+/** F75/L1: the device.start probes send a harness option id from the spec list (Core judges the id by that list); typed, so a rename breaks the build. */
+const PROBE_HARNESS: HarnessOptionId = "generic-mcp";
 
 /** CORE §11 API base path. */
 export const API_BASE = "/api/v1";
@@ -460,13 +463,13 @@ export async function runCoreLive(o: CoreLiveOptions): Promise<CheckResult[]> {
     if (c.opts.readonly) return notRun("device.start is not called with --live-readonly");
     const key = await pub();
     const agents = Array.from({ length: DEVICE_FLOW.maxAgentPairs + 1 }, () => ({ public_key: key }));
-    const a = await c.probe(startProbe({ scope: "agent", client_id: "kit", machine_label: "tb-conformance", harness: "tb-conformance", agents }, "device.start 65 keys"));
+    const a = await c.probe(startProbe({ scope: "agent", client_id: "kit", machine_label: "tb-conformance", harness: PROBE_HARNESS, agents }, "device.start 65 keys"));
     return verdict(refusedStart(a), describe(a));
   });
   let pendingCode: string | null = null;
   await run("R7.start_shape", `device code ${OPAQUE_PREFIX.deviceCode}…, user code XXXX-XXXX, expires_in ${DEVICE_FLOW.expiresIn}, interval ${DEVICE_FLOW.interval}`, async () => {
     if (c.opts.readonly) return notRun("device.start writes a device request: not called with --live-readonly");
-    const a = await c.probe(startProbe({ scope: "agent", client_id: "kit", machine_label: "tb-conformance", harness: "tb-conformance", agents: [{ public_key: await pub() }] }, "device.start agent"));
+    const a = await c.probe(startProbe({ scope: "agent", client_id: "kit", machine_label: "tb-conformance", harness: PROBE_HARNESS, agents: [{ public_key: await pub() }] }, "device.start agent"));
     const b = a.body as Record<string, unknown> | null;
     if (a.status !== 200 || !b || typeof b !== "object") return bad(describe(a));
     const issues: string[] = [];
