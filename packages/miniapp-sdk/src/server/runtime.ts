@@ -58,6 +58,8 @@ export interface Runtime {
   statusChanged(): void;
   /** v0.1.13 (C86): AppStatus.pendingHolds = held receipts + the app's pendingCount() (clamped, 1 s timeout) */
   pendingHolds(): Promise<number>;
+  /** v0.1.20 (spec 0.1.28, F89): the app's `attention()` (1 s timeout, validated; null when none) */
+  attention(): Promise<{ code: string; reason: string } | null>;
   /** v0.1.13 (C86): ctx.ownerLink(path); throws path_invalid; null until the slice carries portalUrl */
   ownerLink(path: string): string | null;
   /** v0.1.20: an owner link into ANOTHER app (e.g. Inbox opening a hold's decidePath in the owning app) */

@@ -15,7 +15,7 @@ import { TbError } from "../src/server/errors.ts";
 import { defineApp, startApp } from "../src/server/index.ts";
 import { createLogger, SecretRegistry } from "../src/server/log.ts";
 import { Receipts } from "../src/server/receipts.ts";
-import { PendingCounter, StatusPusher } from "../src/server/status.ts";
+import { AttentionReader, PendingCounter, StatusPusher } from "../src/server/status.ts";
 import { openStore, SDK_MIGRATIONS } from "../src/server/store.ts";
 import { fixtureManifest } from "./fixtures/manifest.ts";
 import { callProof, FakeBridge, freePort, grant, migrationsDir, nowS, slice, tempDir, testRoots, ticket, until, type World, world } from "./helpers.ts";
@@ -29,6 +29,7 @@ const HV = { f: "policy" as HookHoldFamily, r: "Rules <b>policy</b>: needs the o
 interface Opts {
   noUi?: boolean;
   pendingCount?: (db: unknown) => Promise<number>;
+  attention?: (db: unknown) => Promise<{ code: string; reason: string } | null>;
   sliceOver?: Parameters<typeof slice>[2];
   grants?: (w: World) => Promise<string[]>;
 }
@@ -96,6 +97,7 @@ async function boot(opts: Opts = {}): Promise<Booted> {
         notebook_rename: async () => ({}),
       },
       ...(opts.pendingCount ? { pendingCount: opts.pendingCount } : {}),
+      ...(opts.attention ? { attention: opts.attention } : {}),
       onStart: async (ctx) => {
         b.startCtx = ctx;
       },
@@ -524,6 +526,29 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
   });
 });
 
+describe("F89 app attention (spec 0.1.28)", () => {
+  let b: Booted;
+  let current: { code: string; reason: string } | null = null;
+  before(async () => {
+    b = await boot({ attention: async () => current });
+  });
+  after(async () => b.cleanup());
+  const last = () => b.bridge.statuses.at(-1) as { readiness?: string; attention?: { code: string; reason: string } } | undefined;
+
+  test("quiet: no attention → readiness ready and no attention field; fires: attention → degraded + {code, reason}; cleared → ready again", async () => {
+    await until(async () => last()?.readiness === "ready", 3000);
+    assert.equal("attention" in (last() ?? {}), false);
+    current = { code: "memory_engine_degraded", reason: "Memory engine runs without embeddings (embed_unavailable:provider_error)." };
+    b.startCtx?.statusChanged();
+    await until(async () => last()?.readiness === "degraded", 3000);
+    assert.deepEqual(last()?.attention, current);
+    current = null;
+    b.startCtx?.statusChanged();
+    await until(async () => last()?.readiness === "ready", 3000);
+    assert.equal("attention" in (last() ?? {}), false);
+  });
+});
+
 describe("units", () => {
   test("StatusPusher: coalesces calls, pushes within 1 s and at most once per second", async () => {
     const at: number[] = [];
@@ -603,5 +628,32 @@ describe("units", () => {
     } finally {
       t.cleanup();
     }
+  });
+
+  test("AttentionReader: valid value passes (reason cleaned and cut); error, timeout and malformed values count as none and warn ≤ 1/min", async () => {
+    const lines: { msg: string; fields?: Record<string, unknown> }[] = [];
+    const log = { debug() {}, info() {}, warn: (msg: string, fields?: Record<string, unknown>) => lines.push({ msg, fields }), error() {} } as never;
+    let now = 0;
+    let value: unknown = { code: "engine_down", reason: `  line1\nline2${"x".repeat(300)}` };
+    const r = new AttentionReader(async () => value as never, {} as never, log, { now: () => now, timeoutMs: 50 });
+    const ok = await r.read();
+    assert.equal(ok?.code, "engine_down");
+    assert.equal(ok?.reason.length, 200);
+    assert.ok(ok?.reason.startsWith("line1 line2"));
+    value = null;
+    assert.equal(await r.read(), null);
+    assert.equal(lines.length, 0, "quiet on the good cases");
+    for (const bad of [{ code: "Bad Code", reason: "x" }, { code: "ok_code", reason: "   " }, { code: 5, reason: "x" }]) {
+      value = bad;
+      assert.equal(await r.read(), null);
+    }
+    assert.deepEqual(lines.map((l) => l.msg), ["attention failed"], "one warning per minute");
+    now += 61_000;
+    const slow = new AttentionReader(() => new Promise(() => {}), {} as never, log, { now: () => now, timeoutMs: 20 });
+    assert.equal(await slow.read(), null);
+    const failing = new AttentionReader(async () => { throw new Error("app secret detail"); }, {} as never, log, { now: () => now, timeoutMs: 20 });
+    assert.equal(await failing.read(), null);
+    assert.ok(!JSON.stringify(lines).includes("app secret detail"), "never logs the app's error text");
+    assert.equal(await new AttentionReader(undefined, {} as never, log).read(), null);
   });
 });

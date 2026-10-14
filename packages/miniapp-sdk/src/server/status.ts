@@ -97,3 +97,70 @@ export class PendingCounter {
     this.#log.warn("pendingCount failed", { reason, counted: 0, ...(suppressed > 0 ? { suppressed } : {}) });
   }
 }
+
+/** v0.1.20 (spec 0.1.28, F89): `AppStatus.attention` limits (BRIDGE §10.3). */
+export const ATTENTION_CODE = /^[a-z][a-z0-9_]{0,39}$/u;
+export const ATTENTION_REASON_MAX = 200;
+
+/** App-reported condition for the owner (spec 0.1.28 `AppAttention`). */
+export interface Attention {
+  code: string;
+  reason: string;
+}
+
+/**
+ * Wraps the app's `attention(db)` (spec 0.1.28, QA F89 / L3): read at every status push, 1 s timeout; an error, a
+ * timeout or a malformed value counts as none and warns (≤ 1/min + suppressed count, never the app's message). The
+ * reason is trimmed, control characters removed and cut to 200 chars.
+ */
+export class AttentionReader {
+  readonly #fn: ((db: Db) => Promise<Attention | null>) | undefined;
+  readonly #db: Db;
+  readonly #log: Logger;
+  readonly #now: () => number;
+  readonly #timeoutMs: number;
+  #lastWarn = Number.NEGATIVE_INFINITY;
+  #suppressed = 0;
+
+  constructor(fn: ((db: Db) => Promise<Attention | null>) | undefined, db: Db, log: Logger, opts: { now?: () => number; timeoutMs?: number } = {}) {
+    this.#fn = fn;
+    this.#db = db;
+    this.#log = log;
+    this.#now = opts.now ?? Date.now;
+    this.#timeoutMs = opts.timeoutMs ?? PENDING_COUNT_TIMEOUT_MS;
+  }
+
+  async read(): Promise<Attention | null> {
+    const fn = this.#fn;
+    if (!fn) return null;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timeout")), this.#timeoutMs);
+        timer.unref();
+      });
+      const value = await Promise.race([Promise.resolve().then(() => fn(this.#db)), timeout]);
+      if (value === null || value === undefined) return null;
+      const reason = typeof value.reason === "string" ? value.reason.replace(/\p{Cc}+/gu, " ").trim().slice(0, ATTENTION_REASON_MAX) : "";
+      if (typeof value.code !== "string" || !ATTENTION_CODE.test(value.code) || !reason) throw new Error("invalid");
+      return { code: value.code, reason };
+    } catch (e) {
+      this.#warn(e instanceof Error && e.message === "timeout" ? "timeout" : e instanceof Error && e.message === "invalid" ? "invalid" : "error");
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  #warn(reason: "timeout" | "error" | "invalid"): void {
+    const now = this.#now();
+    if (now - this.#lastWarn < PENDING_WARN_INTERVAL_MS) {
+      this.#suppressed += 1;
+      return;
+    }
+    this.#lastWarn = now;
+    const suppressed = this.#suppressed;
+    this.#suppressed = 0;
+    this.#log.warn("attention failed", { reason, reported: "none", ...(suppressed > 0 ? { suppressed } : {}) });
+  }
+}

@@ -28,7 +28,7 @@ import { createScopeStore } from "./scopes.ts";
 import { createSealer, loadInstanceKey, resolveKeks } from "./secrets.ts";
 import { createHttpServer } from "./server.ts";
 import { createServiceHelperCaller } from "./service-helper.ts";
-import { PendingCounter, StatusPusher } from "./status.ts";
+import { AttentionReader, PendingCounter, StatusPusher } from "./status.ts";
 import { appDb, metaGet, metaSet, openStore, type Row, runAppMigrations } from "./store.ts";
 import { TrustState } from "./trust.ts";
 
@@ -191,6 +191,8 @@ export async function startApp(
   // v0.1.13 (C86): statusChanged() pacing (≤ 1 push/s) and pendingHolds = held receipts + the app's pendingCount()
   const pusher = new StatusPusher(kick);
   const counter = new PendingCounter(def.pendingCount, appDb(db), log);
+  // v0.1.20 (spec 0.1.28, F89): app-reported attention rides the status push (readiness degraded while present)
+  const attentionReader = new AttentionReader(def.attention, appDb(db), log);
   const scopes = createScopeStore(db, manifest, audit, kick);
   const appHandle = appDb(db);
   const appSecrets = createAppSecrets(db, sealer, secrets);
@@ -310,6 +312,7 @@ export async function startApp(
     async pendingHolds() {
       return receipts.pendingCount() + (await counter.count());
     },
+    attention: () => attentionReader.read(),
     ownerLink,
     ownerLinkFor,
     companionTargets,
