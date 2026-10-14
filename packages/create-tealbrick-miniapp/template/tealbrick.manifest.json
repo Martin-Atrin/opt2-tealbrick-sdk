@@ -7,7 +7,7 @@
   "version": "0.1.0",
   "sdkMajor": 1,
   "publisher": { "name": "__APP_NAME__ authors" },
-  "source": { "repo": "https://github.com/Martin-Atrin/opt2-tealbrick-__APP_ID__", "license": "MIT" },
+  "source": { "repo": "https://github.com/Martin-Atrin/opt2-tealbrick-__APP_ID__", "license": "Apache-2.0" },
   "icon": { "svgPath": "M4 5h16v14H4z M8 9h8 M8 13h8 M8 17h5", "viewBox": "0 0 24 24" },
   "discovery": {
     "category": "productivity",

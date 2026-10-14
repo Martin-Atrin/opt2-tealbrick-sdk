@@ -22,8 +22,8 @@ importers:
         specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.16/opt2-tealbrick-conformance-0.1.16.tgz
         version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.16/opt2-tealbrick-conformance-0.1.16.tgz(react@19.3.0)
       '@opt2-tealbrick/ui':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz(react@19.3.0)
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.2.0/opt2-tealbrick-ui-0.2.0.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.2.0/opt2-tealbrick-ui-0.2.0.tgz(react@19.3.0)
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
@@ -33,6 +33,9 @@ importers:
       '@types/react-dom':
         specifier: 19.3.0
         version: 19.3.0(@types/react@19.3.0)
+      happy-dom:
+        specifier: 21.0.1
+        version: 21.0.1
       react:
         specifier: 19.3.0
         version: 19.3.0
@@ -121,9 +124,10 @@ packages:
     resolution: {integrity: sha512-u8QrxaA/fACTiLB8VPyDWORTTRijxt8rQuAnU0cgOfSauaDl1E+YIzGzxjsrpwbYav2jLhE20sCLzeQJ+rntBQ==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.26/opt2-tealbrick-spec-0.1.26.tgz}
     version: 0.1.26
 
-  '@opt2-tealbrick/ui@https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz':
-    resolution: {integrity: sha512-EPUHP32//N5WKpQWu7ULt/8yy8pAjPX1P0IWLj37BtZO1KnOr0M4P1muhCXvaNUsjopR5bwDhMjndb49LcvtDg==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz}
-    version: 0.1.1
+  '@opt2-tealbrick/ui@https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.2.0/opt2-tealbrick-ui-0.2.0.tgz':
+    resolution: {integrity: sha512-Q4ic0JsnK5UqV7OG+Vu2yg85P/4KZ6VCGiATg17/nUHG0qj7Nb4D3QD+J2jQgb755GYs89E/ClGQuotr2ERBnQ==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.2.0/opt2-tealbrick-ui-0.2.0.tgz}
+    version: 0.2.0
+    hasBin: true
     peerDependencies:
       react: '>=19'
 
@@ -137,6 +141,12 @@ packages:
 
   '@types/react@19.3.0':
     resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
+
+  '@types/whatwg-mimetype@3.0.2':
+    resolution: {integrity: sha512-c2AKvDT8ToxLIOUlN51gTiHXflsfIFisS4pO7pDPoKouJCESkhZnEy623gwP9laCy5lnLDAw1vAzu2vM2YLOrA==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     resolution: {integrity: sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==}
@@ -261,14 +271,26 @@ packages:
   ajv@8.17.1:
     resolution: {integrity: sha512-B/gBuNg5SiMTrPkC+A2+cW0RszwxYmn6VYxB/inlBStS5nx6xHIt/ehKRhIMhqusl7a8LjQoZnjCs5vhwxOQ1g==}
 
+  buffer-image-size@0.6.4:
+    resolution: {integrity: sha512-nEh+kZOPY1w+gcCMobZ6ETUp9WfibndnosbpwB1iJk/8Gt5ZF2bhS6+B6bPYz424KtwsR6Rflc3tCz1/ghX2dQ==}
+    engines: {node: '>=4.0'}
+
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
+
+  entities@7.0.1:
+    resolution: {integrity: sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA==}
+    engines: {node: '>=0.12'}
 
   fast-deep-equal@3.1.3:
     resolution: {integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==}
 
   fast-uri@3.1.8:
     resolution: {integrity: sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg==}
+
+  happy-dom@21.0.1:
+    resolution: {integrity: sha512-pRBs/u9fhrncyByOl58DMex0R2uAj6ZPKWIjV5j5yNGZBqLw3P6BTRhlc0DD5b/Ht4/6JYTMuE2LJhUWRC6SGw==}
+    engines: {node: '>=20.0.0'}
 
   json-schema-traverse@1.0.0:
     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
@@ -296,6 +318,22 @@ packages:
 
   undici-types@7.24.6:
     resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
+
+  whatwg-mimetype@3.0.0:
+    resolution: {integrity: sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q==}
+    engines: {node: '>=12'}
+
+  ws@8.22.0:
+    resolution: {integrity: sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
 
 snapshots:
 
@@ -356,7 +394,7 @@ snapshots:
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.26/opt2-tealbrick-spec-0.1.26.tgz': {}
 
-  '@opt2-tealbrick/ui@https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.1.1/opt2-tealbrick-ui-0.1.1.tgz(react@19.3.0)':
+  '@opt2-tealbrick/ui@https://github.com/Martin-Atrin/opt2-tealbrick-packages/releases/download/ui-v0.2.0/opt2-tealbrick-ui-0.2.0.tgz(react@19.3.0)':
     dependencies:
       react: 19.3.0
 
@@ -371,6 +409,12 @@ snapshots:
   '@types/react@19.3.0':
     dependencies:
       csstype: 3.2.3
+
+  '@types/whatwg-mimetype@3.0.2': {}
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 24.19.2
 
   '@typescript/typescript-aix-ppc64@7.0.2':
     optional: true
@@ -439,11 +483,30 @@ snapshots:
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
 
+  buffer-image-size@0.6.4:
+    dependencies:
+      '@types/node': 24.19.2
+
   csstype@3.2.3: {}
+
+  entities@7.0.1: {}
 
   fast-deep-equal@3.1.3: {}
 
   fast-uri@3.1.8: {}
+
+  happy-dom@21.0.1:
+    dependencies:
+      '@types/node': 24.19.2
+      '@types/whatwg-mimetype': 3.0.2
+      '@types/ws': 8.18.2
+      buffer-image-size: 0.6.4
+      entities: 7.0.1
+      whatwg-mimetype: 3.0.0
+      ws: 8.22.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   json-schema-traverse@1.0.0: {}
 
@@ -482,3 +545,7 @@ snapshots:
       '@typescript/typescript-win32-x64': 7.0.2
 
   undici-types@7.24.6: {}
+
+  whatwg-mimetype@3.0.0: {}
+
+  ws@8.22.0: {}

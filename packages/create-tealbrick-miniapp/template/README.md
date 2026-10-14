@@ -15,6 +15,9 @@ operation id (`src/app.ts`) and plain migrations (`migrations/`).
 | `src/items.ts` | the app's table access (plain functions over the SDK `Db`) |
 | `src/main.ts` | `startApp(app, process.env)` |
 | `src/ui/` | React UI (`<TbProvider>` + `<AppShell>` from `@opt2-tealbrick/ui`), built to `dist/ui` |
+| `src/ui/standard.tsx` | the standard pages (Holds, Receipts, Agents & scopes, Backups & export) and the page router; pass your own words as props, do not edit (one source: the template) |
+| `src/ui/pages.css` | page layout helpers of the approved mockups (`.page-head`, `.ruled`, `.item`, ...); tokens only. App-only layout goes in `src/ui/app.css` (linked after it when present) |
+| `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` | Apache-2.0 (C154), the copyright notice and the upstream licences the app ships (React, the UI kit, Nunito OFL); update the notices when you add a dependency |
 | `migrations/0001_init.sql` | baseline; forward-only, never edit a released file |
 | `skills/use-__APP_ID__/SKILL.md` | the agent skill (frontmatter `name`, `description`) |
 | `scripts/build-ui.ts` | UI build without a bundler (tsc output + vendored modules + import map) |
@@ -28,7 +31,7 @@ operation id (`src/app.ts`) and plain migrations (`migrations/`).
 ```sh
 pnpm install          # commit pnpm-lock.yaml: CI installs with --frozen-lockfile
 # typecheck, test, conformance, build and start first run `tb-gen kit` (op ids + I/O types from the manifest)
-pnpm typecheck && pnpm lint && pnpm test
+pnpm typecheck && pnpm lint && pnpm test      # lint = biome + check-system (the design-system guard)
 pnpm build            # server to dist/, UI to dist/ui
 pnpm conformance      # SDK conformance suite against this app
 TB_STANDALONE=1 TB_DATA_DIR=.data pnpm start   # app-alone mode: person UI only, no agent calls

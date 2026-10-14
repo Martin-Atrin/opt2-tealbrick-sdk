@@ -46,6 +46,8 @@ describe("createMiniapp", () => {
       "src/ui/main.tsx",
       "src/ui/App.tsx",
       "src/ui/index.html",
+      "src/ui/standard.tsx",
+      "src/ui/pages.css",
       "migrations/0001_init.sql",
       "skills/use-my-notes/SKILL.md",
       "Dockerfile",
@@ -56,9 +58,13 @@ describe("createMiniapp", () => {
       "tsconfig.json",
       "package.json",
       "test/app.test.ts",
+      "test/ui-holds.test.ts",
       ".gitignore",
       ".dockerignore",
       "README.md",
+      "LICENSE",
+      "NOTICE",
+      "THIRD_PARTY_NOTICES.md",
     ])
       assert.ok(r.files.includes(f), `scaffold has ${f}`);
     assert.deepEqual(walk(dir).sort(), r.files);
@@ -147,7 +153,7 @@ describe("createMiniapp", () => {
     const tb = Object.entries<string>({ ...pkg.dependencies, ...pkg.devDependencies }).filter(([n]) => n.startsWith("@opt2-tealbrick/"));
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /\/ui-v0\.1\.1\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /\/ui-v0\.2\.0\//);
     assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.19\//);
     assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.16\//);
     // BSA-07: the ONE app shell from ui, no local frame
@@ -155,6 +161,11 @@ describe("createMiniapp", () => {
     assert.match(ui, /import \{[^}]*\bAppShell\b[^}]*\} from "@opt2-tealbrick\/ui";/);
     assert.match(ui, /<AppShell\b/);
     assert.doesNotMatch(ui, /SPEC-GAP|function Frame\b/);
+    // C150: the header is in the app's colour with its art; the standard pages are the template's single copy
+    assert.match(ui, /colour=\{appColour\("tasks"\)\}/);
+    assert.match(ui, /art=\{appArt\("tasks", STILLS\)\}/);
+    assert.match(ui, /from "\.\/standard\.tsx"/);
+    assert.equal(pkg.scripts.lint, "biome check . && check-system src", "the kit guard runs in CI through lint");
 
     const ci = readJson(dir, "tealbrick-ci.json");
     assert.equal(ci.kind, "miniapp");
@@ -189,6 +200,55 @@ describe("createMiniapp", () => {
       ["name", "description"],
     );
     assert.match(front, /^name: use-tasks$/m);
+  });
+
+  it("design system 0.2.0: the standard pages and pages.css are identical for every app, and no 0.1.x name is left", (t) => {
+    const a = join(temp(t), "a");
+    const b = join(temp(t), "b");
+    createMiniapp({ dir: a, id: "alpha", name: "Alpha" });
+    createMiniapp({ dir: b, id: "beta-two", name: "Beta Two" });
+    for (const f of ["src/ui/standard.tsx", "src/ui/pages.css", "test/ui-holds.test.ts"]) assert.equal(read(a, f), read(b, f), `${f} is one source for all apps`);
+    const standard = read(a, "src/ui/standard.tsx");
+    assert.doesNotMatch(standard, /alpha|Alpha/, "no app id or name inside standard.tsx");
+    // RUL-01 / RUL-14 / C8 are in the shared module, not left to each app
+    assert.match(standard, /role="alert"/);
+    assert.match(standard, /Try again/);
+    assert.match(standard, /inflight/);
+    assert.doesNotMatch(standard, /void list\.decide\(/, "no fire-and-forget decide (RUL-01): the page goes through decideOrError");
+    assert.match(standard, /decideOrError\(/);
+    const gone =
+      /--tb-(?:radius|surface|canvas|accent|border|text-(?:xs|sm|md|lg|xl|2xl))(?![\w-])|--tb-(?:burgundy|teal-\d)|tone="(?:ok|action|progress|blocked)"|variant="(?:accent|ghost)"|\bEyebrow\b|\bSetupSteps\b|\bSetupOverlay\b/;
+    for (const f of ["src/ui/App.tsx", "src/ui/standard.tsx", "src/ui/pages.css"]) assert.doesNotMatch(read(a, f), gone, `${f} has no 0.1.x name`);
+    // the app CSS is page layout only and uses tokens, never a raw colour, radius or font
+    assert.doesNotMatch(read(a, "src/ui/pages.css"), /#[0-9a-f]{3,8}\b|rgb\(|border-radius:\s*\d|font-family:(?!\s*var)/i);
+    // build-ui: kit sheets first, then pages.css/app.css; Nunito files and the still travel with the build
+    const build = read(a, "scripts/build-ui.ts");
+    assert.match(build, /APP_STYLES = \["pages\.css", "app\.css"\]/);
+    assert.match(build, /copyCssAssets/);
+    assert.match(build, /appArt\(productId, "stills\/"\)/);
+    assert.match(read(a, "src/ui/index.html"), /<body class="tb-root">/);
+    const pkg = readJson(a, "package.json");
+    assert.equal(pkg.devDependencies["happy-dom"], "21.0.1", "the Holds UI test renders in happy-dom");
+  });
+
+  it("C154: Apache-2.0 LICENSE (verbatim text), NOTICE with the app's name, third-party notices, package licence", (t) => {
+    const dir = join(temp(t), "a");
+    createMiniapp({ dir, id: "alpha", name: "Alpha App" });
+    const licence = read(dir, "LICENSE");
+    assert.match(licence, /^\s+Apache License\n\s+Version 2\.0, January 2004/);
+    assert.match(licence, /END OF TERMS AND CONDITIONS/);
+    assert.match(licence, /^ {3}Copyright 2026 Tealbrick$/m);
+    // the standard text unchanged apart from the appendix line: the canonical file is 11358 bytes with the 33-char placeholder
+    assert.equal(Buffer.byteLength(licence), 11358 - "Copyright [yyyy] [name of copyright owner]".length + "Copyright 2026 Tealbrick".length);
+    assert.equal(
+      read(dir, "NOTICE"),
+      "Alpha App (opt2-tealbrick-alpha)\nCopyright 2026 Tealbrick\n\nThis product includes software and assets developed by third parties; see THIRD_PARTY_NOTICES.md.\n",
+    );
+    const third = read(dir, "THIRD_PARTY_NOTICES.md");
+    for (const name of ["react-dom", "scheduler", "@opt2-tealbrick/ui", "Nunito", "SIL Open Font License 1.1", "OFL.txt", "not** covered by the Apache-2.0", "@opt2-tealbrick/miniapp-sdk"])
+      assert.ok(third.includes(name), `THIRD_PARTY_NOTICES.md mentions ${name}`);
+    assert.equal(readJson(dir, "package.json").license, "Apache-2.0");
+    assert.equal(readJson(dir, "tealbrick.manifest.json").source.license, "Apache-2.0", "the manifest names the same licence");
   });
 
   it("derives the name from the id when --name is omitted", (t) => {
