@@ -12,7 +12,7 @@ The UI build (`scripts/build-ui.ts`) copies these files into the app image.
 | React (`react`) | 19.3.0 | MIT | https://github.com/facebook/react |
 | React DOM (`react-dom`) | 19.3.0 | MIT | https://github.com/facebook/react |
 | `scheduler` | 0.28.0 | MIT | https://github.com/facebook/react |
-| `@opt2-tealbrick/ui` (Tealbrick design system kit: tokens, components, CSS) | 0.2.0 | MIT | https://github.com/Martin-Atrin/opt2-tealbrick-packages |
+| `@opt2-tealbrick/ui` (Tealbrick design system kit: tokens, components, CSS) | 0.2.3 | MIT | https://github.com/Martin-Atrin/opt2-tealbrick-packages |
 | `@opt2-tealbrick/miniapp-sdk/client` and `@opt2-tealbrick/spec/bridge` (browser modules only) | 0.1.19 / 0.1.26 | MIT | see the next section |
 | Nunito (variable font, `vendor/@opt2-tealbrick/ui/dist/fonts/*.woff2`) | 5.3.0 (`@fontsource-variable/nunito`) | SIL Open Font License 1.1 | https://github.com/googlefonts/nunito |
 
