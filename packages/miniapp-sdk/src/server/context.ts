@@ -4,6 +4,7 @@ import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { AppDefinition, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
+import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
 
 export interface ContextExtras {
   /** bridge public origin (`https://<bridge>`) for third-party callbacks `…/p/<product><path>`; null until the slice names it */
@@ -13,7 +14,7 @@ export interface ContextExtras {
   scopes: Pick<ScopeStore, "instances">;
   secrets: AppSecrets;
 }
-export type SdkOpContext = OpContext & ContextExtras & CompanionTargetsView;
+export type SdkOpContext = OpContext & ContextExtras & CompanionTargetsView & JobsView;
 export type SdkHookContext = HookContext & { secrets: AppSecrets };
 export type SdkPublicContext = Parameters<PublicHandler>[1] & ContextExtras;
 export type { AppSecrets };
@@ -36,9 +37,9 @@ export interface CompanionTargetsView {
 }
 
 /** v0.1.13 (C33, C85, C86): `onStart` runs once after boot and (bridge mode) after the claim succeeded; errors are logged. */
-export type StartContext = SpecStartContext & CompanionTargetsView;
+export type StartContext = SpecStartContext & CompanionTargetsView & JobsView;
 /** v0.1.13: the ctx every event handler gets (C85 callApp without parentCall, C86 statusChanged / ownerLink). */
-export type SdkEventContext = EventContext & CompanionTargetsView;
+export type SdkEventContext = EventContext & CompanionTargetsView & JobsView;
 /** AppEvents (types/sdk.ts) with the SDK event ctx; a handler typed against the spec EventContext still fits. */
 export interface SdkAppEvents {
   agentAdded?(agent: SliceAgent, ctx: SdkEventContext): Promise<void>;
@@ -47,7 +48,19 @@ export interface SdkAppEvents {
   /** v0.1.13 (Fleet): full agent list, once per installed slice whose agents differ, and once after boot */
   agentsChanged?(agents: SliceAgent[], ctx: SdkEventContext): Promise<void>;
 }
+/** v0.1.21 (RUL-11): the ctx of `onStop` (the DB is still open; jobs no longer start) */
+export type StopContext = SdkEventContext & { secrets: AppSecrets };
 export type SdkAppDefinition<A extends string = never> = Omit<AppDefinition<A>, "onStart" | "events"> & {
   onStart?(ctx: StartContext): Promise<void>;
   events?: SdkAppEvents;
+  /**
+   * v0.1.21 (Scribe R1, L6): background job kinds → handler. A tick resumes from the last `ctx.checkpoint(state)`;
+   * leases, heartbeats, retries with backoff, pause/resume/cancel and restart draining are the SDK's.
+   */
+  jobs?: Record<string, JobHandler | JobSpec>;
+  /**
+   * v0.1.21 (RUL-11): called once from `stop()` (SIGTERM/SIGINT or RunningApp.stop) after the job runner stopped
+   * claiming and before running jobs are drained and the DB closes: stop the app's own timers here. 5 s timeout.
+   */
+  onStop?(ctx: StopContext): Promise<void>;
 };

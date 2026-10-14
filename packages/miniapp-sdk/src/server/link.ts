@@ -15,6 +15,7 @@ import type { BridgeClient } from "./bridge-client.ts";
 import { errorFrom } from "./bridge-client.ts";
 import { enrolCodeDigest, identityRefused, reclaimCode, waitForMountedDataDir } from "./claim-guard.ts";
 import { TbError } from "./errors.ts";
+import type { JobsSummary } from "./jobs.ts";
 import { peekClaims } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
 import { metaGet, metaSet } from "./store.ts";
@@ -45,6 +46,15 @@ const sleep = (ms: number, signal: AbortSignal) =>
       { once: true },
     );
   });
+
+function jobsField(rt: Runtime): { jobs?: JobsSummary } {
+  try {
+    const j = rt.jobs.summary();
+    return j.queued + j.running + j.waiting + j.paused + j.failed > 0 || j.appPaused ? { jobs: j } : {};
+  } catch {
+    return {};
+  }
+}
 
 export function readiness(h: HealthStatus): AppStatus["readiness"] {
   return h === "ok" ? "ready" : h === "needs_keys" ? "needs_keys" : "degraded";
@@ -108,6 +118,8 @@ export class BridgeLink {
       // v0.1.13 (C86): held receipts + defineApp pendingCount() (clamped 0..10 000, 1 s timeout)
       pendingHolds: await rt.pendingHolds(),
       ...(attention ? { attention } : {}),
+      // v0.1.21 (R1): job counts when the app has any (SPEC-GAP: AppStatus.jobs, additive)
+      ...jobsField(rt),
     };
   }
 

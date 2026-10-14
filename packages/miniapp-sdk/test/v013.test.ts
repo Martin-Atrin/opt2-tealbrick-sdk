@@ -493,7 +493,7 @@ describe("C85 / C86 / Fleet / companionTargets", () => {
   });
 
   test("Fleet: agentsChanged once after boot, on rename/pause/removal only; EventContext is complete; once again after a restart", async () => {
-    const ctxKeys = ["agentScopeRequest", "appsPolicy", "callApp", "companionTargets", "db", "log", "ownerLink", "ownerLinkFor", "scopes", "statusChanged"];
+    const ctxKeys = ["agentScopeRequest", "appsPolicy", "callApp", "companionTargets", "db", "jobs", "log", "ownerLink", "ownerLinkFor", "paused", "schedule", "scopes", "statusChanged"];
     assert.ok(b.agentsChanged.length >= 1);
     assert.deepEqual(b.agentsChanged[0]?.ctxKeys, ctxKeys);
     const n = b.agentsChanged.length;

@@ -78,7 +78,7 @@ export function testRoots(w: World): { portalRootKeys: Ed25519PublicJwk[] } {
 export async function slice(
   w: World,
   product: string,
-  over: Partial<Pick<InstanceSlice, "pause" | "agents" | "grants" | "personNbf" | "portalUrl">> & {
+  over: Partial<Pick<InstanceSlice, "pause" | "agents" | "grants" | "personNbf" | "portalUrl" | "revoked">> & {
     portalKeySet?: string | null;
     /** spec 0.1.14 addition (not in the 0.1.13 types): companion grant targets */
     companionTargets?: { product: string; ins: string }[];
@@ -102,7 +102,7 @@ export async function slice(
       portalKeys: [{ jwk: w.portal.publicJwk, status: "active" }],
       bridge: { id: w.brg, keys: [w.bridgeKey.publicJwk] },
       pause: over.pause ?? { workspace: false, agents: [], instances: [] },
-      revoked: { jtis: [] },
+      revoked: over.revoked ?? { jtis: [] },
       personNbf: over.personNbf ?? 0,
       grants: over.grants ?? [],
       agents: over.agents ?? [
@@ -119,7 +119,7 @@ export async function slice(
   );
 }
 
-export async function grant(w: World, agent: AgentId, opts: { crud?: CrudAction[]; held?: HoldFamily[]; aud?: InstanceId } = {}): Promise<string> {
+export async function grant(w: World, agent: AgentId, opts: { crud?: CrudAction[]; held?: HoldFamily[]; aud?: InstanceId; wf?: string[]; mode?: "free" | "bound" } = {}): Promise<string> {
   return signGrant(
     {
       iss: "tb:portal",
@@ -129,10 +129,10 @@ export async function grant(w: World, agent: AgentId, opts: { crud?: CrudAction[
       ws: w.ws,
       cnf: { brg: w.brg },
       crud: opts.crud ?? ["create", "read", "update", "delete"],
-      mode: "free",
+      mode: opts.mode ?? "free",
       held: opts.held ?? [],
       caps: {},
-      wf: [],
+      wf: opts.wf ?? [],
       polrev: 1,
     },
     w.portal,

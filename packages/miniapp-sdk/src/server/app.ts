@@ -16,10 +16,11 @@ import { logMountAtBoot } from "./claim-guard.ts";
 import type { SdkAppDefinition, SdkEventContext, StartContext } from "./context.ts";
 import { readEnv } from "./env.ts";
 import { TbError } from "./errors.ts";
+import { JOB_KIND_RE, JobRunner, type JobsApi, jobsView, RUNNER_DEFAULTS, sealGrant } from "./jobs.ts";
 import { createKeys } from "./keys.ts";
 import { BridgeLink } from "./link.ts";
 import { createLogger, SecretRegistry } from "./log.ts";
-import { decide } from "./ops.ts";
+import { decide, fireScheduledOp } from "./ops.ts";
 import { createPersonAuth } from "./person.ts";
 import { dropPrivileges, type PrivilegeProc } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
@@ -60,7 +61,7 @@ export function defineApp<A extends string = never>(def: SdkAppDefinition<A>): A
 }
 
 /** Boot checks of the handler set against the manifest (SDK-API §3): exactly one handler per non-dynamic op, etc. */
-function checkDefinition(def: AppDefinition<string>, m: Manifest): string[] {
+function checkDefinition(def: AppDefinition<string> | SdkAppDefinition<string>, m: Manifest): string[] {
   const problems: string[] = [];
   const ops = new Map(m.operations.map((o) => [o.id, o]));
   for (const o of m.operations) {
@@ -84,6 +85,19 @@ function checkDefinition(def: AppDefinition<string>, m: Manifest): string[] {
   for (const p of Object.keys(def.publicRoutes ?? {})) if (!routes.has(p)) problems.push(`extra public route handler ${p}`);
   if (typeof def.migrations !== "string" || def.migrations === "") problems.push("migrations directory is required");
   for (const a of def.auditActions ?? []) if (!/^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/.test(a)) problems.push(`audit action ${a} must look like noun.verb`);
+  // v0.1.21 (R1): job kinds
+  const d = def as SdkAppDefinition<string>;
+  for (const [kind, h] of Object.entries(d.jobs ?? {})) {
+    if (!JOB_KIND_RE.test(kind) || kind.startsWith("tb.")) problems.push(`job kind ${kind} must match ${JOB_KIND_RE.source} and not start with tb.`);
+    const run = typeof h === "function" ? h : h?.run;
+    if (typeof run !== "function") problems.push(`job kind ${kind} has no handler`);
+    if (typeof h === "object" && h) {
+      if (h.maxAttempts !== undefined && (!Number.isInteger(h.maxAttempts) || h.maxAttempts < 1 || h.maxAttempts > 100)) problems.push(`job kind ${kind}: maxAttempts must be 1..100`);
+      if (h.leaseMs !== undefined && (!Number.isInteger(h.leaseMs) || h.leaseMs < 1000 || h.leaseMs > 600_000)) problems.push(`job kind ${kind}: leaseMs must be 1000..600000`);
+      if (h.timeoutMs !== undefined && (!Number.isInteger(h.timeoutMs) || h.timeoutMs < 1000 || h.timeoutMs > 86_400_000)) problems.push(`job kind ${kind}: timeoutMs must be 1000..86400000`);
+    }
+  }
+  if (d.onStop !== undefined && typeof d.onStop !== "function") problems.push("onStop must be a function");
   return problems;
 }
 
@@ -110,15 +124,22 @@ function listen(server: Server, port: number): Promise<void> {
 export async function startApp(
   app: App,
   env: Record<string, string | undefined>,
-  harness?: { privilegeProc?: PrivilegeProc; portalRootKeys?: Ed25519PublicJwk[]; mountinfoPath?: string; port?: number },
-): Promise<RunningApp & { readonly port: number }> {
+  harness?: {
+    privilegeProc?: PrivilegeProc;
+    portalRootKeys?: Ed25519PublicJwk[];
+    mountinfoPath?: string;
+    port?: number;
+    /** v0.1.21: job runner pacing for tests (poll, drain) */
+    jobs?: Partial<{ pollMs: number; concurrency: number; drainMs: number }>;
+  },
+): Promise<RunningApp & { readonly port: number; readonly jobs: JobsApi }> {
   const def = definitions.get(app);
   if (!def) throw new TbError("app_invalid", "startApp needs the value returned by defineApp", 500);
   const v = validateManifest(def.manifest);
   if (!v.ok) throw new TbError("manifest_invalid", "manifest does not validate", 500, { errors: v.errors });
   const manifest = v.manifest;
   if (manifest.sdkMajor !== SDK_MAJOR) throw new TbError("sdk_major_unsupported", `manifest sdkMajor ${manifest.sdkMajor} differs from SDK major ${SDK_MAJOR}`, 500);
-  const problems = checkDefinition(def, manifest);
+  const problems = checkDefinition(def as AppDefinition<string>, manifest);
   if (problems.length) throw new TbError("handlers_invalid", problems.join("; "), 500, { problems });
 
   const cfg = readEnv(env);
@@ -216,7 +237,25 @@ export async function startApp(
   const statusChanged = (): void => pusher.request();
   const appsPolicy = (): readonly string[] | null => trust.appsPolicy();
   const agentScopeRequest = (agt: string): ScopeRequest | null => trust.agentScopeRequest(agt, manifest.id);
-  const eventContext = (): SdkEventContext => ({ db: appHandle, log, scopes, callApp: appCallApp, statusChanged, ownerLink, companionTargets, appsPolicy, agentScopeRequest, ownerLinkFor });
+  // v0.1.21: the job runner exists from right after `rt` below; event contexts are only built after that
+  let runner: JobRunner | null = null;
+  const jobRunner = (): JobRunner => {
+    if (!runner) throw new TbError("app_not_running", "the job runner is not ready", 500);
+    return runner;
+  };
+  const eventContext = (): SdkEventContext => ({
+    db: appHandle,
+    log,
+    scopes,
+    callApp: appCallApp,
+    statusChanged,
+    ownerLink,
+    companionTargets,
+    appsPolicy,
+    agentScopeRequest,
+    ownerLinkFor,
+    ...jobsView(rt, jobRunner(), null),
+  });
   /** Fleet: last agent list handed to events.agentsChanged in this process (null = none yet since boot) */
   let notifiedAgents: string | null = null;
   const keys = createKeys({
@@ -281,6 +320,17 @@ export async function startApp(
     secretsStore: appSecrets,
     backups: backup.api,
     bridge,
+    get jobs() {
+      return jobRunner();
+    },
+    noteGrant(callerId, token, iat) {
+      try {
+        const store = jobRunner().store;
+        if (store.hasPendingOps(callerId, iat)) store.refreshGrant(callerId, sealGrant(rt, callerId, token), iat);
+      } catch (e) {
+        log.warn("job grant refresh failed", { error: e instanceof Error ? e.message : "unknown" });
+      }
+    },
     replay: memoryReplayGuard(),
     state,
     mountinfoPath: harness?.mountinfoPath,
@@ -312,7 +362,8 @@ export async function startApp(
     async pendingHolds() {
       return receipts.pendingCount() + (await counter.count());
     },
-    attention: () => attentionReader.read(),
+    // v0.1.21: failed / stuck jobs raise attention when the app reports none (L3)
+    attention: async () => (await attentionReader.read()) ?? jobRunner().attention(),
     ownerLink,
     ownerLinkFor,
     companionTargets,
@@ -363,6 +414,9 @@ export async function startApp(
     callServiceHelper: helper,
   };
 
+  runner = new JobRunner(rt, def.jobs, fireScheduledOp, harness?.jobs ?? {});
+  closeOnFail(() => runner?.store.reseal(sealer));
+
   // claim record → bridge known; slice from the DB is already installed in TrustState
   if (!cfg.standalone && bridge) {
     const record = BridgeLink.record(rt);
@@ -391,11 +445,13 @@ export async function startApp(
   // Fleet: the stored slice is the first slice after boot (a bridge answers a long-poll with 204 while it is current)
   if (trust.slice) void rt.notifyAgents();
   link?.start();
+  runner.start();
   const sweep = setInterval(() => {
     try {
       const now = Date.now();
       if (receipts.sweep(now).expired > 0) statusChanged(); // v0.1.13: a hold expired
       person.sweep(now);
+      runner?.store.sweep(now);
     } catch (e) {
       log.warn("sweep failed", { error: e instanceof Error ? e.message : "unknown" });
     }
@@ -408,6 +464,26 @@ export async function startApp(
       state.stopping = true;
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
+      // v0.1.21 (RUL-11, L21): no new job starts; the app's onStop stops its own timers; running jobs drain (handler
+      // ticks are given back and resume at the next start, in-flight scheduled ops end as unknown_outcome)
+      runner?.halt();
+      if (def.onStop) {
+        let t: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            def.onStop({ ...eventContext(), secrets: appSecrets }),
+            new Promise<void>((_, reject) => {
+              t = setTimeout(() => reject(new Error("timeout")), RUNNER_DEFAULTS.onStopMs);
+              t.unref();
+            }),
+          ]);
+        } catch (e) {
+          log.warn("onStop failed", { error: e instanceof Error ? e.message : "unknown" });
+        } finally {
+          if (t) clearTimeout(t);
+        }
+      }
+      await runner?.stop();
       clearInterval(sweep);
       pusher.stop();
       backup.stop();
@@ -438,6 +514,8 @@ export async function startApp(
     keys,
     audit,
     backups: backup.api,
+    // v0.1.21: the app-initiated jobs API (main modules, tests)
+    jobs: jobsView(rt, runner, null).jobs,
     stop,
   };
 }

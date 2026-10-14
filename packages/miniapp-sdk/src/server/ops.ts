@@ -2,12 +2,13 @@
 // /a/<product>/tb/v1/ops/:op. Order on /tb/v1/ops: call proof → verifyGrant → op/audience → input schema → idempotency
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { authorize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
+import { authorize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, CallId, InstanceId, PersonId, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, DynamicResolution, Effect, HoldFamily, Operation } from "@opt2-tealbrick/spec/manifest";
 import type {
   Caller,
+  Decision,
   HandlerSpec,
   HoldDecideInput,
   HoldsPendingItem,
@@ -25,10 +26,11 @@ import type {
 import type { ContextExtras, SdkHookContext, SdkOpContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
-import { HOLD_TTL_MS } from "./receipts.ts";
+import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
+import { HOLD_TTL_MS, type NewReceipt } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 
-const OP_TIMEOUT_MS = 30_000;
+export const OP_TIMEOUT_MS = 30_000;
 const SUMMARY_MAX = 280;
 const META_MAX_BYTES = 4096;
 const HOLD_VIEW_MAX = 16_000;
@@ -62,13 +64,13 @@ export function peekClaims(token: string): Record<string, unknown> | null {
   }
 }
 
-function handlerSpec(rt: Runtime, opId: string): HandlerSpec | null {
+export function handlerSpec(rt: Runtime, opId: string): HandlerSpec | null {
   const h = rt.def.handlers[opId];
   if (!h) return null;
   return typeof h === "function" ? { run: h } : h;
 }
 
-function clampSummary(s: string): string {
+export function clampSummary(s: string): string {
   return s.length <= SUMMARY_MAX ? s : `${s.slice(0, SUMMARY_MAX - 1)}…`;
 }
 
@@ -93,7 +95,7 @@ function idempotencyKeyFor(op: { idempotency: string }, key: string | null): str
 }
 
 /** Collects `ctx.receipt` values set by the handler. */
-function receiptHelpers(): { helpers: OpContext["receipt"]; summary: string | null; meta: Json | undefined } {
+export function receiptHelpers(): { helpers: OpContext["receipt"]; summary: string | null; meta: Json | undefined } {
   const state: { summary: string | null; meta: Json | undefined } = { summary: null, meta: undefined };
   return {
     get summary() {
@@ -114,7 +116,7 @@ function receiptHelpers(): { helpers: OpContext["receipt"]; summary: string | nu
   };
 }
 
-function buildContext(
+export function buildContext(
   rt: Runtime,
   op: OperationView,
   caller: Caller,
@@ -151,6 +153,8 @@ function buildContext(
     companionTargets: () => rt.companionTargets(),
     appsPolicy: () => rt.appsPolicy(),
     agentScopeRequest: (agt: string) => rt.agentScopeRequest(agt),
+    // v0.1.21 (R1, SDK-1/SDK-2): ctx.jobs, ctx.schedule (fire-time authorize with THIS caller), ctx.paused
+    ...jobsView(rt, rt.jobs, { caller, grant: grant ? { token: grant.token, iat: grant.claims.iat } : null }),
   };
 }
 
@@ -172,7 +176,7 @@ function opSignal(req: IncomingMessage, res: ServerResponse): { signal: AbortSig
   };
 }
 
-async function runHandler(rt: Runtime, op: OperationView, input: Json, ctx: OpContext, dynamicTool: { tool: string; args: Record<string, unknown> } | null): Promise<Json> {
+export async function runHandler(rt: Runtime, op: OperationView, input: Json, ctx: OpContext, dynamicTool: { tool: string; args: Record<string, unknown> } | null): Promise<Json> {
   const run = async (): Promise<Json> => {
     if (dynamicTool) {
       const d = rt.def.dynamic?.[op.id];
@@ -253,6 +257,9 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
     if (!proof.ok) throw new TbError("call_proof_invalid", "call proof missing or not valid", 401);
     const g = verifyGrant(grantToken, trust);
     if (!g.ok) throw new TbError(g.code, "grant not valid", grantFailStatus(g.code));
+    // v0.1.21: the caller's newest verified grant replaces the stored one of its pending scheduled ops (owner narrowing,
+    // revocation by jti and a re-minted grant all reach the fire-time authorize)
+    rt.noteGrant(g.caller.id, grantToken, g.claims.iat);
     const op = rt.ops.get(opId);
     if (!op) throw new TbError("unknown_tool", `unknown operation ${opId}`, 404);
     if (op.audience !== "agent") throw new TbError("audience_not_agent", "operation is not agent-audience", 403);
@@ -358,29 +365,7 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       throw new TbError(decision.reason, `refused: ${decision.reason}`, grantFailStatus(decision.reason));
     }
     if (decision.decision === "hold") {
-      const view = spec?.holdView ? spec.holdView(body.input) : `${op.title}\n${JSON.stringify(body.input, null, 2)}`;
-      if (view.length > HOLD_VIEW_MAX) {
-        rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason: "hold_view_too_large" } });
-        throw new TbError("hold_view_too_large", "hold view exceeds 16 000 characters", 500);
-      }
-      const summary = clampSummary(spec?.redact ? spec.redact(body.input) : op.title);
-      // v0.1.13 (G1): heldBy + the reason (hook verdict reason, else the SDK decision reason code; C90: never input/view/meta)
-      const byHook = decision.reason === DECISION_REASON.heldByHook && proof.claims.hv;
-      const hold = rt.receipts.insert(
-        {
-          ...base,
-          kind: "hld",
-          holdFamily: decision.holdFamily ?? null,
-          heldBy: decision.heldBy ?? null,
-          holdReason: byHook ? proof.claims.hv?.r : decision.reason,
-          status: "held",
-          summary,
-          meta: meta0,
-          view,
-          expiresAt: now + HOLD_TTL_MS,
-        },
-        now,
-      );
+      const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, meta0, now);
       if (idemKey) rt.receipts.idemPut(callerId, op.id, idemKey, inputDigest, { holdId: hold.id }, now);
       rt.statusChanged();
       return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now + HOLD_TTL_MS) } satisfies OpResult);
@@ -417,6 +402,143 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
   } catch (e) {
     sendError(res, rid, e instanceof TbError ? e : toTbError(e, rt));
   }
+}
+
+type ReceiptBase = Pick<NewReceipt, "callId" | "caller" | "op" | "effect" | "inputDigest" | "idempotencyKey">;
+
+/** A hold receipt for a `hold` decision (called op or scheduled op); refuses `hold_view_too_large`. */
+function createHold(rt: Runtime, base: ReceiptBase, spec: HandlerSpec | null, op: OperationView, input: Json, decision: Decision, hookReason: string | null, meta: Json, now: number) {
+  const view = spec?.holdView ? spec.holdView(input) : `${op.title}\n${JSON.stringify(input, null, 2)}`;
+  if (view.length > HOLD_VIEW_MAX) {
+    rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason: "hold_view_too_large" } });
+    throw new TbError("hold_view_too_large", "hold view exceeds 16 000 characters", 500);
+  }
+  const summary = clampSummary(spec?.redact ? spec.redact(input) : op.title);
+  // v0.1.13 (G1): heldBy + the reason (hook verdict reason, else the SDK decision reason code; C90: never input/view/meta)
+  return rt.receipts.insert(
+    {
+      ...base,
+      kind: "hld",
+      holdFamily: decision.holdFamily ?? null,
+      heldBy: decision.heldBy ?? null,
+      holdReason: hookReason ?? decision.reason,
+      status: "held",
+      summary,
+      meta,
+      view,
+      expiresAt: now + HOLD_TTL_MS,
+    },
+    now,
+  );
+}
+
+// ── Scheduled ops (v0.1.21, SDK-2 / CON-01) ─────────────────────────────────
+/**
+ * Fire time of `ctx.schedule({ op, input }, …)`: THE app decision function `authorize()` runs again with the stored
+ * caller against the CURRENT slice (pause: workspace kill switch, instance, agent; revoked jtis; issuer keys), the
+ * current scope access, current usage (caps) and a current approval, and the receipt of the actual run is written.
+ * Before that: an agent caller must still be in the slice (`agent_removed`), an app caller still a companion caller
+ * (`grant_revoked`), and the op must still be in the grant's workflow (`not_in_workflow`, gate() step 4).
+ * The grant is the caller's newest verified grant (refreshed on each of its calls). Its 12 h expiry is the one check
+ * replaced: authorize() reads it at a time inside its validity, and caller presence in the Portal-signed slice
+ * (≤ 12 h fresh, else nothing fires) stands in for it. SPEC-GAP (SDK-API §19): bridge before-hooks (Rules) are not
+ * re-run at fire time; they ran for the scheduling call.
+ */
+export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: AbortSignal): Promise<OpFireOutcome> {
+  const now = Date.now();
+  const op = job.op ? rt.ops.get(job.op) : undefined;
+  if (!op || op.standard || op.dynamic) return { kind: "refused", reason: "unknown_tool" };
+  const who = job.caller;
+  if (!who) return { kind: "refused", reason: "schedule_caller_required" };
+  if (!rt.cfg.standalone && rt.trust.stale(now)) return { kind: "defer", reason: "slice_stale" };
+  const input = job.input;
+  const inputDigest = digest(input) as Sha256Digest;
+  const spec = handlerSpec(rt, op.id);
+  const caller: Caller = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null };
+  const effect = op.effect;
+
+  if (who.type === "person") {
+    const p = rt.trust.paused(null);
+    if (p.workspace || p.instance) return { kind: "refused", reason: DECISION_REASON.paused };
+    const rh = receiptHelpers();
+    const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, job.key, {}, rh.helpers, signal);
+    const output = await runHandler(rt, op, input, ctx, null);
+    return { kind: "done", result: output };
+  }
+
+  const callerId = who.id as AgentId | InstanceId;
+  const receiptCaller = { type: who.type as "agent" | "app", id: callerId, name: who.name };
+  const base: ReceiptBase = { callId: null, caller: receiptCaller, op: op.id, effect, inputDigest, idempotencyKey: job.key };
+  const refuse = (reason: string): OpFireOutcome => {
+    rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason, scheduled: job.id } });
+    rt.statusChanged();
+    return { kind: "refused", reason };
+  };
+  // the caller must still exist (an agent removed from the slice, an app whose companion grant was revoked)
+  if (who.type === "agent" && !rt.trust.agent(callerId)) return refuse("agent_removed");
+  if (who.type === "app" && !rt.trust.companionCallers().some((c) => c.ins === callerId)) return refuse("grant_revoked");
+  if (!job.grantSealed) return refuse("grant_invalid");
+  const token = unsealGrant(rt, callerId, job.grantSealed);
+  const trust = rt.trust.context(now);
+  if (!trust) return { kind: "defer", reason: "slice_stale" };
+  const exp = Number(peekClaims(token)?.exp ?? 0);
+  const at = { ...trust, now: Math.min(trust.now, exp - 1) };
+  const g = verifyGrant(token, at);
+  if (!g.ok) return refuse(g.code);
+  if (g.caller.id !== callerId) return refuse("grant_invalid");
+  if (!opInGrantWorkflow(g.claims, op.id)) return refuse(DECISION_REASON.notInWorkflow);
+
+  let access: { level: string; crud: CrudAction[] } | null = null;
+  let viewAccess: ScopeAccessView["access"] = null;
+  if (op.scopeType) {
+    const target = spec?.scope ? spec.scope(input, caller) : null;
+    const r = rt.scopes.resolve(callerId, op.scopeType, target);
+    access = r ? { level: r.level, crud: r.crud } : { level: "none", crud: [] };
+    viewAccess = { type: op.scopeType, id: target, level: access.level, crud: access.crud };
+  }
+  // a hold created at an earlier fire: denied/expired ends the job; still held waits; approved runs once (C8)
+  if (job.holdId) {
+    const h = rt.receipts.getSync(job.holdId);
+    if (h?.status === "held") return { kind: "wait", holdId: h.id };
+    if (h?.status !== "approved") return { kind: "refused", reason: "hold_denied" };
+  }
+  const approved = rt.receipts.findApproved(callerId, op.id, inputDigest, now);
+  const usage = await rt.receipts.usage(callerId, g.claims.caps ?? {}, now);
+  const decision = authorize({
+    paused: rt.trust.paused(who.type === "agent" ? callerId : null),
+    grant: token,
+    trust: at,
+    op: { id: op.id, crud: op.crud, effect, ...(op.holdFamily ? { holdFamily: op.holdFamily } : {}), ...(op.scopeType ? { scopeType: op.scopeType } : {}) },
+    access,
+    usage,
+    approval: approved ? "approved" : "none",
+    holdVerdict: null,
+  });
+  if (decision.decision === "refuse") return refuse(decision.reason);
+  if (decision.decision === "hold") {
+    if (job.holdId) return { kind: "refused", reason: "hold_consumed" };
+    const hold = createHold(rt, base, spec, op, input, decision, null, { scheduled: job.id }, now);
+    rt.statusChanged();
+    return { kind: "wait", holdId: hold.id };
+  }
+  if (approved && !rt.receipts.consume(approved.id)) return { kind: "refused", reason: "hold_consumed" };
+  const rh = receiptHelpers();
+  const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), null, job.key, {}, rh.helpers, signal);
+  const writeReceipt = approved !== null || op.receipt;
+  let output: Json;
+  try {
+    output = await runHandler(rt, op, input, ctx, null);
+  } catch (e) {
+    const err = toTbError(e, rt);
+    const meta = rh.meta ?? null;
+    if (approved) rt.receipts.finish(approved.id, "failed", { meta });
+    else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
+    return { kind: "failed", error: err.code };
+  }
+  const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(input, output) : op.title);
+  if (approved) rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? null });
+  else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? null });
+  return { kind: "done", result: output };
 }
 
 // ── tb.holds_pending (v0.1.13, G4) ───────────────────────────────────────────
@@ -474,6 +596,8 @@ export async function decide(rt: Runtime, principal: PersonPrincipal, input: Hol
     detail: { decision: input.decision, op: row.op, caller: row.caller.id, ...(input.note ? { note: input.note.slice(0, 1000) } : {}) },
   });
   rt.statusChanged();
+  // v0.1.21: a scheduled op waiting for this hold re-checks now
+  if (rt.jobs.store.holdDecided(row.id, now) > 0) rt.jobs.kick();
   return rt.receipts.getSync(row.id) as Receipt;
 }
 

@@ -65,6 +65,28 @@ CREATE INDEX tb_audit_order ON tb_audit (at, id);
     name: "sdk_receipt_held_by",
     sql: "ALTER TABLE tb_receipts ADD COLUMN held_by TEXT;\nALTER TABLE tb_receipts ADD COLUMN hold_reason TEXT;",
   },
+  {
+    // v0.1.21 (Scribe R1, L6, SDK-2): THE job table (jobs.ts). `dedupe` = idempotency key scope (kind + key, or caller +
+    // op + key for scheduled ops); `lease_token` fences every write of a run; `grant_sealed` = the caller's newest
+    // verified grant for fire-time authorize (sealed like tb_keys).
+    version: 4,
+    name: "sdk_jobs",
+    sql: `
+CREATE TABLE tb_jobs (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, dedupe TEXT UNIQUE, key TEXT, input TEXT NOT NULL, input_digest TEXT NOT NULL,
+  state TEXT, status TEXT NOT NULL, run_at INTEGER NOT NULL, cron TEXT, op TEXT,
+  caller_type TEXT, caller_id TEXT, caller_name TEXT, caller_mode TEXT, grant_sealed TEXT, grant_iat INTEGER,
+  hold_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL, lease_ms INTEGER NOT NULL,
+  timeout_ms INTEGER NOT NULL, lease_token TEXT, lease_until INTEGER, last_error TEXT, result TEXT, paused_by TEXT,
+  runs INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER
+) STRICT;
+CREATE INDEX tb_jobs_due ON tb_jobs (status, run_at);
+CREATE INDEX tb_jobs_lease ON tb_jobs (status, lease_until);
+CREATE INDEX tb_jobs_caller ON tb_jobs (caller_id, status);
+CREATE INDEX tb_jobs_hold ON tb_jobs (hold_id);
+CREATE INDEX tb_jobs_order ON tb_jobs (created_at, id);
+`,
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {

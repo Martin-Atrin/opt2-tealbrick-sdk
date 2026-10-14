@@ -71,7 +71,25 @@ export type {
   SdkOpContext,
   SdkPublicContext,
   StartContext,
+  StopContext,
 } from "./context.ts";
 export { TbError } from "./errors.ts";
+// v0.1.21 (Scribe R1, SDK-1/SDK-2, RUL-11): the job runner
+export type {
+  EnqueueOptions,
+  Job,
+  JobContext,
+  JobHandler,
+  JobOutcome,
+  JobSpec,
+  JobStatus,
+  JobsApi,
+  JobsSummary,
+  JobsView,
+  PauseView,
+  ScheduleTarget,
+  ScheduleWhen,
+} from "./jobs.ts";
+export { JOB_DEFAULTS, OP_JOB_KIND, OP_JOB_MAX_ATTEMPTS } from "./jobs.ts";
 export { CSRF_HEADER, SESSION_COOKIE } from "./person.ts";
 export { TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
