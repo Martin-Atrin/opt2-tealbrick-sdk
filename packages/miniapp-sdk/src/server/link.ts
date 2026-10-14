@@ -95,8 +95,11 @@ export class BridgeLink {
 
   async #status(): Promise<AppStatus> {
     const rt = this.#rt;
+    const attention = await rt.attention();
+    const ready = readiness(rt.health());
     return {
-      readiness: readiness(rt.health()),
+      // v0.1.20 (spec 0.1.28, F89): an app attention turns `ready` into `degraded`; needs_keys/degraded stay as they are
+      readiness: attention && ready === "ready" ? "degraded" : ready,
       version: rt.manifest.version,
       sdkVersion: rt.sdkVersion,
       scopesRev: rt.scopes.rev(),
@@ -104,6 +107,7 @@ export class BridgeLink {
       keysRev: rt.keys.keysRev(),
       // v0.1.13 (C86): held receipts + defineApp pendingCount() (clamped 0..10 000, 1 s timeout)
       pendingHolds: await rt.pendingHolds(),
+      ...(attention ? { attention } : {}),
     };
   }
 
