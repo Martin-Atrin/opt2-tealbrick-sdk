@@ -19,7 +19,7 @@ const outDir = join(root, "dist", "ui-test");
 // ── DOM ────────────────────────────────────────────────────────────────────
 const win = new Window({ url: "http://localhost/a/kanban/", width: 1280, height: 860 });
 const g = globalThis as Record<string, unknown>;
-for (const k of ["window", "document", "navigator", "location", "history", "HTMLElement", "HTMLButtonElement", "HTMLDialogElement", "Element", "Node", "Event", "MouseEvent", "KeyboardEvent", "MutationObserver"]) {
+for (const k of ["window", "document", "navigator", "location", "history", "sessionStorage", "HTMLElement", "HTMLButtonElement", "HTMLDialogElement", "Element", "Node", "Event", "MouseEvent", "KeyboardEvent", "MutationObserver"]) {
   const v = (win as unknown as Record<string, unknown>)[k];
   if (v === undefined) continue;
   try {
@@ -244,6 +244,20 @@ describe("helpers", () => {
     assert.match((await std.decideOrError(expired, "hld_1", "approve")) ?? "", /expired/);
     assert.equal(await std.decideOrError(async () => {}, "hld_1", "deny"), null);
     assert.equal(std.errorMessage("not an Error"), "Something went wrong. Try again in a moment.");
+  });
+
+  it("portalHref: only an https tealbrick.com origin is the Portal link; anything else is the app's own launch page", () => {
+    sessionStorage.clear();
+    for (const referrer of ["", "https://evil.example/page", "http://dev.tealbrick.com/", "https://tealbrick.com.evil.example/", "https://eviltealbrick.com/", "https://portal.tealbrick.com@evil.example/", "not a url"])
+      assert.equal(std.portalHref(referrer), "./", `not used: ${referrer}`);
+    assert.equal(std.portalHref("https://dev.tealbrick.com/canvas?x=1"), "https://dev.tealbrick.com/");
+    assert.equal(std.portalHref("https://tealbrick.com/"), "https://tealbrick.com/");
+    // remembered for a reload without a referrer; a foreign value in storage is ignored
+    sessionStorage.setItem("tb.portalOrigin", "https://dev.tealbrick.com");
+    assert.equal(std.portalHref(""), "https://dev.tealbrick.com/");
+    sessionStorage.setItem("tb.portalOrigin", "https://evil.example");
+    assert.equal(std.portalHref(""), "./");
+    sessionStorage.clear();
   });
 
   it("the router maps paths to pages under the base and finds a /holds/<id> deep link", () => {

@@ -116,28 +116,32 @@ export function useNav(routes: Routes, fallback: string): Nav {
 }
 
 const PORTAL_KEY = "tb.portalOrigin";
-const httpsOrigin = (url: string): string | null => {
+/** Only a Tealbrick origin may become the Portal link: https and tealbrick.com or a subdomain of it. */
+const trustedOrigin = (url: string): string | null => {
   try {
     const u = new URL(url);
-    return u.protocol === "https:" && u.origin !== globalThis.location.origin ? u.origin : null;
+    const host = u.hostname.toLowerCase();
+    const ours = host === "tealbrick.com" || host.endsWith(".tealbrick.com");
+    return u.protocol === "https:" && ours && u.origin !== globalThis.location.origin ? u.origin : null;
   } catch {
     return null;
   }
 };
 
 /**
- * Where the shell's Tealbrick mark links to. Interim (the session carries no Portal URL): the https origin the owner
- * came from (`document.referrer`), remembered in sessionStorage for reloads; else the app's own launch page, never "/"
- * of the bridge host. Replace with the Portal URL as soon as the session or the manifest carries it.
+ * Where the shell's Tealbrick mark links to. Interim (the session carries no Portal URL): the origin the owner came
+ * from (`document.referrer`) when it is https on tealbrick.com or a subdomain (any other site that links here must not
+ * become the Portal link), remembered in sessionStorage for reloads; else the app's own launch page, never "/" of the
+ * bridge host. Replace with the Portal URL as soon as the session or the manifest carries it.
  */
-export function portalHref(): string {
+export function portalHref(referrer: string = document.referrer): string {
   let remembered: string | null = null;
   try {
     remembered = sessionStorage.getItem(PORTAL_KEY);
   } catch {
     // storage blocked: fall through to the referrer
   }
-  const origin = httpsOrigin(document.referrer) ?? (remembered ? httpsOrigin(remembered) : null);
+  const origin = trustedOrigin(referrer) ?? (remembered ? trustedOrigin(remembered) : null);
   if (!origin) return "./";
   try {
     sessionStorage.setItem(PORTAL_KEY, origin);
