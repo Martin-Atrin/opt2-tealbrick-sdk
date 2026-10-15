@@ -676,6 +676,12 @@ export class FakeBridgeControl {
   republish(): Promise<number> {
     return this.#b.rebuildSlice();
   }
+  /** v0.1.18 (A3.caps_count, SDK-02/SDK-04): a fresh agent (no usage yet) joins the slice; returns it and the new revision. */
+  async addAgent(name: string, mode: AgentMode = "free"): Promise<{ agent: FakeAgent; rev: number }> {
+    const agent: FakeAgent = { id: newId("agt") as AgentId, name, mode };
+    this.#b.ids.agents.push(agent);
+    return { agent, rev: await this.#b.rebuildSlice() };
+  }
   /** Portal key rotation (CREDENTIALS §9.2): `announce` adds a pending key; `activate` makes it sign (old → retired); `retire` drops retired keys. */
   async rotatePortalKey(phase: "announce" | "activate" | "retire"): Promise<number> {
     const b = this.#b;

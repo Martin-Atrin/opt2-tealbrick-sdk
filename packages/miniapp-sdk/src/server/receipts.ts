@@ -4,7 +4,7 @@ import type { FreeCaps, Sha256Digest } from "@opt2-tealbrick/spec/credentials";
 import type { Effect, HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, Receipt, ReceiptQuery, ReceiptStatus, ReceiptStore } from "@opt2-tealbrick/spec/sdk";
 import { clampLimit, decodeCursor, encodeCursor } from "./audit.ts";
-import type { RawDb, Row } from "./store.ts";
+import { type RawDb, type Row, tx } from "./store.ts";
 
 export const HOLD_TTL_MS = 15 * 60_000;
 /** After approval the agent repeats the same call within 15 min (§4.3). */
@@ -56,9 +56,21 @@ export interface NewReceipt {
   expiresAt?: number | null;
 }
 
+/**
+ * One `tb_idempotency` row (§4.4). v0.1.22 (SDK-01): `pending` = reserved before the handler runs (one wins, the INSERT
+ * is the lock); `unknown` = a pending row of a process that died mid-run (boot recovery): the outcome is unknown, so the
+ * key is never run again — it answers 409 `idempotency_outcome_unknown` until its 24 h life ends.
+ */
 export type IdempotencyRow =
   | { kind: "result"; inputDigest: string; output: string }
-  | { kind: "held"; inputDigest: string; holdId: string };
+  | { kind: "held"; inputDigest: string; holdId: string }
+  | { kind: "pending"; inputDigest: string }
+  | { kind: "unknown"; inputDigest: string };
+
+/** Effects with a Free cap (CORE I14); `money` has none (always held), `read` none. */
+export type CappedEffect = "write" | "outward" | "destructive";
+export const CAPPED_EFFECTS: readonly CappedEffect[] = ["write", "outward", "destructive"];
+export const isCappedEffect = (e: string): e is CappedEffect => (CAPPED_EFFECTS as readonly string[]).includes(e);
 
 function toReceipt(r: Row, withView: boolean): Receipt {
   const rec: Receipt = {
@@ -81,6 +93,14 @@ function toReceipt(r: Row, withView: boolean): Receipt {
   };
   if (withView && typeof r.view === "string") rec.view = r.view;
   return rec;
+}
+
+function toIdemRow(r: Row): IdempotencyRow {
+  const inputDigest = String(r.input_digest);
+  if (r.kind === "held") return { kind: "held", inputDigest, holdId: String(r.hold_id) };
+  if (r.kind === "pending") return { kind: "pending", inputDigest };
+  if (r.kind === "unknown") return { kind: "unknown", inputDigest };
+  return { kind: "result", inputDigest, output: String(r.output) };
 }
 
 export class Receipts implements ReceiptStore {
@@ -128,15 +148,48 @@ export class Receipts implements ReceiptStore {
   }
 
   async usage(caller: string, caps: FreeCaps, now: number): Promise<Partial<Record<Effect, number>>> {
+    return this.usageSync(caller, caps, now);
+  }
+
+  /**
+   * v0.1.22 (SDK-02): Free cap counters no longer depend on receipts. Usage = this caller's cap slots (`tb_cap_usage`:
+   * every run of a write/outward/destructive op, receipt or not, reserved BEFORE the handler and given back only when
+   * the run fails or is refused) + its approved, not yet consumed holds of that effect, inside the cap window.
+   */
+  usageSync(caller: string, caps: FreeCaps, now: number): Partial<Record<Effect, number>> {
     const out: Partial<Record<Effect, number>> = {};
-    const stmt = this.#db.prepare(
-      "SELECT COUNT(*) AS n FROM tb_receipts WHERE caller_id = ? AND effect = ? AND status IN ('run', 'approved') AND created_at >= ?",
+    const slots = this.#db.prepare("SELECT COUNT(*) AS n FROM tb_cap_usage WHERE caller_id = ? AND effect = ? AND created_at >= ?");
+    const approved = this.#db.prepare(
+      "SELECT COUNT(*) AS n FROM tb_receipts WHERE caller_id = ? AND effect = ? AND status = 'approved' AND consumed = 0 AND created_at >= ?",
     );
     for (const [effect, cap] of Object.entries(caps) as [Effect, { max: number; per: "hour" | "day" } | undefined][]) {
       if (!cap) continue;
-      out[effect] = Number((stmt.get(caller, effect, now - CAP_WINDOW_MS[cap.per]) as Row).n);
+      const since = now - CAP_WINDOW_MS[cap.per];
+      out[effect] = Number((slots.get(caller, effect, since) as Row).n) + Number((approved.get(caller, effect, since) as Row).n);
     }
     return out;
+  }
+
+  /**
+   * v0.1.22 (SDK-02): counts usage, decides and — when the decision is `run` and the effect is capped — reserves the cap
+   * slot, all in ONE immediate transaction (a concurrent burst cannot beat the cap). Returns the decision and the slot id.
+   */
+  decideAndReserve<D extends { decision: string }>(caller: string, caps: FreeCaps, effect: Effect, op: string, now: number, decide: (usage: Partial<Record<Effect, number>>) => D): { decision: D; slot: string | null } {
+    return tx(this.#db, () => {
+      const decision = decide(this.usageSync(caller, caps, now));
+      if (decision.decision !== "run" || !isCappedEffect(effect)) return { decision, slot: null };
+      const slot = `cap_${ulid(now)}`;
+      this.#db.prepare("INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at) VALUES (?, ?, ?, ?, 'reserved', ?)").run(slot, caller, effect, op, now);
+      return { decision, slot };
+    });
+  }
+  /** The run happened (or its outcome is unknown: fail closed) → the slot stays counted. */
+  capCommit(slot: string): void {
+    this.#db.prepare("UPDATE tb_cap_usage SET state = 'used' WHERE id = ?").run(slot);
+  }
+  /** The run failed or was refused before it ran → the slot is given back (spec: failed runs do not count). */
+  capRelease(slot: string): void {
+    this.#db.prepare("DELETE FROM tb_cap_usage WHERE id = ?").run(slot);
   }
 
   async holdStatus(caller: string, holdId: string): Promise<{ status: ReceiptStatus; decidedAt: number | null; expiresAt: number | null } | null> {
@@ -293,6 +346,7 @@ export class Receipts implements ReceiptStore {
     this.#db.prepare("UPDATE tb_receipts SET view = NULL WHERE status = 'approved' AND view IS NOT NULL AND expires_at <= ?").run(now);
     this.#db.prepare("DELETE FROM tb_receipts WHERE created_at < ?").run(now - RECEIPT_RETENTION_MS);
     this.#db.prepare("DELETE FROM tb_idempotency WHERE expires_at <= ?").run(now);
+    this.#db.prepare("DELETE FROM tb_cap_usage WHERE created_at < ?").run(now - CAP_WINDOW_MS.day);
     return { expired };
   }
 
@@ -301,10 +355,41 @@ export class Receipts implements ReceiptStore {
     const r = this.#db
       .prepare("SELECT kind, input_digest, output, hold_id FROM tb_idempotency WHERE caller_id = ? AND op = ? AND key = ? AND expires_at > ?")
       .get(callerId, op, key, now) as Row | undefined;
-    if (!r) return null;
-    return r.kind === "held"
-      ? { kind: "held", inputDigest: String(r.input_digest), holdId: String(r.hold_id) }
-      : { kind: "result", inputDigest: String(r.input_digest), output: String(r.output) };
+    return r ? toIdemRow(r) : null;
+  }
+
+  /**
+   * v0.1.22 (SDK-01): reserves `(caller, op, key)` BEFORE the handler runs. One INSERT wins (the primary key is the
+   * lock; an expired row is taken over); a live row is returned to the caller instead (result, held, pending, unknown).
+   */
+  idemReserve(callerId: string, op: string, key: string, inputDigest: string, now: number): { kind: "reserved" } | { kind: "existing"; row: IdempotencyRow } {
+    const won = this.#db
+      .prepare(
+        `INSERT INTO tb_idempotency (caller_id, op, key, input_digest, kind, output, hold_id, created_at, expires_at) VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)
+         ON CONFLICT (caller_id, op, key) DO UPDATE SET input_digest = excluded.input_digest, kind = 'pending', output = NULL, hold_id = NULL,
+           created_at = excluded.created_at, expires_at = excluded.expires_at WHERE tb_idempotency.expires_at <= excluded.created_at`,
+      )
+      .run(callerId, op, key, inputDigest, now, now + IDEMPOTENCY_TTL_MS).changes;
+    if (Number(won) === 1) return { kind: "reserved" };
+    const r = this.#db.prepare("SELECT kind, input_digest, output, hold_id FROM tb_idempotency WHERE caller_id = ? AND op = ? AND key = ?").get(callerId, op, key) as Row | undefined;
+    // the row vanished between the two statements (sweep): try once more
+    return r ? { kind: "existing", row: toIdemRow(r) } : this.idemReserve(callerId, op, key, inputDigest, now);
+  }
+  /** A held key whose hold was decided (approved, or ended without a run): the retry takes it over (held → pending). */
+  idemTakeHeld(callerId: string, op: string, key: string, holdId: string): boolean {
+    return (
+      Number(
+        this.#db.prepare("UPDATE tb_idempotency SET kind = 'pending', hold_id = NULL WHERE caller_id = ? AND op = ? AND key = ? AND kind = 'held' AND hold_id = ?").run(callerId, op, key, holdId).changes,
+      ) === 1
+    );
+  }
+  /** The reserved run failed or was refused: the key is free again (a retry runs). */
+  idemRelease(callerId: string, op: string, key: string): void {
+    this.#db.prepare("DELETE FROM tb_idempotency WHERE caller_id = ? AND op = ? AND key = ? AND kind = 'pending'").run(callerId, op, key);
+  }
+  /** Boot: pending keys belong to a process that died mid-run → `unknown` (never re-run; they expire with the key). */
+  idemRecoverCrashed(_now: number): number {
+    return Number(this.#db.prepare("UPDATE tb_idempotency SET kind = 'unknown' WHERE kind = 'pending'").run().changes);
   }
   idemPut(callerId: string, op: string, key: string, inputDigest: string, v: { output: string } | { holdId: string }, now: number): void {
     this.#db

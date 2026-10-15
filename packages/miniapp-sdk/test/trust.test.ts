@@ -174,3 +174,16 @@ test("spec 0.1.12 default build: the build-pinned dev roots apply and a statemen
     s.cleanup();
   }
 });
+
+test("SDK-05: paused() fails closed for an agent that is not in the slice (same answer as the op route)", async () => {
+  const [root, a] = await Promise.all([generateKeyPair(), generateKeyPair()]);
+  const s = await setup({ roots: [root] });
+  try {
+    assert.equal(code(s.trust.install(await slice(1, a, { portalKeySet: await kss(root, 1, [[a, "active"]]) }), Date.now())), "ok");
+    // the helper slice lists no agents
+    assert.deepEqual(s.trust.paused(`agt_${ulid()}`), { workspace: false, instance: false, agent: true });
+    assert.deepEqual(s.trust.paused(null), { workspace: false, instance: false, agent: false });
+  } finally {
+    s.cleanup();
+  }
+});

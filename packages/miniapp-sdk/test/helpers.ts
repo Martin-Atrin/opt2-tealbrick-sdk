@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { digest, type Ed25519KeyPair, generateKeyPair, signCallProof, signGrant, signKeySetStatement, signSlice, signTicket, ulid } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
-import type { AgentId, BridgeId, Ed25519PublicJwk, InstanceId, PersonId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { AgentId, BridgeId, Ed25519PublicJwk, FreeCaps, InstanceId, PersonId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, HoldFamily, HookHoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 
@@ -119,7 +119,11 @@ export async function slice(
   );
 }
 
-export async function grant(w: World, agent: AgentId, opts: { crud?: CrudAction[]; held?: HoldFamily[]; aud?: InstanceId; wf?: string[]; mode?: "free" | "bound" } = {}): Promise<string> {
+export async function grant(
+  w: World,
+  agent: AgentId,
+  opts: { crud?: CrudAction[]; held?: HoldFamily[]; aud?: InstanceId; wf?: string[]; mode?: "free" | "bound"; caps?: FreeCaps } = {},
+): Promise<string> {
   return signGrant(
     {
       iss: "tb:portal",
@@ -131,7 +135,7 @@ export async function grant(w: World, agent: AgentId, opts: { crud?: CrudAction[
       crud: opts.crud ?? ["create", "read", "update", "delete"],
       mode: opts.mode ?? "free",
       held: opts.held ?? [],
-      caps: {},
+      caps: opts.caps ?? {},
       wf: opts.wf ?? [],
       polrev: 1,
     },

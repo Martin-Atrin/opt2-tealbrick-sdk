@@ -113,6 +113,7 @@ export const APP_CHECK_IDS = [
   "A3.money",
   "A3.caps",
   "A3.free_wf_caps",
+  "A3.caps_count",
   "A3.no_standing_approval",
   "A4.hold_status",
   "A4.decide_person_only",

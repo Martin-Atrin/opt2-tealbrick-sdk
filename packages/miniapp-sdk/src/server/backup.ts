@@ -16,7 +16,7 @@ import { type Ed25519KeyPair, manifestDigest, signInstanceAssertion, ulid } from
 import { BRIDGE_HEADERS } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest, Service } from "@opt2-tealbrick/spec/manifest";
-import type { AuditLog, BackupApi, BackupMeta, ExportMeta, Logger } from "@opt2-tealbrick/spec/sdk";
+import type { AuditLog, BackupApi, BackupHealth, BackupMeta, ExportMeta, Logger } from "@opt2-tealbrick/spec/sdk";
 import { createAuditLog } from "./audit.ts";
 import { nextRun, parseCron } from "./cron.ts";
 import { TbError } from "./errors.ts";
@@ -40,7 +40,24 @@ export interface BackupContext {
   bridgeId(): BridgeId | null;
   /** tb-exec control port; TB_EXEC_CONTROL_PORT unless a test overrides it */
   execPort?: number;
+  /** v0.1.22 (SDK-03): called when the backup state changes (status push: attention / health) */
+  onStateChange?(): void;
+  /** test clock (SDK-03 overdue rule); default Date.now */
+  now?(): number;
 }
+
+export type { BackupHealth };
+
+/** Persisted in tb_meta so a restart keeps the record (a full volume that fails every night stays visible). */
+interface BackupState {
+  /** first time this SDK tracked backups for the instance: the overdue clock starts here when no backup succeeded yet */
+  since: number;
+  lastOkAt: number | null;
+  lastFailedAt: number | null;
+  lastError: string | null;
+  failures: number;
+}
+const BACKUP_STATE_KEY = "backup_state";
 
 const BACKUP_FORMAT = "tealbrick.backup/1";
 const EXPORT_FORMAT = "tealbrick.export/1";
@@ -516,26 +533,92 @@ export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | nu
 }
 
 /** Backup runner (cron, UTC, retention) + export (tb.export). Returns the RunningApp `backups` member and a stop function. */
-export function createBackupApi(ctx: BackupContext & { db: RawDb; audit: AuditLog }): { api: BackupApi; stop(): void } {
+export function createBackupApi(ctx: BackupContext & { db: RawDb; audit: AuditLog }): {
+  api: BackupApi;
+  stop(): void;
+  health(): BackupHealth;
+  attention(): { code: string; reason: string } | null;
+} {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
   let chain: Promise<unknown> = Promise.resolve();
+  const now = ctx.now ?? Date.now;
   const serial = <T>(fn: () => Promise<T>): Promise<T> => {
     const run = chain.then(fn, fn);
     chain = run.catch(() => undefined);
     return run;
   };
+  // v0.1.22 (SDK-03, L3): every backup run (scheduled or runNow) records its outcome; failures are never swallowed
+  const readState = (): BackupState => {
+    const s = metaGet<BackupState>(ctx.db, BACKUP_STATE_KEY);
+    if (s && typeof s.since === "number") return s;
+    const fresh: BackupState = { since: now(), lastOkAt: null, lastFailedAt: null, lastError: null, failures: 0 };
+    metaSet(ctx.db, BACKUP_STATE_KEY, fresh);
+    return fresh;
+  };
+  readState();
+  const record = (patch: (s: BackupState) => BackupState): void => {
+    try {
+      metaSet(ctx.db, BACKUP_STATE_KEY, patch(readState()));
+    } catch (e) {
+      ctx.log.error("backup state not recorded", { error: message(e) });
+    }
+    ctx.onStateChange?.();
+  };
   const api: BackupApi = {
-    runNow: () => serial(() => runBackup(ctx, ctx.db, ctx.audit, () => stopped)),
+    runNow: () =>
+      serial(() => runBackup(ctx, ctx.db, ctx.audit, () => stopped)).then(
+        (r) => {
+          record((s) => ({ ...s, lastOkAt: now(), failures: 0, lastError: null }));
+          return r;
+        },
+        (e: unknown) => {
+          record((s) => ({ ...s, lastFailedAt: now(), failures: s.failures + 1, lastError: e instanceof TbError ? e.code : "backup_failed" }));
+          throw e;
+        },
+      ),
     list: () => listBackups(ctx),
     exportNow: () => serial(() => runExport(ctx, ctx.db)),
   };
   let cron: ReturnType<typeof parseCron> | null = null;
+  let schedule: BackupHealth["schedule"] = "ok";
   try {
     cron = parseCron(ctx.manifest.backups.schedule);
+    if (!nextRun(cron, new Date(now()))) schedule = "never_fires";
   } catch (e) {
+    schedule = "invalid";
     ctx.log.error("backup schedule invalid; scheduled backups disabled", { error: message(e) });
   }
+  /** one schedule period = the gap between the next two fire times (0 when unknown) */
+  const period = (): number => {
+    if (!cron) return 0;
+    const a = nextRun(cron, new Date(now()));
+    const b = a ? nextRun(cron, a) : null;
+    return a && b ? b.getTime() - a.getTime() : 0;
+  };
+  const health = (): BackupHealth => {
+    const s = readState();
+    const p = period();
+    const newest = s.lastOkAt ?? s.since;
+    return {
+      schedule,
+      lastOkAt: s.lastOkAt === null ? null : (new Date(s.lastOkAt).toISOString() as BackupHealth["lastOkAt"]),
+      lastFailedAt: s.lastFailedAt === null ? null : (new Date(s.lastFailedAt).toISOString() as BackupHealth["lastFailedAt"]),
+      lastError: s.lastError,
+      failures: s.failures,
+      // no good backup for more than two periods (the first period counts from `since`)
+      overdue: schedule === "ok" && p > 0 && now() - newest > 2 * p,
+    };
+  };
+  const attention = (): { code: string; reason: string } | null => {
+    if (schedule === "invalid") return { code: "backup_schedule_invalid", reason: "The backup schedule is not valid, so no scheduled backup runs. Update the app." };
+    if (schedule === "never_fires") return { code: "backup_schedule_never", reason: "The backup schedule never fires, so no scheduled backup runs. Update the app." };
+    const h = health();
+    const last = h.lastOkAt ? `The newest good backup is from ${h.lastOkAt.slice(0, 16).replace("T", " ")} UTC.` : "There is no good backup yet.";
+    if (h.failures > 0) return { code: "backup_failed", reason: `${h.failures === 1 ? "The last backup" : `The last ${h.failures} backups`} failed (${h.lastError ?? "backup_failed"}). ${last}` };
+    if (h.overdue) return { code: "backup_overdue", reason: `No backup ran for more than two schedule periods. ${last}` };
+    return null;
+  };
   const arm = (): void => {
     if (stopped || !cron) return;
     const next = nextRun(cron, new Date());
@@ -559,6 +642,8 @@ export function createBackupApi(ctx: BackupContext & { db: RawDb; audit: AuditLo
   arm();
   return {
     api,
+    health,
+    attention,
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);

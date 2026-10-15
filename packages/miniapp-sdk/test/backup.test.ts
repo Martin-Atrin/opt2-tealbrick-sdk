@@ -589,3 +589,72 @@ test("startApp wiring: RunningApp.backups backs up, TB_RESTORE_FROM restores at 
     t.cleanup();
   }
 });
+
+// ── v0.1.22 (SDK-03, L3): a failed, overdue or unparsable scheduled backup is never silent ──
+test("SDK-03: a failed backup raises attention backup_failed and shows in health; a good one clears it; the state survives a restart", async () => {
+  const r = await rig();
+  try {
+    r.api.stop();
+    let pushes = 0;
+    const blocked = join(r.dir, "not-a-dir");
+    writeFileSync(blocked, "x");
+    const failing = createBackupApi({ ...r.ctx, backupDir: blocked, onStateChange: () => pushes++, db: r.db, audit: createAuditLog(r.db, []) });
+    assert.equal(failing.attention(), null, "quiet on good: no failure yet");
+    await assert.rejects(failing.api.runNow());
+    await assert.rejects(failing.api.runNow());
+    failing.stop();
+    assert.equal(pushes, 2, "every outcome pushes the status");
+    const h = failing.health();
+    assert.equal(h.failures, 2);
+    assert.equal(h.lastOkAt, null);
+    assert.ok(h.lastFailedAt);
+    assert.equal(h.schedule, "ok");
+    const a = failing.attention();
+    assert.equal(a?.code, "backup_failed");
+    assert.match(a?.reason ?? "", /The last 2 backups failed .*no good backup yet/);
+    assert.ok((a?.reason.length ?? 0) <= 200);
+    // a restart (new api on the same db) keeps the record
+    r.api = createBackupApi({ ...r.ctx, db: r.db, audit: createAuditLog(r.db, []) });
+    assert.equal(r.api.attention()?.code, "backup_failed");
+    await r.api.api.runNow();
+    assert.equal(r.api.attention(), null, "a good backup clears it");
+    assert.equal(r.api.health().failures, 0);
+    assert.ok(r.api.health().lastOkAt);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("SDK-03: an unparsable schedule → attention backup_schedule_invalid + health schedule invalid (was: one log line)", async () => {
+  const r = await rig();
+  try {
+    r.api.stop();
+    const manifest = { ...r.ctx.manifest, backups: { ...r.ctx.manifest.backups, schedule: "61 3 * * *" } };
+    r.api = createBackupApi({ ...r.ctx, manifest, db: r.db, audit: createAuditLog(r.db, []) });
+    assert.equal(r.api.health().schedule, "invalid");
+    assert.equal(r.api.attention()?.code, "backup_schedule_invalid");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("SDK-03: no good backup for more than two schedule periods → backup_overdue (injected clock)", async () => {
+  const r = await rig();
+  try {
+    r.api.stop();
+    // the rig already started the overdue clock (`since`) at its first createBackupApi, a moment ago
+    const t0 = Date.now();
+    let clock = t0;
+    r.api = createBackupApi({ ...r.ctx, now: () => clock, db: r.db, audit: createAuditLog(r.db, []) });
+    clock = t0 + 2 * 86_400_000 - 60_000;
+    assert.equal(r.api.health().overdue, false, "quiet inside two daily periods");
+    assert.equal(r.api.attention(), null);
+    clock = t0 + 2 * 86_400_000 + 60_000;
+    assert.equal(r.api.health().overdue, true);
+    assert.equal(r.api.attention()?.code, "backup_overdue");
+    await r.api.api.runNow();
+    assert.equal(r.api.health().overdue, false, "a good backup restarts the clock");
+  } finally {
+    await r.cleanup();
+  }
+});

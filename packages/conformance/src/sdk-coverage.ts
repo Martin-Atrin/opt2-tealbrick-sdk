@@ -5,7 +5,7 @@
 
 export const SDK_COVERAGE: Readonly<Record<string, readonly string[]>> = {
   // @opt2-tealbrick/manifest
-  authorize: ["A3.run", "A3.crud_ceiling", "A3.hold", "A3.held_family", "A3.money", "A3.caps", "A3.no_standing_approval", "A14.hook_hold", "A14.hold_retry_once", "A14.scope_wins", "P1.workspace", "P1.agent", "P1.instance"],
+  authorize: ["A3.run", "A3.crud_ceiling", "A3.hold", "A3.held_family", "A3.money", "A3.caps", "A3.caps_count", "A3.no_standing_approval", "A14.hook_hold", "A14.hold_retry_once", "A14.scope_wins", "P1.workspace", "P1.agent", "P1.instance"],
   canonicalize: ["M3", "B8.tampered_input", "A4.receipt_digest"],
   digest: ["M3", "A4.receipt_digest", "A2.tampered_context"],
   gate: ["B5.paused_first", "B5.bound_outside_wf", "B5.grant_revoked"],

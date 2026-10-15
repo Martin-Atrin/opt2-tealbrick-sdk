@@ -138,7 +138,11 @@ export class TrustState {
     };
   }
 
-  /** Slice pause (CORE I1): workspace kill switch, this instance, the calling agent (listed or status `paused`). */
+  /**
+   * Slice pause (CORE I1): workspace kill switch, this instance, the calling agent (listed or status `paused`).
+   * v0.1.22 (SDK-05, fail closed): an agent id that is NOT in the slice counts as paused — the same answer the op route
+   * gives it (`agent_unknown`), so `ctx.paused(agent)` never reports a removed or unknown agent as free to act.
+   */
   paused(callerId: string | null): { workspace: boolean; instance: boolean; agent: boolean } {
     const s = this.slice;
     if (!s) return { workspace: false, instance: false, agent: false };
@@ -146,7 +150,7 @@ export class TrustState {
     return {
       workspace: s.pause.workspace,
       instance: s.pause.instances.includes(this.instanceId),
-      agent: callerId !== null && ((s.pause.agents as string[]).includes(callerId) || agentEntry?.status === "paused"),
+      agent: callerId !== null && (!agentEntry || (s.pause.agents as string[]).includes(callerId) || agentEntry.status === "paused"),
     };
   }
 

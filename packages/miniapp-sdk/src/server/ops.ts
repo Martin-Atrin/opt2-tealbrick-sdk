@@ -27,7 +27,7 @@ import type { ContextExtras, SdkHookContext, SdkOpContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
-import { HOLD_TTL_MS, type NewReceipt } from "./receipts.ts";
+import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 
 export const OP_TIMEOUT_MS = 30_000;
@@ -176,7 +176,12 @@ function opSignal(req: IncomingMessage, res: ServerResponse): { signal: AbortSig
   };
 }
 
-export async function runHandler(rt: Runtime, op: OperationView, input: Json, ctx: OpContext, dynamicTool: { tool: string; args: Record<string, unknown> } | null): Promise<Json> {
+/**
+ * Starts one handler run. `raced` answers the caller: the output, or the abort reason (30 s timeout, client gone).
+ * `actual` is the handler itself (validated output or its error): it may end AFTER `raced` (SDK-07), and the SDK keeps the
+ * idempotency key and the cap slot reserved until it does (v0.1.22, SDK-01/SDK-02).
+ */
+export function startHandler(rt: Runtime, op: OperationView, input: Json, ctx: OpContext, dynamicTool: { tool: string; args: Record<string, unknown> } | null): { raced: Promise<Json>; actual: Promise<Json> } {
   const run = async (): Promise<Json> => {
     if (dynamicTool) {
       const d = rt.def.dynamic?.[op.id];
@@ -187,18 +192,122 @@ export async function runHandler(rt: Runtime, op: OperationView, input: Json, ct
     if (!spec) throw new TbError("unknown_tool", "no handler for this operation", 404);
     return spec.run(input, ctx);
   };
+  const actual = (async () => {
+    const output = await run();
+    if (output === undefined) throw new TbError("output_invalid", "handler returned no output", 500);
+    if (!op.standard && !op.dynamic && op.output) {
+      const v = validateAgainstSchema(op.output, output);
+      if (!v.ok) throw new TbError("output_invalid", "handler output does not match the manifest output schema", 500, { errors: v.errors });
+    }
+    return output;
+  })();
   const aborted = new Promise<never>((_, reject) => {
     if (ctx.signal.aborted) reject(ctx.signal.reason);
     ctx.signal.addEventListener("abort", () => reject(ctx.signal.reason), { once: true });
   });
   aborted.catch(() => {});
-  const output = await Promise.race([run(), aborted]);
-  if (output === undefined) throw new TbError("output_invalid", "handler returned no output", 500);
-  if (!op.standard && !op.dynamic && op.output) {
-    const v = validateAgainstSchema(op.output, output);
-    if (!v.ok) throw new TbError("output_invalid", "handler output does not match the manifest output schema", 500, { errors: v.errors });
+  return { raced: Promise.race([actual, aborted]), actual };
+}
+
+export async function runHandler(rt: Runtime, op: OperationView, input: Json, ctx: OpContext, dynamicTool: { tool: string; args: Record<string, unknown> } | null): Promise<Json> {
+  const h = startHandler(rt, op, input, ctx, dynamicTool);
+  h.actual.catch(() => {});
+  return h.raced;
+}
+
+// ── Idempotency reservation (§4.4, v0.1.22 SDK-01) ───────────────────────────
+/** Runs in THIS process per (caller, op, key): a concurrent duplicate waits for the first run's end. */
+const inflight = new WeakMap<Receipts, Map<string, Promise<void>>>();
+/** Rounds a duplicate may wait (each up to the op timeout) before it answers 409 `idempotency_in_flight`. */
+const IDEM_WAIT_ROUNDS = 3;
+
+/** A reserved key: exactly one of `result`, `held`, `release` ends it (later calls are no-ops). */
+export interface IdemLease {
+  readonly key: string;
+  result(output: Json): void;
+  held(holdId: string): void;
+  release(): void;
+}
+
+type IdemClaim =
+  | { kind: "lease"; lease: IdemLease }
+  | { kind: "result"; output: Json }
+  | { kind: "held"; holdId: string; expiresAt: number };
+
+function waitFor(p: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(false), ms);
+    t.unref();
+    p.then(() => {
+      clearTimeout(t);
+      resolve(true);
+    });
+  });
+}
+
+/**
+ * Reserves `(caller, op, key)` before authorize() and the handler (one INSERT wins in the app DB). A live duplicate:
+ * same input → waits for the first run and answers its stored result (or its hold); a failed first run frees the key
+ * and the duplicate runs (a normal retry); still running after the wait → 409 `idempotency_in_flight`; a key left
+ * pending by a process that died mid-run → 409 `idempotency_outcome_unknown` (never re-run). Different input → 409
+ * `idempotency_conflict`. An approved (or otherwise decided) hold under the key is taken over by its retry.
+ */
+async function claimIdempotency(rt: Runtime, callerId: string, opId: string, key: string, inputDigest: string, sealId: string): Promise<IdemClaim> {
+  const map = inflight.get(rt.receipts) ?? new Map<string, Promise<void>>();
+  inflight.set(rt.receipts, map);
+  const k = `${callerId}\u0000${opId}\u0000${key}`;
+  const lease = (): IdemClaim => {
+    let done!: () => void;
+    map.set(
+      k,
+      new Promise<void>((r) => {
+        done = r;
+      }),
+    );
+    let open = true;
+    const end = (fn: () => void) => {
+      if (!open) return;
+      open = false;
+      try {
+        fn();
+      } finally {
+        map.delete(k);
+        done();
+      }
+    };
+    return {
+      kind: "lease",
+      lease: {
+        key,
+        result: (output) => end(() => rt.receipts.idemPut(callerId, opId, key, inputDigest, { output: rt.sealer.sealText(IDEM_PURPOSE, sealId, JSON.stringify(output)) }, Date.now())),
+        held: (holdId) => end(() => rt.receipts.idemPut(callerId, opId, key, inputDigest, { holdId }, Date.now())),
+        release: () => end(() => rt.receipts.idemRelease(callerId, opId, key)),
+      },
+    };
+  };
+  let waits = 0;
+  for (;;) {
+    const now = Date.now();
+    const r = rt.receipts.idemReserve(callerId, opId, key, inputDigest, now);
+    if (r.kind === "reserved") return lease();
+    const row = r.row;
+    if (row.inputDigest !== inputDigest) throw new TbError("idempotency_conflict", "idempotency key was used with a different input", 409);
+    if (row.kind === "result") return { kind: "result", output: JSON.parse(rt.sealer.unsealText(IDEM_PURPOSE, sealId, row.output)) as Json };
+    if (row.kind === "unknown") throw new TbError("idempotency_outcome_unknown", "an earlier call with this key stopped mid-run; its outcome is unknown, so it is not run again", 409);
+    if (row.kind === "held") {
+      const h = rt.receipts.getSync(row.holdId);
+      if (h?.status === "held") return { kind: "held", holdId: h.id, expiresAt: h.expiresAt ?? now };
+      if (h?.status === "denied") throw new TbError("hold_denied", "the owner denied this call (or it expired)", 403);
+      // approved (or gone): the retry takes the key over and runs (§4.3); a concurrent retry that lost waits below
+      if (rt.receipts.idemTakeHeld(callerId, opId, key, row.holdId)) return lease();
+      continue;
+    }
+    // pending: a run of this key is in progress
+    const p = map.get(k);
+    if (!p || waits >= IDEM_WAIT_ROUNDS) throw new TbError("idempotency_in_flight", "a call with this idempotency key is still running; retry later", 409);
+    if (!(await waitFor(p, OP_TIMEOUT_MS))) waits = IDEM_WAIT_ROUNDS;
+    else waits += 1;
   }
-  return output;
 }
 
 function toTbError(e: unknown, rt: Runtime): TbError {
@@ -273,6 +382,13 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       mode: g.caller.type === "agent" ? (sliceAgent?.mode ?? g.claims.mode) : null,
     };
     const callId = proof.claims.call;
+    // v0.1.22 (SDK-05, fail closed): an agent that is not in the verified slice is refused — no invented agent record,
+    // no scope defaults. Removal then never depends on Core listing the grant jti in `revoked`. The status loop is
+    // kicked so a just-added agent is served as soon as the newer slice arrives.
+    if (g.caller.type === "agent" && !sliceAgent) {
+      rt.kickStatus();
+      throw new TbError("agent_unknown", "this agent is not in the instance slice", 403);
+    }
 
     // tb.hold_status: valid grant suffices (I4); only the caller's own holds; no receipt.
     if (op.standard && op.id === "tb.hold_status") {
@@ -310,95 +426,116 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       dyn = { tool: r.tool, args: r.args };
     }
 
-    // first sight (§7.2): agent from the slice, or a companion app caller on its first call
+    // first sight (§7.2): agent from the slice (an agent outside it was refused above), or a companion app caller
     if (sliceAgent) await rt.ensureAgent(sliceAgent);
-    else if (g.caller.type === "agent") await rt.ensureAgent({ id: callerId as AgentId, name: callerId, mode: g.claims.mode, status: "active" });
     else rt.scopes.applyDefaultsFor(callerId, caller.name);
 
-    // idempotency (§4.4)
+    // idempotency (§4.4; v0.1.22 SDK-01): the key is reserved HERE, before authorize() and the handler
     const idemKey = idempotencyKeyFor(op, body.idempotencyKey);
+    let idem: IdemLease | null = null;
     if (idemKey) {
-      const prior = rt.receipts.idemGet(callerId, op.id, idemKey, now);
-      if (prior && prior.inputDigest !== inputDigest) throw new TbError("idempotency_conflict", "idempotency key was used with a different input", 409);
-      if (prior?.kind === "result") {
-        const output = JSON.parse(rt.sealer.unsealText(IDEM_PURPOSE, `${callerId}:${op.id}:${idemKey}`, prior.output)) as Json;
-        return sendJson(res, 200, { status: "ok", output } satisfies OpResult);
-      }
-      if (prior?.kind === "held") {
-        const h = rt.receipts.getSync(prior.holdId);
-        if (h?.status === "held") return sendJson(res, 202, { status: "held", holdId: h.id, expiresAt: iso(h.expiresAt ?? now) } satisfies OpResult);
-        if (h?.status === "denied") throw new TbError("hold_denied", "the owner denied this call (or it expired)", 403);
-        // approved → falls through to the approval path below
-      }
+      const c = await claimIdempotency(rt, callerId, op.id, idemKey, inputDigest, `${callerId}:${op.id}:${idemKey}`);
+      if (c.kind === "result") return sendJson(res, 200, { status: "ok", output: c.output } satisfies OpResult);
+      if (c.kind === "held") return sendJson(res, 202, { status: "held", holdId: c.holdId as `hld_${string}`, expiresAt: iso(c.expiresAt) } satisfies OpResult);
+      idem = c.lease;
     }
-
-    // scope access (from the app's own store, never from the caller)
-    const spec = handlerSpec(rt, op.id);
-    let access: { level: string; crud: CrudAction[] } | null = null;
-    let viewAccess: ScopeAccessView["access"] = null;
-    if (eff.scopeType) {
-      const target = spec?.scope ? spec.scope(body.input, caller) : null;
-      const r = rt.scopes.resolve(callerId, eff.scopeType, target);
-      access = r ? { level: r.level, crud: r.crud } : { level: "none", crud: [] };
-      viewAccess = { type: eff.scopeType, id: target, level: access.level, crud: access.crud };
-    }
-
-    const approved = rt.receipts.findApproved(callerId, op.id, inputDigest, now);
-    const usage = await rt.receipts.usage(callerId, g.claims.caps ?? {}, now);
-    const decision = authorize({
-      paused: rt.trust.paused(g.caller.type === "agent" ? callerId : null),
-      grant: grantToken,
-      trust,
-      op: eff,
-      access,
-      usage,
-      approval: approved ? "approved" : "none",
-      // v0.1.13 (G1): the bridge-attested before-hook hold verdict; an approval for this exact call satisfies it
-      holdVerdict: proof.claims.hv ? { family: proof.claims.hv.f, reason: proof.claims.hv.r, by: proof.claims.hv.by } : null,
-    });
-    const receiptCaller = { type: caller.type as "agent" | "app", id: callerId, name: caller.name };
-    const base = { callId, caller: receiptCaller, op: op.id, effect: eff.effect, inputDigest: inputDigest as Sha256Digest, idempotencyKey: idemKey };
-    const meta0: Json = dyn ? { tool: dyn.tool } : null;
-
-    if (decision.decision === "refuse") {
-      rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason: decision.reason } });
-      throw new TbError(decision.reason, `refused: ${decision.reason}`, grantFailStatus(decision.reason));
-    }
-    if (decision.decision === "hold") {
-      const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, meta0, now);
-      if (idemKey) rt.receipts.idemPut(callerId, op.id, idemKey, inputDigest, { holdId: hold.id }, now);
-      rt.statusChanged();
-      return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now + HOLD_TTL_MS) } satisfies OpResult);
-    }
-
-    // run
-    if (approved && !rt.receipts.consume(approved.id)) throw new TbError("hold_consumed", "this approval was already used", 409);
-    const rh = receiptHelpers();
-    const sig = opSignal(req, res);
-    const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, rh.helpers, sig.signal);
-    const writeReceipt = approved !== null || op.receipt || (dyn !== null && eff.effect !== "read");
-    let output: Json;
+    // cap slot (v0.1.22 SDK-02): reserved in the same transaction as the decision; given back on refusal/failure
+    let slot: string | null = null;
+    let handed = false;
     try {
-      output = await runHandler(rt, op, body.input, ctx, dyn);
+      // scope access (from the app's own store, never from the caller)
+      const spec = handlerSpec(rt, op.id);
+      let access: { level: string; crud: CrudAction[] } | null = null;
+      let viewAccess: ScopeAccessView["access"] = null;
+      if (eff.scopeType) {
+        const target = spec?.scope ? spec.scope(body.input, caller) : null;
+        const r = rt.scopes.resolve(callerId, eff.scopeType, target);
+        access = r ? { level: r.level, crud: r.crud } : { level: "none", crud: [] };
+        viewAccess = { type: eff.scopeType, id: target, level: access.level, crud: access.crud };
+      }
+
+      const now2 = Date.now();
+      const approved = rt.receipts.findApproved(callerId, op.id, inputDigest, now2);
+      const d = rt.receipts.decideAndReserve(callerId, g.claims.caps ?? {}, eff.effect, op.id, now2, (usage) =>
+        authorize({
+          paused: rt.trust.paused(g.caller.type === "agent" ? callerId : null),
+          grant: grantToken,
+          trust,
+          op: eff,
+          access,
+          usage,
+          approval: approved ? "approved" : "none",
+          // v0.1.13 (G1): the bridge-attested before-hook hold verdict; an approval for this exact call satisfies it
+          holdVerdict: proof.claims.hv ? { family: proof.claims.hv.f, reason: proof.claims.hv.r, by: proof.claims.hv.by } : null,
+        }),
+      );
+      const decision = d.decision;
+      slot = d.slot;
+      const receiptCaller = { type: caller.type as "agent" | "app", id: callerId, name: caller.name };
+      const base = { callId, caller: receiptCaller, op: op.id, effect: eff.effect, inputDigest: inputDigest as Sha256Digest, idempotencyKey: idemKey };
+      const meta0: Json = dyn ? { tool: dyn.tool } : null;
+
+      if (decision.decision === "refuse") {
+        rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason: decision.reason } });
+        throw new TbError(decision.reason, `refused: ${decision.reason}`, grantFailStatus(decision.reason));
+      }
+      if (decision.decision === "hold") {
+        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, meta0, now2);
+        idem?.held(hold.id);
+        rt.statusChanged();
+        return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now2 + HOLD_TTL_MS) } satisfies OpResult);
+      }
+
+      // run
+      if (approved && !rt.receipts.consume(approved.id)) throw new TbError("hold_consumed", "this approval was already used", 409);
+      const rh = receiptHelpers();
+      const sig = opSignal(req, res);
+      const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, rh.helpers, sig.signal);
+      const writeReceipt = approved !== null || op.receipt || (dyn !== null && eff.effect !== "read");
+      const h = startHandler(rt, op, body.input, ctx, dyn);
+      // the key and the slot end with the HANDLER, not with the answer: a run that outlives the 30 s timeout or the
+      // client keeps both reserved until it ends (a retry never starts a second run; SDK-07)
+      handed = true;
+      const runSlot = slot;
+      const lease = idem;
+      h.actual.then(
+        (output) => {
+          if (runSlot) rt.receipts.capCommit(runSlot);
+          lease?.result(output);
+        },
+        () => {
+          if (runSlot) rt.receipts.capRelease(runSlot);
+          lease?.release();
+        },
+      );
+      let output: Json;
+      try {
+        output = await h.raced;
+      } catch (e) {
+        const err = toTbError(e, rt);
+        const meta = rh.meta ?? meta0;
+        if (approved) rt.receipts.finish(approved.id, "failed", { meta });
+        else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
+        throw err;
+      } finally {
+        sig.done();
+      }
+      const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title);
+      let receiptId: string | undefined;
+      if (approved) {
+        rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? meta0 });
+        receiptId = approved.id;
+      } else if (writeReceipt) {
+        receiptId = rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? meta0 }).id;
+      }
+      sendJson(res, 200, receiptId ? ({ status: "ok", output, receiptId } satisfies OpResult) : ({ status: "ok", output } satisfies OpResult));
     } catch (e) {
-      const err = toTbError(e, rt);
-      const meta = rh.meta ?? meta0;
-      if (approved) rt.receipts.finish(approved.id, "failed", { meta });
-      else if (writeReceipt) rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "failed", summary: rh.summary ?? clampSummary(op.title), meta: { ...(isObj(meta) ? meta : {}), error: err.code } });
-      throw err;
-    } finally {
-      sig.done();
+      if (!handed) {
+        if (slot) rt.receipts.capRelease(slot);
+        idem?.release();
+      }
+      throw e;
     }
-    const summary = rh.summary ?? clampSummary(spec?.redact ? spec.redact(body.input, output) : op.title);
-    let receiptId: string | undefined;
-    if (approved) {
-      rt.receipts.finish(approved.id, "run", { summary, meta: rh.meta ?? meta0 });
-      receiptId = approved.id;
-    } else if (writeReceipt) {
-      receiptId = rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "run", summary, meta: rh.meta ?? meta0 }).id;
-    }
-    if (idemKey) rt.receipts.idemPut(callerId, op.id, idemKey, inputDigest, { output: rt.sealer.sealText(IDEM_PURPOSE, `${callerId}:${op.id}:${idemKey}`, JSON.stringify(output)) }, Date.now());
-    sendJson(res, 200, receiptId ? ({ status: "ok", output, receiptId } satisfies OpResult) : ({ status: "ok", output } satisfies OpResult));
   } catch (e) {
     sendError(res, rid, e instanceof TbError ? e : toTbError(e, rt));
   }
@@ -503,17 +640,19 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
     if (h?.status !== "approved") return { kind: "refused", reason: "hold_denied" };
   }
   const approved = rt.receipts.findApproved(callerId, op.id, inputDigest, now);
-  const usage = await rt.receipts.usage(callerId, g.claims.caps ?? {}, now);
-  const decision = authorize({
-    paused: rt.trust.paused(who.type === "agent" ? callerId : null),
-    grant: token,
-    trust: at,
-    op: { id: op.id, crud: op.crud, effect, ...(op.holdFamily ? { holdFamily: op.holdFamily } : {}), ...(op.scopeType ? { scopeType: op.scopeType } : {}) },
-    access,
-    usage,
-    approval: approved ? "approved" : "none",
-    holdVerdict: null,
-  });
+  // v0.1.22 (SDK-02): usage, decision and the cap slot in one transaction (receipt or not)
+  const { decision, slot } = rt.receipts.decideAndReserve(callerId, g.claims.caps ?? {}, effect, op.id, now, (usage) =>
+    authorize({
+      paused: rt.trust.paused(who.type === "agent" ? callerId : null),
+      grant: token,
+      trust: at,
+      op: { id: op.id, crud: op.crud, effect, ...(op.holdFamily ? { holdFamily: op.holdFamily } : {}), ...(op.scopeType ? { scopeType: op.scopeType } : {}) },
+      access,
+      usage,
+      approval: approved ? "approved" : "none",
+      holdVerdict: null,
+    }),
+  );
   if (decision.decision === "refuse") return refuse(decision.reason);
   if (decision.decision === "hold") {
     if (job.holdId) return { kind: "refused", reason: "hold_consumed" };
@@ -521,13 +660,26 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
     rt.statusChanged();
     return { kind: "wait", holdId: hold.id };
   }
-  if (approved && !rt.receipts.consume(approved.id)) return { kind: "refused", reason: "hold_consumed" };
+  if (approved && !rt.receipts.consume(approved.id)) {
+    if (slot) rt.receipts.capRelease(slot);
+    return { kind: "refused", reason: "hold_consumed" };
+  }
   const rh = receiptHelpers();
   const ctx = buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), null, job.key, {}, rh.helpers, signal);
   const writeReceipt = approved !== null || op.receipt;
+  const h = startHandler(rt, op, input, ctx, null);
+  // the slot ends with the handler itself (a run past its timeout still counts when it completes)
+  h.actual.then(
+    () => {
+      if (slot) rt.receipts.capCommit(slot);
+    },
+    () => {
+      if (slot) rt.receipts.capRelease(slot);
+    },
+  );
   let output: Json;
   try {
-    output = await runHandler(rt, op, input, ctx, null);
+    output = await h.raced;
   } catch (e) {
     const err = toTbError(e, rt);
     const meta = rh.meta ?? null;
@@ -678,26 +830,37 @@ export async function handlePersonOp(rt: Runtime, req: IncomingMessage, res: Ser
       if (out !== null) sendJson(res, 200, { status: "ok", output: out } satisfies OpResult);
       return;
     }
-    const now = Date.now();
     const inputDigest = digest(input);
     const idemKey = idempotencyKeyFor(op, typeof raw.idempotencyKey === "string" ? raw.idempotencyKey : null);
-    const sealId = (k: string) => `${principal.id}:${op.id}:${k}`;
+    // v0.1.22 (SDK-01): reserved before the handler, like agent calls
+    let idem: IdemLease | null = null;
     if (idemKey) {
-      const prior = rt.receipts.idemGet(principal.id, op.id, idemKey, now);
-      if (prior && prior.inputDigest !== inputDigest) throw new TbError("idempotency_conflict", "idempotency key was used with a different input", 409);
-      if (prior?.kind === "result") return sendJson(res, 200, { status: "ok", output: JSON.parse(rt.sealer.unsealText(IDEM_PURPOSE, sealId(idemKey), prior.output)) as Json });
+      const c = await claimIdempotency(rt, principal.id, op.id, idemKey, inputDigest, `${principal.id}:${op.id}:${idemKey}`);
+      if (c.kind === "result") return sendJson(res, 200, { status: "ok", output: c.output } satisfies OpResult);
+      if (c.kind === "held") throw new TbError("idempotency_conflict", "idempotency key belongs to a held call", 409);
+      idem = c.lease;
     }
     const caller: Caller = { type: "person", id: principal.id as PersonId, name: "owner", mode: null };
     const rh = receiptHelpers();
-    const sig = opSignal(req, res);
-    const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, idemKey, {}, rh.helpers, sig.signal, { ...rt.extras(), workspace: principal.ws });
+    let sig: ReturnType<typeof opSignal> | null = null;
     let output: Json;
     try {
-      output = await runHandler(rt, op, input, ctx, null);
+      sig = opSignal(req, res);
+      const ctx = buildContext(rt, op, caller, null, rt.scopes.view(null, null), null, idemKey, {}, rh.helpers, sig.signal, { ...rt.extras(), workspace: principal.ws });
+      const h = startHandler(rt, op, input, ctx, null);
+      const lease = idem;
+      idem = null;
+      h.actual.then(
+        (out) => lease?.result(out),
+        () => lease?.release(),
+      );
+      output = await h.raced;
+    } catch (e) {
+      idem?.release();
+      throw e;
     } finally {
-      sig.done();
+      sig?.done();
     }
-    if (idemKey) rt.receipts.idemPut(principal.id, op.id, idemKey, inputDigest, { output: rt.sealer.sealText(IDEM_PURPOSE, sealId(idemKey), JSON.stringify(output)) }, Date.now());
     sendJson(res, 200, { status: "ok", output } satisfies OpResult);
   } catch (e) {
     sendError(res, rid, e instanceof TbError ? e : toTbError(e, rt));

@@ -40,7 +40,9 @@ const MIME: Record<string, string> = {
  */
 export async function health(rt: Runtime): Promise<Health & { attention?: AttentionCode }> {
   const h: Health = { status: rt.health(), sdk: rt.sdkVersion, version: rt.manifest.version, manifestDigest: rt.digest, keys: await rt.keys.status() };
-  return rt.state.attention ? { ...h, attention: rt.state.attention } : h;
+  // v0.1.22 (SDK-03, spec 0.1.31 Health.backup): the scheduled-backup state (schedule, last good / failed run, failures, overdue)
+  const out = { ...h, backup: rt.backupHealth() };
+  return rt.state.attention ? { ...out, attention: rt.state.attention } : out;
 }
 
 /** Content-hashed asset directory written by the template's build-ui (`assets-<hex>/…`): immutable for a year. */

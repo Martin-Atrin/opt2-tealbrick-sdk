@@ -72,6 +72,8 @@ describe("app target", () => {
     ["refuses a grant whose held names an unknown family (strict reader)", { strictHeld: true }, ["C3.grant_held_unknown"]],
     // v0.1.19 (C111a, conformance 0.1.12)
     ["ignores the caps of a Free grant with a workflow (pre-C111a)", { capsIgnoredWithWf: true }, ["A3.free_wf_caps"]],
+    // v0.1.18 (spec 0.1.31, SDK-02/SDK-04): `max: 0` (A3.caps) cannot see a cap that never counts
+    ["never counts Free cap usage", { capsUncounted: true }, ["A3.caps_count"]],
   ];
   // v0.1.15 / v0.1.16 (conformance 0.1.11): a manifest with an outward first_contact op and a search-mode dynamic op
   const c107 = structuredClone(manifest) as Manifest;
@@ -111,6 +113,36 @@ describe("app target", () => {
     for (const id of ["A12.caller_name", "A12.app_caller_held", "A11.resolve_family", "M2.hold_family_known", "M2.outward_family"]) assert.equal(statusOf(r, id)?.status, "pass", `${id}: ${statusOf(r, id)?.asserted}`);
     assert.match(statusOf(r, "A12.app_caller_held")?.asserted ?? "", /item_send .*first 202 held .*same input \+ key 200 ok; again \(new key\) 202 held/);
     assert.match(statusOf(r, "A11.resolve_family")?.asserted ?? "", /outward\/first_contact/);
+  });
+
+  // v0.1.18 (SDK-02): a receipt:false write op — the miniapp-sdk ≤ 0.1.21 bug (caps counted from receipts) shows only there
+  const capsM = structuredClone(manifest) as Manifest;
+  capsM.operations.push({
+    id: "item_touch",
+    title: "Touch item",
+    description: "Mark an item as seen (no receipt).",
+    input: { type: "object", required: ["space"], properties: { space: { type: "string" } } },
+    output: { type: "object" },
+    crud: ["update"],
+    effect: "write",
+    scopeType: "space",
+    idempotency: "supported",
+    receipt: false,
+    audience: "agent",
+  } as Manifest["operations"][number]);
+  const runCaps = (faults: MiniAppFaults = {}) => runApp({ manifest: capsM, manifestPath: path, start: (env) => startMiniApp(capsM, env, faults), deployTemplate: template, timeoutMs: 8000 });
+  it("A3.caps_count: a correct app holds the second call of a receipt:false AND a receipt:true op under max 1", async () => {
+    const r = await runCaps();
+    const c = statusOf(r, "A3.caps_count");
+    assert.equal(c?.status, "pass", c?.asserted);
+    assert.match(c?.asserted ?? "", /item_touch \(receipt false\): first 200 ok, second 202 held/);
+    assert.match(c?.asserted ?? "", /item_create \(receipt true\): first 200 ok, second 202 held/);
+  });
+  it("A3.caps_count: an app that counts caps from receipts only (miniapp-sdk ≤ 0.1.21) fails", async () => {
+    const r = await runCaps({ capsCountReceiptsOnly: true });
+    const c = statusOf(r, "A3.caps_count");
+    assert.equal(c?.status, "fail", c?.asserted);
+    assert.match(c?.asserted ?? "", /item_touch \(receipt false\): first 200 ok, second 200 ok/);
   });
 
   for (const [name, faults, id] of [

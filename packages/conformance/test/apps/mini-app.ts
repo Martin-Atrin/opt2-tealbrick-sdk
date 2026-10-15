@@ -38,7 +38,7 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice } from "@opt2-tealbrick/spec/bridge";
 import type { BridgeId, InstanceId, SealedBlob, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { Effect, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { readTar } from "../../src/tar.ts";
 import { writeTarGz } from "./tar-write.ts";
@@ -88,6 +88,10 @@ export interface MiniAppFaults {
   strictHeld?: boolean;
   /** pre-C111a: caps ignored when a Free grant carries a non-empty wf (fails A3.free_wf_caps) */
   capsIgnoredWithWf?: boolean;
+  /** v0.1.18 (SDK-02): never counts usage (only `max: 0` holds; fails A3.caps_count) */
+  capsUncounted?: boolean;
+  /** v0.1.18 (SDK-02, miniapp-sdk ≤ 0.1.21): counts only runs that write a receipt (fails A3.caps_count on a receipt:false op) */
+  capsCountReceiptsOnly?: boolean;
   /**
    * v0.1.18 (Knowledge-like, NOT a fault): keys app-caller data by caller. An app caller's `area_create` creates an area
    * of its own (output {id}); any other op by an app caller must name one of ITS areas in the scope field, else
@@ -153,6 +157,8 @@ interface Receipt {
   consumed?: boolean;
 }
 
+const CAPPED = new Set(["write", "outward", "destructive"]);
+
 interface State {
   claimed: boolean;
   /** v0.1.13 (C85): the one app-initiated companion call of this data dir was made */
@@ -165,6 +171,8 @@ interface State {
   kss?: { seq: number; kss: string; keys: InstanceSlice["portalKeys"] } | null;
   receipts: Receipt[];
   idem: Record<string, { inputDigest: string; kind: "held" | "result"; holdId?: string; output?: Json }>;
+  /** v0.1.18 (SDK-02): one cap slot per run of a capped effect (receipt or not) */
+  capSlots?: { caller: string; effect: string; at: number }[];
   scopes: { agent: string; type: string; instanceId: string; access: string }[];
   defaultsApplied: string[];
   sessions: { digest: string; per: string; createdAt: number; csrf: string; expiresAt: number }[];
@@ -250,6 +258,17 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
         }
       : null;
 
+  /** v0.1.18 (SDK-02): Free cap usage = this caller's cap slots of the effect inside the window */
+  const capUsage = (caller: string, caps: Record<string, { max: number; per: "hour" | "day" } | undefined>): Partial<Record<Effect, number>> => {
+    if (faults.capsUncounted) return {};
+    const out: Partial<Record<Effect, number>> = {};
+    for (const [effect, cap] of Object.entries(caps)) {
+      if (!cap) continue;
+      const since = Date.now() - (cap.per === "day" ? 86_400_000 : 3_600_000);
+      out[effect as Effect] = (st.capSlots ?? []).filter((x) => x.caller === caller && x.effect === effect && x.at >= since).length;
+    }
+    return out;
+  };
   const ensureAgent = (agent: string) => {
     for (const sc of manifest.scopes ?? []) {
       const k = `${agent}:${sc.type}`;
@@ -524,7 +543,7 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       trust: t,
       op: { id: op.id, crud: op.crud, effect: op.effect, ...(eff.holdFamily ? { holdFamily: eff.holdFamily } : {}), ...(scoped ? { scopeType: scoped } : {}) },
       access,
-      usage: {},
+      usage: capUsage(callerId, (g0.caps ?? {}) as Record<string, { max: number; per: "hour" | "day" } | undefined>),
       approval: approved && !(faults.hvIgnoresApproval && holdVerdict) ? "approved" : "none",
       holdVerdict,
     });
@@ -559,6 +578,11 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
       save();
       statusChanged();
       return json(res, 202, { status: "held", holdId: h.id, expiresAt: new Date(h.expiresAt ?? 0).toISOString() });
+    }
+    // v0.1.18 (SDK-02): the run takes a cap slot before it runs (receipt or not)
+    if (CAPPED.has(op.effect) && !(faults.capsCountReceiptsOnly && !op.receipt)) {
+      if (!st.capSlots) st.capSlots = [];
+      st.capSlots.push({ caller: callerId, effect: op.effect, at: Date.now() });
     }
     if (op.id === RECALL_OP) {
       // SDK-API §18 rules.narrowing (G5): absent → unfiltered; unknown v → narrowing_unsupported; memoryTags via tagsMatch

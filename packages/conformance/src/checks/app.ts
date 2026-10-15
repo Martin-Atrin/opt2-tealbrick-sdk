@@ -609,6 +609,42 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     return verdict(isHeld(a), `${op.id} (free, wf [${op.id}], caps write max 0): ${show(a)}`);
   });
 
+  // v0.1.18 (spec 0.1.31, SDK-02/SDK-04, L27): `max: 0` holds even when nothing is ever counted. With `max: 1` the first
+  // call must RUN and the second must be HELD — for a receipt:false op (the old SDK counted receipts only) and a
+  // receipt:true op. Each op gets a fresh agent (its own usage window); a warm-up refusal (crud too narrow) applies first
+  // sight so a scoped op finds the agent's own instance.
+  await s.run(
+    "A3.caps_count",
+    "Free caps count every run (receipt or not)",
+    "fresh agent, caps {<effect>: {max: 1, per: hour}}, held []: first call → 200 ok, second → 202 held (caps); for one receipt:false and one receipt:true capped op",
+    async () => {
+      const capped = byRank(agentOps.filter((o) => CAPPABLE.has(o.effect) && !o.holdFamily));
+      const picks = [capped.find((o) => !o.receipt), capped.find((o) => o.receipt)].filter((o): o is Operation => o !== undefined);
+      if (picks.length === 0) return na("no write/outward/destructive agent op without a holdFamily");
+      const seen: string[] = [];
+      let ran = 0;
+      for (const op of picks) {
+        const { agent, rev } = await b.control.addAgent(`Conformance caps ${op.id}`.slice(0, 80));
+        await b.control.waitForSliceRevision(rev, T);
+        // first sight without usage: a call whose grant crud is too narrow is refused before any run
+        const narrow = (["read", "create", "update", "delete"] as CrudAction[]).filter((x) => !op.crud.includes(x)).slice(0, 1);
+        await c().callOp(op.id, inputFor(op, agent.id), { agent: agent.id, crud: narrow, held: [] });
+        await refreshRows();
+        const input = fixtureFor(op, agent.id) ?? sampleInput(op.input, fillFor(op, agent.id) ?? "conformance");
+        const caps = { [op.effect]: { max: 1, per: "hour" } };
+        const first = track(await c().callOp(op.id, input, { agent: agent.id, held: [], caps, idempotencyKey: idemKey(op) }));
+        const second = track(await c().callOp(op.id, input, { agent: agent.id, held: [], caps, idempotencyKey: idemKey(op) }));
+        const tag = `${op.id} (receipt ${op.receipt}): first ${show(first)}, second ${show(second)}`;
+        seen.push(tag);
+        if (isOk(first)) {
+          if (!isHeld(second)) return bad(seen.join("; "));
+          ran++;
+        } else if (isHeld(first)) return bad(`${seen.join("; ")} — held before any run`);
+      }
+      return ran > 0 ? ok(seen.join("; ")) : notRun(`${seen.join("; ")} — the handler rejected the generated input; supply an inputs fixture`);
+    },
+  );
+
   // v0.1.17 (C108, tolerant reader): a newer Core may hold a family this app's build does not know; the grant stays
   // valid (verifyGrant ignores the unknown family) and the known families still hold
   const UNKNOWN_FAMILY = "future_x";

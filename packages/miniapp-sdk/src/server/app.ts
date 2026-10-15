@@ -208,6 +208,9 @@ export async function startApp(
   let link: BridgeLink | null = null;
   const bridge = cfg.standalone || !cfg.bridgeUrl ? null : new BridgeClient({ baseUrl: cfg.bridgeUrl, instanceId, key: instanceKey, bridgeId: () => trust.bridgeId });
   const receipts = new Receipts(db);
+  // v0.1.22 (SDK-01): keys reserved by a process that stopped mid-run have an unknown outcome — never run them again
+  const crashedKeys = receipts.idemRecoverCrashed(Date.now());
+  if (crashedKeys > 0) log.warn("idempotency keys of an interrupted run marked unknown_outcome", { count: crashedKeys });
   const kick = () => link?.kick();
   // v0.1.13 (C86): statusChanged() pacing (≤ 1 push/s) and pendingHolds = held receipts + the app's pendingCount()
   const pusher = new StatusPusher(kick);
@@ -291,6 +294,8 @@ export async function startApp(
     bridgeId: () => trust.bridgeId,
     db,
     audit,
+    // v0.1.22 (SDK-03): a backup outcome changes attention / health → push the status
+    onStateChange: statusChanged,
   });
   const helper = createServiceHelperCaller({ manifest, env, instanceId, instanceKey, bridgeId: () => trust.bridgeId });
   let onStartRan = false;
@@ -362,8 +367,10 @@ export async function startApp(
     async pendingHolds() {
       return receipts.pendingCount() + (await counter.count());
     },
-    // v0.1.21: failed / stuck jobs raise attention when the app reports none (L3)
-    attention: async () => (await attentionReader.read()) ?? jobRunner().attention(),
+    // v0.1.21: failed / stuck jobs raise attention when the app reports none (L3); v0.1.22 (SDK-03): a failed, overdue
+    // or unparsable scheduled backup comes before them
+    attention: async () => (await attentionReader.read()) ?? backup.attention() ?? jobRunner().attention(),
+    backupHealth: () => backup.health(),
     ownerLink,
     ownerLinkFor,
     companionTargets,

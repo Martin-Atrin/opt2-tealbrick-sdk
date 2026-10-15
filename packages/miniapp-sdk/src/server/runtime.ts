@@ -5,6 +5,7 @@ import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { AuditLog, BackupApi, CompanionResult, Db, HealthStatus, Json, Logger, OperationView, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
+import type { BackupHealth } from "./backup.ts";
 import type { BridgeClient } from "./bridge-client.ts";
 import type { AttentionCode } from "./claim-guard.ts";
 import type { ContextExtras, SdkAppDefinition, SdkEventContext } from "./context.ts";
@@ -65,6 +66,8 @@ export interface Runtime {
   pendingHolds(): Promise<number>;
   /** v0.1.20 (spec 0.1.28, F89): the app's `attention()` (1 s timeout, validated; null when none) */
   attention(): Promise<{ code: string; reason: string } | null>;
+  /** v0.1.22 (SDK-03): scheduled-backup state for health (`Health.backup`, spec 0.1.31) */
+  backupHealth(): BackupHealth;
   /** v0.1.13 (C86): ctx.ownerLink(path); throws path_invalid; null until the slice carries portalUrl */
   ownerLink(path: string): string | null;
   /** v0.1.20: an owner link into ANOTHER app (e.g. Inbox opening a hold's decidePath in the owning app) */

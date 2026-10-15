@@ -87,6 +87,22 @@ CREATE INDEX tb_jobs_hold ON tb_jobs (hold_id);
 CREATE INDEX tb_jobs_order ON tb_jobs (created_at, id);
 `,
   },
+  {
+    // v0.1.22 (SDK-02): Free cap slots, independent of receipts. One row per run of a write/outward/destructive op
+    // (receipt or not), reserved before the handler in the same transaction as the decision; deleted when the run fails
+    // or is refused; kept when it ran or its outcome is unknown. Backfilled from the receipts that counted before.
+    version: 5,
+    name: "sdk_cap_usage",
+    sql: `
+CREATE TABLE tb_cap_usage (
+  id TEXT PRIMARY KEY, caller_id TEXT NOT NULL, effect TEXT NOT NULL, op TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX tb_cap_usage_count ON tb_cap_usage (caller_id, effect, created_at);
+INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
+  SELECT 'cap_' || id, caller_id, effect, op, 'used', created_at FROM tb_receipts
+  WHERE status = 'run' AND effect IN ('write', 'outward', 'destructive');
+`,
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {
