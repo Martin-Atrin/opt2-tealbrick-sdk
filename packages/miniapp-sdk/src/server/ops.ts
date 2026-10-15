@@ -1,6 +1,7 @@
 // Operation pipeline (SDK-API §3.2, §4, §6): bridge-forwarded agent/app calls on /tb/v1/ops/:op and person calls on
 // /a/<product>/tb/v1/ops/:op. Order on /tb/v1/ops: call proof → verifyGrant → op/audience → input schema → idempotency
 // → authorize() (step 0 = slice pause) → handler. Holds and receipts are rows of the one receipts table.
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorize, DECISION_REASON, digest, EFFECTS, HOLDS_PENDING_OP, opInGrantWorkflow, validateAgainstSchema, validateInput, verifyCallProof, verifyGrant } from "@opt2-tealbrick/manifest";
 import { BRIDGE_HEADERS, type OpCallBody, type OpResult } from "@opt2-tealbrick/spec/bridge";
@@ -36,6 +37,10 @@ const META_MAX_BYTES = 4096;
 const HOLD_VIEW_MAX = 16_000;
 const IDEM_KEY_RE = /^[\x21-\x7e]{8,128}$/;
 const IDEM_PURPOSE = "idempotency";
+/** v0.1.23 (SDK-HV-1, SDK-API §4.6): time budget of a dynamic op's async `holdView`. */
+export const HOLD_VIEW_BUDGET_MS = 5_000;
+/** v0.1.23: the line the owner sees when the app could not read the content of a held dynamic call. */
+export const HOLD_VIEW_UNREADABLE = "Tealbrick could not read the content of this request.";
 
 type ManifestOp = Operation & { standard: false };
 interface EffectiveOp {
@@ -337,6 +342,56 @@ export function withinCeiling(op: Operation, r: { crud: CrudAction[]; effect: Ef
   return r.crud.length > 0 && r.crud.every((x) => c.crudCeiling.includes(x)) && EFFECTS.indexOf(r.effect) <= EFFECTS.indexOf(c.effectCeiling);
 }
 
+// ── Hold view of a dynamic tool call (v0.1.23, SDK-HV-1, SDK-API §4.6) ─────
+/** What the owner sees on a hold of a dynamic call: view text, summary (null = op title) and the hash the approval binds. */
+export interface DynamicHoldText {
+  view: string;
+  summary: string | null;
+  viewSha256: string;
+}
+
+const defaultHoldView = (op: { title: string }, input: Json): string => `${op.title}\n${JSON.stringify(input, null, 2)}`;
+export const holdViewDigest = (view: string): string => `sha256:${createHash("sha256").update(view, "utf8").digest("hex")}`;
+
+/**
+ * Awaits the app's `dynamic[op].holdView(tool, args, ctx)` within HOLD_VIEW_BUDGET_MS. Never throws: a throw, a timeout,
+ * a malformed answer or a view over 16 000 chars → the default view with the "could not read" line first (the hold is still
+ * created; it is never approved by a failure). `null` → the default view. Returns null when the app has no holdView.
+ * `makeCtx(signal)` builds the OpContext of the call (same caller, scope access and account the call would use).
+ */
+export async function dynamicHoldText(rt: Runtime, op: OperationView, input: Json, tool: { tool: string; args: Record<string, unknown> }, makeCtx: (signal: AbortSignal) => OpContext, budgetMs = HOLD_VIEW_BUDGET_MS): Promise<DynamicHoldText | null> {
+  const fn = rt.def.dynamic?.[op.id]?.holdView;
+  if (!fn) return null;
+  const fallback = (): DynamicHoldText => {
+    const view = `${HOLD_VIEW_UNREADABLE}\n\n${defaultHoldView(op, input)}`;
+    return { view, summary: null, viewSha256: holdViewDigest(view) };
+  };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new TbError("hold_view_timeout", "hold view took too long", 504)), budgetMs);
+  timer.unref();
+  try {
+    const aborted = new Promise<never>((_, reject) => ac.signal.addEventListener("abort", () => reject(ac.signal.reason), { once: true }));
+    aborted.catch(() => {});
+    const r = await Promise.race([fn(tool.tool, tool.args, makeCtx(ac.signal)), aborted]);
+    if (r === null) {
+      const view = defaultHoldView(op, input);
+      return { view, summary: null, viewSha256: holdViewDigest(view) };
+    }
+    if (!isObj(r) || typeof r.view !== "string" || r.view.length === 0 || r.view.length > HOLD_VIEW_MAX || (r.summary !== undefined && typeof r.summary !== "string")) {
+      rt.log.warn("hold view not usable", { op: op.id, reason: isObj(r) && typeof r.view === "string" && r.view.length > HOLD_VIEW_MAX ? "hold_view_too_large" : "hold_view_invalid" });
+      return fallback();
+    }
+    return { view: r.view, summary: typeof r.summary === "string" && r.summary.trim() ? clampSummary(r.summary) : null, viewSha256: holdViewDigest(r.view) };
+  } catch (e) {
+    // the code only: never the upstream text (it may carry content the agent sent)
+    rt.log.warn("hold view failed", { op: op.id, code: e instanceof TbError ? e.code : "hold_view_failed" });
+    return fallback();
+  } finally {
+    clearTimeout(timer);
+    if (!ac.signal.aborted) ac.abort(new TbError("hold_view_done", "hold view finished", 499));
+  }
+}
+
 function grantFailStatus(code: string): number {
   return code.startsWith("grant_") ? 401 : 403;
 }
@@ -454,8 +509,22 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
         viewAccess = { type: eff.scopeType, id: target, level: access.level, crud: access.crud };
       }
 
+      // v0.1.23 (SDK-HV-1): one OpContext factory for the hold view = the context the call itself would get
+      const viewCtx = (signal: AbortSignal) => buildContext(rt, op, caller, g, rt.scopes.view(callerId, viewAccess), callId, idemKey, body.context, receiptHelpers().helpers, signal);
+      let approved = rt.receipts.findApproved(callerId, op.id, inputDigest, Date.now());
+      // v0.1.23 (SDK-HV-1): the approval is bound to the view the owner saw. Same input digest is not enough for a dynamic
+      // call whose content lives upstream (approve draft A, the agent edits it to B, sends B): compute the view again and
+      // use the approval only if it is the same text; else the call is decided as if no approval existed (a NEW hold).
+      let heldText: DynamicHoldText | null = null;
+      if (approved && dyn && rt.def.dynamic?.[op.id]?.holdView) {
+        heldText = await dynamicHoldText(rt, op, body.input, dyn, viewCtx);
+        const want = isObj(approved.meta) ? approved.meta.viewSha256 : undefined;
+        if (!heldText || typeof want !== "string" || want !== heldText.viewSha256) {
+          rt.log.info("approval not used: the hold view changed", { op: op.id, hold: approved.id });
+          approved = null;
+        }
+      }
       const now2 = Date.now();
-      const approved = rt.receipts.findApproved(callerId, op.id, inputDigest, now2);
       const d = rt.receipts.decideAndReserve(callerId, g.claims.caps ?? {}, eff.effect, op.id, now2, (usage) =>
         authorize({
           paused: rt.trust.paused(g.caller.type === "agent" ? callerId : null),
@@ -480,7 +549,10 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
         throw new TbError(decision.reason, `refused: ${decision.reason}`, grantFailStatus(decision.reason));
       }
       if (decision.decision === "hold") {
-        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, meta0, now2);
+        // v0.1.23 (SDK-HV-1): a dynamic op with holdView → the app's view of the upstream content (time-boxed, never blocks)
+        if (dyn && !heldText) heldText = await dynamicHoldText(rt, op, body.input, dyn, viewCtx);
+        const holdMeta: Json = heldText && dyn ? { tool: dyn.tool, viewSha256: heldText.viewSha256 } : meta0;
+        const hold = createHold(rt, base, spec, op, body.input, decision, decision.reason === DECISION_REASON.heldByHook ? (proof.claims.hv?.r ?? null) : null, holdMeta, Date.now(), heldText);
         idem?.held(hold.id);
         rt.statusChanged();
         return sendJson(res, 202, { status: "held", holdId: hold.id, expiresAt: iso(hold.expiresAt ?? now2 + HOLD_TTL_MS) } satisfies OpResult);
@@ -544,13 +616,13 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
 type ReceiptBase = Pick<NewReceipt, "callId" | "caller" | "op" | "effect" | "inputDigest" | "idempotencyKey">;
 
 /** A hold receipt for a `hold` decision (called op or scheduled op); refuses `hold_view_too_large`. */
-function createHold(rt: Runtime, base: ReceiptBase, spec: HandlerSpec | null, op: OperationView, input: Json, decision: Decision, hookReason: string | null, meta: Json, now: number) {
-  const view = spec?.holdView ? spec.holdView(input) : `${op.title}\n${JSON.stringify(input, null, 2)}`;
+function createHold(rt: Runtime, base: ReceiptBase, spec: HandlerSpec | null, op: OperationView, input: Json, decision: Decision, hookReason: string | null, meta: Json, now: number, text: DynamicHoldText | null = null) {
+  const view = text ? text.view : spec?.holdView ? spec.holdView(input) : defaultHoldView(op, input);
   if (view.length > HOLD_VIEW_MAX) {
     rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason: "hold_view_too_large" } });
     throw new TbError("hold_view_too_large", "hold view exceeds 16 000 characters", 500);
   }
-  const summary = clampSummary(spec?.redact ? spec.redact(input) : op.title);
+  const summary = text?.summary ?? clampSummary(spec?.redact ? spec.redact(input) : op.title);
   // v0.1.13 (G1): heldBy + the reason (hook verdict reason, else the SDK decision reason code; C90: never input/view/meta)
   return rt.receipts.insert(
     {

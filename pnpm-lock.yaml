@@ -66,8 +66,8 @@ importers:
         specifier: workspace:*
         version: link:../manifest
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.31/opt2-tealbrick-spec-0.1.31.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.31/opt2-tealbrick-spec-0.1.31.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz
     devDependencies:
       '@types/node':
         specifier: 24.19.2
@@ -150,6 +150,10 @@ packages:
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.31/opt2-tealbrick-spec-0.1.31.tgz':
     resolution: {integrity: sha512-hdau8QqGkMkeab43WcEMz39lbPFhmmMz1cOgGtBsSkvBIOIUUPt8bRZECUDNlYMUDnbNXBCyt2sARxzyreklkQ==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.31/opt2-tealbrick-spec-0.1.31.tgz}
     version: 0.1.31
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz':
+    resolution: {integrity: sha512-orQPbC6043OFhPBLO/BGAJ0bZ2mP0bfqOxcTDjZc5ur9Vo8sQMvRGsE4uRAAlG8xnBQvcIKadgUOG9KNC5W55Q==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz}
+    version: 0.1.35
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -361,6 +365,8 @@ snapshots:
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.27/opt2-tealbrick-spec-0.1.27.tgz': {}
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.31/opt2-tealbrick-spec-0.1.31.tgz': {}
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz': {}
 
   '@types/node@24.19.2':
     dependencies:
