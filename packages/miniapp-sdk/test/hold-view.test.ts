@@ -283,6 +283,31 @@ describe("SDK-HV-1 dynamic hold view", () => {
     assert.deepEqual(b.sent, []);
   });
 
+  test("C202 fail closed: unreadable at hold AND at retry → the approval is NOT used; a new hold with the 'could not read' line", async () => {
+    b.mode.value = "throw";
+    b.sent.length = 0;
+    b.drafts.d8 = "Never seen by the owner";
+    const h = await send(b, "d8");
+    assert.equal(h.status, 202);
+    await approve(b, String(h.body.holdId));
+    const retry = await send(b, "d8");
+    assert.equal(retry.status, 202, "a blind approval is never reused");
+    assert.notEqual(retry.body.holdId, h.body.holdId);
+    assert.ok(holdRow(b, retry.body.holdId).view?.startsWith(HOLD_VIEW_UNREADABLE));
+    // approving the new (still unreadable) hold does not help either: unreadable content never runs on an approval
+    await approve(b, String(retry.body.holdId));
+    assert.equal((await send(b, "d8")).status, 202);
+    assert.deepEqual(b.sent, []);
+    // once the content can be read, the owner sees it and its approval works
+    b.mode.value = "ok";
+    const readable = await send(b, "d8");
+    assert.equal(readable.status, 202);
+    assert.match(holdRow(b, readable.body.holdId).view ?? "", /Never seen by the owner/);
+    await approve(b, String(readable.body.holdId));
+    assert.equal((await send(b, "d8")).status, 200);
+    assert.deepEqual(b.sent, ["Never seen by the owner"]);
+  });
+
   test("oversized or malformed view → fallback (no hold_view_too_large refusal); null → default view without the line", async () => {
     b.mode.value = "huge";
     b.drafts.d6 = "D6";

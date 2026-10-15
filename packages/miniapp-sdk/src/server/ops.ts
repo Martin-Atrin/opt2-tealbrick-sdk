@@ -348,6 +348,8 @@ export interface DynamicHoldText {
   view: string;
   summary: string | null;
   viewSha256: string;
+  /** false = the fallback view (the app could not read the content); such a view never satisfies an approval (C202) */
+  readable: boolean;
 }
 
 const defaultHoldView = (op: { title: string }, input: Json): string => `${op.title}\n${JSON.stringify(input, null, 2)}`;
@@ -364,7 +366,7 @@ export async function dynamicHoldText(rt: Runtime, op: OperationView, input: Jso
   if (!fn) return null;
   const fallback = (): DynamicHoldText => {
     const view = `${HOLD_VIEW_UNREADABLE}\n\n${defaultHoldView(op, input)}`;
-    return { view, summary: null, viewSha256: holdViewDigest(view) };
+    return { view, summary: null, viewSha256: holdViewDigest(view), readable: false };
   };
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new TbError("hold_view_timeout", "hold view took too long", 504)), budgetMs);
@@ -375,13 +377,13 @@ export async function dynamicHoldText(rt: Runtime, op: OperationView, input: Jso
     const r = await Promise.race([fn(tool.tool, tool.args, makeCtx(ac.signal)), aborted]);
     if (r === null) {
       const view = defaultHoldView(op, input);
-      return { view, summary: null, viewSha256: holdViewDigest(view) };
+      return { view, summary: null, viewSha256: holdViewDigest(view), readable: true };
     }
     if (!isObj(r) || typeof r.view !== "string" || r.view.length === 0 || r.view.length > HOLD_VIEW_MAX || (r.summary !== undefined && typeof r.summary !== "string")) {
       rt.log.warn("hold view not usable", { op: op.id, reason: isObj(r) && typeof r.view === "string" && r.view.length > HOLD_VIEW_MAX ? "hold_view_too_large" : "hold_view_invalid" });
       return fallback();
     }
-    return { view: r.view, summary: typeof r.summary === "string" && r.summary.trim() ? clampSummary(r.summary) : null, viewSha256: holdViewDigest(r.view) };
+    return { view: r.view, summary: typeof r.summary === "string" && r.summary.trim() ? clampSummary(r.summary) : null, viewSha256: holdViewDigest(r.view), readable: true };
   } catch (e) {
     // the code only: never the upstream text (it may carry content the agent sent)
     rt.log.warn("hold view failed", { op: op.id, code: e instanceof TbError ? e.code : "hold_view_failed" });
@@ -519,7 +521,9 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       if (approved && dyn && rt.def.dynamic?.[op.id]?.holdView) {
         heldText = await dynamicHoldText(rt, op, body.input, dyn, viewCtx);
         const want = isObj(approved.meta) ? approved.meta.viewSha256 : undefined;
-        if (!heldText || typeof want !== "string" || want !== heldText.viewSha256) {
+        // v0.1.24 (C202, fail closed): content that cannot be read NOW never runs on an approval, even when the owner
+        // approved a hold that was also unreadable (an agent that can make the read fail must not reuse a blind approval)
+        if (!heldText?.readable || typeof want !== "string" || want !== heldText.viewSha256) {
           rt.log.info("approval not used: the hold view changed", { op: op.id, hold: approved.id });
           approved = null;
         }
