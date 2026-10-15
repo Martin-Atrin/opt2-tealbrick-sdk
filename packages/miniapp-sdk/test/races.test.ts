@@ -155,10 +155,12 @@ describe("SDK-01 idempotency key reserved before the handler", () => {
   });
 
   test("a duplicate with a different input while the first runs → 409 idempotency_conflict", async () => {
+    const before = b.runs.tick ?? 0;
     const g = gate();
     b.state.gate = g;
     const first = call(b, "tick", { n: "c" }, { key: "race-key-0003" });
-    await until(async () => (b.runs.tick ?? 0) >= 1);
+    // the first call holds the key (it is inside the handler) before the duplicate is sent
+    await until(async () => (b.runs.tick ?? 0) - before >= 1);
     const other = await call(b, "tick", { n: "different" }, { key: "race-key-0003" });
     g.release();
     b.state.gate = null;
