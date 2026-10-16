@@ -49,5 +49,5 @@ Boot order: scan migrations, restore from `TB_RESTORE_FROM` if set, open, refuse
 - Package pins differ: manifest pins spec 0.1.27, miniapp-sdk 0.1.35, conformance 0.1.31 (a workspace build sees three spec versions).
 - `PORTAL_ROOT_CHANNEL` is hard-coded to `"dev"` in `packages/miniapp-sdk/src/server/trust.ts`. A stable build needs production roots.
 - Template pins lag (SDK 0.1.19, conformance 0.1.16, ui 0.2.3); its CI copies were moved to ci-v9.9.
-- No package in this repo defines a `conformance` script. The CI `conformance` stage (`tb-ci.ts run conformance`, which runs the root `pnpm run conformance` script) and `pnpm conformance` therefore run no checks. The conformance package's own unit tests run in the `unit` stage.
+- `packages/conformance` defines the only `conformance` script: `gen:check` (sdk-exports table) plus `test/app-suite.test.ts`, `test/coverage.test.ts` and `test/manifest.test.ts` (via `scripts/run-tests.ts conformance`). The CI `conformance` stage (`tb-ci.ts run conformance`, which runs the root `pnpm run conformance` script) and `pnpm conformance` run them. The package's `test` script runs all its other test files, so the `unit` stage does not repeat them.
 - Licence: `package.json` files declare MIT and no `LICENSE` file exists in the repo or the packages, while decision C191 sets the Tealbrick SDK Licence (see README).

@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test 'test/**/*.test.ts'",
+    "test": "node scripts/run-tests.ts unit",
+    "conformance": "node --run gen:check && node scripts/run-tests.ts conformance",
     "gen": "node scripts/gen-sdk-exports.ts",
     "gen:check": "node scripts/gen-sdk-exports.ts --check"
   },

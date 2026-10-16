@@ -22,7 +22,7 @@ pnpm workspace, TypeScript run directly by Node 24+ (type stripping).
 ```sh
 corepack enable && pnpm install --frozen-lockfile --ignore-scripts
 pnpm typecheck && pnpm lint && pnpm test      # builds manifest first
-pnpm conformance     # runs each package's `conformance` script; no package defines one today, so it runs nothing
+pnpm conformance     # runs each package's `conformance` script; today only packages/conformance defines one (sdk-exports check + app-suite, coverage, manifest tests)
 ```
 
 New app: `npx create-tealbrick-miniapp <dir> --id <slug> --name "<Name>"` (from the released tarball).
