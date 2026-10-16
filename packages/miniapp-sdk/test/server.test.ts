@@ -184,14 +184,29 @@ describe("boot", () => {
     const r = await startApp(base, { TB_DATA_DIR: t.dir, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" });
     await r.stop();
     migrationsDir(t.dir, { "0001_init.sql": "CREATE TABLE notes (id TEXT PRIMARY KEY);" });
-    await assert.rejects(startApp(base, { TB_DATA_DIR: t.dir, TB_STANDALONE: "1" }), (e: unknown) => e instanceof TbError && e.code === "migration_invalid");
+    // v0.1.25 (E2/M2): a data-phase failure is failed mode (health + reason), not a rejected boot / crash loop
+    const failed = await startApp(base, { TB_DATA_DIR: t.dir, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" });
+    try {
+      assert.equal(failed.status(), "failed");
+      assert.equal(failed.failure?.code, "migration_invalid");
+      assert.equal(failed.failure?.phase, "schema");
+    } finally {
+      await failed.stop();
+    }
     t.cleanup();
   });
 
   test("app SQL cannot touch SDK-reserved tb_* tables", async () => {
     const t = tempDir();
     const app = testApp(await freePort(), migrationsDir(t.dir, { "0001_init.sql": "CREATE TABLE notes (id TEXT); DELETE FROM tb_receipts;" }), {});
-    await assert.rejects(startApp(app, { TB_DATA_DIR: t.dir, TB_STANDALONE: "1" }), (e: unknown) => e instanceof TbError && e.code === "db_reserved");
+    const failed = await startApp(app, { TB_DATA_DIR: t.dir, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" });
+    try {
+      assert.equal(failed.status(), "failed");
+      assert.equal(failed.failure?.code, "db_reserved");
+      assert.equal(failed.failure?.file, "0001_init.sql");
+    } finally {
+      await failed.stop();
+    }
     t.cleanup();
   });
 });

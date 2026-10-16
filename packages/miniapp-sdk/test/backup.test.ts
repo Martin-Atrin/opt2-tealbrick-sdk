@@ -584,7 +584,14 @@ test("startApp wiring: RunningApp.backups backs up, TB_RESTORE_FROM restores at 
       [{ title: "kept" }],
     );
     assert.equal(withDb((db) => db.prepare("SELECT count(*) AS n FROM tb_audit WHERE action = 'backup.restore'").get())?.n, 1);
-    await assert.rejects(startApp(app(await freePort()), { ...env, TB_RESTORE_FROM: "nope.tar.gz" }), isCode("restore_failed"));
+    // v0.1.25 (E2/M2): a failed restore is failed mode with the reason; the data is untouched
+    const failed = await startApp(app(await freePort()), { ...env, TB_RESTORE_FROM: "nope.tar.gz" });
+    try {
+      assert.equal(failed.status(), "failed");
+      assert.deepEqual([failed.failure?.phase, failed.failure?.code, failed.failure?.reason], ["restore", "restore_failed", "archive_missing"]);
+    } finally {
+      await failed.stop();
+    }
   } finally {
     t.cleanup();
   }

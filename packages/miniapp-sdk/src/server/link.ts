@@ -18,6 +18,7 @@ import { TbError } from "./errors.ts";
 import type { JobsSummary } from "./jobs.ts";
 import { peekClaims } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
+import { upgradeHealth } from "./server.ts";
 import { metaGet, metaSet } from "./store.ts";
 
 export interface ClaimRecord {
@@ -107,7 +108,8 @@ export class BridgeLink {
     const rt = this.#rt;
     const attention = await rt.attention();
     const ready = readiness(rt.health());
-    return {
+    const u = upgradeHealth(rt);
+    const status: AppStatus & Record<string, unknown> = {
       // v0.1.20 (spec 0.1.28, F89): an app attention turns `ready` into `degraded`; needs_keys/degraded stay as they are
       readiness: attention && ready === "ready" ? "degraded" : ready,
       version: rt.manifest.version,
@@ -120,7 +122,12 @@ export class BridgeLink {
       ...(attention ? { attention } : {}),
       // v0.1.21 (R1): job counts when the app has any (SPEC-GAP: AppStatus.jobs, additive)
       ...jobsField(rt),
+      // v0.1.25 (E2, SPEC-GAP additive): schema + rollback facts for Core's health gate (needs a bridge that forwards them)
+      schemaVersion: u.schemaVersion,
+      minCompatibleCode: u.minCompatibleCode,
+      ...(u.preUpdateSnapshot ? { preUpdateSnapshot: u.preUpdateSnapshot } : {}),
     };
+    return status;
   }
 
   /** Returns false when the answered slice was refused (the bridge would answer the same slice again at once). */
