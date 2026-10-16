@@ -3,7 +3,7 @@
   "version": "0.1.25",
   "private": true,
   "description": "Teal Brick opt2 Miniapp SDK: server runtime (defineApp/startApp), React client (/client), the tb-exec wrapper bin and the tb-gen generator bin.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "exports": {
     ".": {
@@ -20,7 +20,8 @@
     "tb-gen": "./dist/gen/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

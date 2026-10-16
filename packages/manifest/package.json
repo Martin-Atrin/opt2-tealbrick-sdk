@@ -3,7 +3,7 @@
   "version": "0.1.18",
   "private": true,
   "description": "Teal Brick opt2 contract primitives: manifest validator, JCS, digests, Ed25519 JWS, key sets, token verifiers, sealing, gate()/authorize().",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "exports": {
     ".": {
@@ -12,7 +12,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

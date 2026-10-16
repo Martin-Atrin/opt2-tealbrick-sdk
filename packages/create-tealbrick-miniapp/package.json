@@ -3,14 +3,15 @@
   "version": "0.1.14",
   "private": true,
   "description": "Scaffold a Teal Brick opt2 miniapp (manifest, SDK wiring, Dockerfile, CI, conformance).",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "bin": {
     "create-tealbrick-miniapp": "./dist/cli.js"
   },
   "files": [
     "dist",
-    "template"
+    "template",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

@@ -3,7 +3,7 @@
   "version": "0.1.18",
   "private": true,
   "description": "Teal Brick opt2 conformance suite: checks + fake Portal + fake bridge generated from @opt2-tealbrick/spec.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "exports": {
     ".": {
@@ -15,7 +15,8 @@
     "tb-conformance": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
