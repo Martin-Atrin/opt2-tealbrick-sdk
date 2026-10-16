@@ -5,7 +5,7 @@ import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { AuditLog, BackupApi, CompanionResult, Db, HealthStatus, Json, Logger, OperationView, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import type { AppSecrets } from "./app-secrets.ts";
-import type { BackupHealth } from "./backup.ts";
+import type { BackupHealth, RestoreOutcome } from "./backup.ts";
 import type { BridgeClient } from "./bridge-client.ts";
 import type { AttentionCode } from "./claim-guard.ts";
 import type { ContextExtras, SdkAppDefinition, SdkEventContext } from "./context.ts";
@@ -17,8 +17,9 @@ import type { PersonAuth } from "./person.ts";
 import type { Receipts } from "./receipts.ts";
 import type { ScopeStoreInternals } from "./scopes.ts";
 import type { Sealer } from "./secrets.ts";
-import type { RawDb } from "./store.ts";
+import type { RawDb, SchemaVersion } from "./store.ts";
 import type { TrustState } from "./trust.ts";
+import type { PreUpdateSnapshot } from "./upgrade.ts";
 
 export interface Runtime {
   readonly def: SdkAppDefinition<string>;
@@ -53,6 +54,16 @@ export interface Runtime {
   readonly replay: ReplayGuard;
   /** `attention` (v0.1.12): why the instance needs the owner (health detail; wire readiness `degraded`) */
   readonly state: { claimed: boolean; failed: boolean; restoring: boolean; stopping: boolean; attention: AttentionCode | null };
+  /** v0.1.25 (E2): what the data is at after the boot's data phase (health + status push; SPEC-GAP additive) */
+  readonly upgrade: {
+    schemaVersion: SchemaVersion;
+    codeSchema: SchemaVersion;
+    /** the oldest app version that can run this data (the version that applied its newest migration); null = unknown */
+    minCompatibleCode: string | null;
+    minCompatibleSdk: string | null;
+    preUpdateSnapshot: PreUpdateSnapshot | null;
+    lastRestore: RestoreOutcome | null;
+  };
   /** test harness only (startApp `harness.mountinfoPath`): mountinfo file for the first-claim mount check */
   readonly mountinfoPath: string | undefined;
   health(): HealthStatus;

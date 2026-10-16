@@ -6,7 +6,7 @@
 // inside app.db (backups); the export never carries tb_keys, tb_secrets, tb_sessions or tb_used_jti.
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Readable } from "node:stream";
@@ -21,8 +21,9 @@ import { createAuditLog } from "./audit.ts";
 import { nextRun, parseCron } from "./cron.ts";
 import { TbError } from "./errors.ts";
 import { serviceHost, TB_EXEC_CONTROL_PORT } from "./service-helper.ts";
-import { metaGet, metaSet, openStore, type RawDb } from "./store.ts";
+import { metaGet, metaSet, openStore, type RawDb, type Row, type SchemaVersion, storedSchema } from "./store.ts";
 import { bufferSink, fileSink, readTarGz, type TarSource, writeTarGz } from "./tar.ts";
+import { compareVersions, type PreUpdateSnapshot } from "./upgrade.ts";
 
 export interface BackupContext {
   manifest: Manifest;
@@ -44,6 +45,11 @@ export interface BackupContext {
   onStateChange?(): void;
   /** test clock (SDK-03 overdue rule); default Date.now */
   now?(): number;
+  /**
+   * v0.1.25 (E2/M3): the schema this code can run (app = number of migration files, sdk = SDK_SCHEMA). Restore refuses
+   * an archive whose database is newer. Absent (old callers, tests) → no schema check.
+   */
+  codeSchema?: SchemaVersion;
 }
 
 export type { BackupHealth };
@@ -62,6 +68,15 @@ const BACKUP_STATE_KEY = "backup_state";
 const BACKUP_FORMAT = "tealbrick.backup/1";
 const EXPORT_FORMAT = "tealbrick.export/1";
 const BACKUP_RE = /^tb-backup-\d{8}T\d{6}\.\d{3}Z\.tar\.gz$/;
+/**
+ * v0.1.25 (E2/M1): the pre-update snapshot. ONE deterministic name per target version, so Core can name it in
+ * TB_RESTORE_FROM without reading the volume: `tb-preupdate-to-<version>.tar.gz` (`+` → `_`). A newer snapshot for the
+ * same target replaces the older one. Kept apart from the cron backups (own retention, never in `backups.list()`).
+ */
+export const PREUPDATE_PREFIX = "tb-preupdate-to-";
+export const PREUPDATE_RE = /^tb-preupdate-to-[0-9A-Za-z._-]+\.tar\.gz$/;
+export const PREUPDATE_RETAIN = 3;
+export const preUpdateName = (toVersion: string): string => `${PREUPDATE_PREFIX}${toVersion.replace(/\+/g, "_")}.tar.gz`;
 const META = "meta.json";
 const DB_FILE = "app.db";
 const META_MAX_BYTES = 1024 * 1024;
@@ -183,13 +198,30 @@ async function collectFiles(ctx: BackupContext): Promise<Map<string, string>> {
   return out;
 }
 
+type ArchiveOpts = {
+  /** fixed archive name (pre-update snapshot; replaces an existing file atomically); default a fresh `tb-backup-<ts>` */
+  name?: string;
+  /** extra meta.json members (additive: `kind`, `schema`, …); older SDKs ignore them */
+  extra?: Record<string, unknown>;
+  /** run the app's beforeBackup hook (cron + runNow: yes; boot-time snapshot: no, the app is not started) */
+  hook: boolean;
+};
+
 async function runBackup(ctx: BackupContext, db: RawDb, audit: AuditLog, isStopped: () => boolean): Promise<{ file: string; meta: BackupMeta }> {
+  const result = await buildArchive(ctx, db, { hook: true });
+  if (!isStopped()) await audit.record({ actor: "system", action: "backup.create", target: result.file, detail: { parts: result.meta.parts.length } });
+  await prune(ctx);
+  ctx.log.info("backup created", { file: result.file, parts: result.meta.parts.length });
+  return result;
+}
+
+async function buildArchive(ctx: BackupContext, db: RawDb, opts: ArchiveOpts): Promise<{ file: string; meta: BackupMeta }> {
   await mkdir(ctx.backupDir, { recursive: true });
   const staging = join(ctx.backupDir, `.tb-staging-${ulid()}`);
   await mkdir(staging);
   let result: { file: string; meta: BackupMeta };
   try {
-    await ctx.hooks?.beforeBackup?.();
+    if (opts.hook) await ctx.hooks?.beforeBackup?.();
     const parts: BackupMeta["parts"] = [];
     const sources: TarSource[] = [];
     const add = async (name: string, file: string, path: string) => {
@@ -222,7 +254,7 @@ async function runBackup(ctx: BackupContext, db: RawDb, audit: AuditLog, isStopp
         await add(`service:${s.id}`, `services/${s.id}.${s.backup.extension}`, out);
       }
     }
-    const { file, createdAt } = await freshArchive(ctx.backupDir, "tb-backup-");
+    const { file, createdAt } = opts.name ? { file: opts.name, createdAt: new Date((ctx.now ?? Date.now)()).toISOString() } : await freshArchive(ctx.backupDir, "tb-backup-");
     const meta: BackupMeta = {
       format: BACKUP_FORMAT,
       product: ctx.manifest.id,
@@ -232,6 +264,7 @@ async function runBackup(ctx: BackupContext, db: RawDb, audit: AuditLog, isStopp
       sdk: ctx.sdkVersion,
       createdAt,
       parts,
+      ...(opts.extra ?? {}),
     };
     const metaPath = join(staging, META);
     await writeFile(metaPath, JSON.stringify(meta, null, 2));
@@ -245,10 +278,76 @@ async function runBackup(ctx: BackupContext, db: RawDb, audit: AuditLog, isStopp
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
-  if (!isStopped()) await audit.record({ actor: "system", action: "backup.create", target: result.file, detail: { parts: result.meta.parts.length } });
-  await prune(ctx);
-  ctx.log.info("backup created", { file: result.file, parts: result.meta.parts.length });
   return result;
+}
+
+/**
+ * v0.1.25 (E2/M1): the pre-update snapshot, written at boot BEFORE any pending migration runs (same format as a
+ * backup; meta `kind: "preupdate"`, `version` = the app version that wrote the data, `fromVersion`/`toVersion`,
+ * `schema` = the database schema in the archive). Fails closed: `preupdate_snapshot_no_space` when the backup volume
+ * has less free space than 2 × the database, `preupdate_snapshot_failed` on any other error (the caller then migrates
+ * nothing). Keeps the newest PREUPDATE_RETAIN snapshots.
+ */
+export async function writePreUpdateSnapshot(
+  ctx: BackupContext,
+  db: RawDb,
+  opts: { from: string | null; to: string; schema: SchemaVersion; freeBytes?: (dir: string) => Promise<number> },
+): Promise<PreUpdateSnapshot> {
+  await mkdir(ctx.backupDir, { recursive: true });
+  const dbBytes = await dbSize(ctx.dataDir);
+  const free = await (opts.freeBytes ?? freeSpace)(ctx.backupDir);
+  if (free < 2 * dbBytes)
+    throw new TbError("preupdate_snapshot_no_space", `the backup volume has ${free} bytes free; the snapshot needs ${2 * dbBytes}`, 507, { free, needed: 2 * dbBytes });
+  const name = preUpdateName(opts.to);
+  let out: { file: string; meta: BackupMeta };
+  try {
+    out = await buildArchive(ctx, db, {
+      name,
+      hook: false,
+      // `version` = the data's version: restore by the previous code passes its "not newer than me" check. A database
+      // from before 0.1.25 records no version: "0.0.0" (the schema check on the archived database still applies).
+      extra: { kind: "preupdate", version: opts.from ?? "0.0.0", fromVersion: opts.from, toVersion: opts.to, schema: opts.schema },
+    });
+  } catch (e) {
+    throw new TbError("preupdate_snapshot_failed", `pre-update snapshot failed: ${message(e)}`, 500);
+  }
+  const h = await hashFile(join(ctx.backupDir, out.file));
+  await prunePreUpdate(ctx, name);
+  ctx.log.info("pre-update snapshot written", { file: out.file, from: opts.from, to: opts.to, bytes: h.bytes });
+  return { file: out.file, sha256: h.sha256, bytes: h.bytes, createdAt: out.meta.createdAt, from: opts.from, to: opts.to, schema: opts.schema };
+}
+
+async function dbSize(dataDir: string): Promise<number> {
+  let n = 0;
+  for (const s of ["", "-wal"]) {
+    try {
+      n += (await stat(join(dataDir, DB_FILE + s))).size;
+    } catch {
+      // absent
+    }
+  }
+  return n;
+}
+
+async function freeSpace(dir: string): Promise<number> {
+  try {
+    const s = await statfs(dir);
+    return Number(s.bavail) * Number(s.bsize);
+  } catch {
+    return Number.POSITIVE_INFINITY; // statfs unsupported: the write itself fails on a full volume
+  }
+}
+
+/** Keeps the newest PREUPDATE_RETAIN pre-update snapshots (by mtime), never `keep`. */
+async function prunePreUpdate(ctx: BackupContext, keep: string): Promise<void> {
+  const names = (await readdir(ctx.backupDir)).filter((n) => PREUPDATE_RE.test(n));
+  const dated: { n: string; t: number }[] = [];
+  for (const n of names) dated.push({ n, t: n === keep ? Number.POSITIVE_INFINITY : (await stat(join(ctx.backupDir, n))).mtimeMs });
+  dated.sort((a, b) => b.t - a.t);
+  for (const { n } of dated.slice(PREUPDATE_RETAIN)) {
+    await rm(join(ctx.backupDir, n), { force: true });
+    ctx.log.info("pre-update snapshot pruned", { file: n });
+  }
 }
 
 /** Keeps the newest `backups.retain` archives. */
@@ -419,8 +518,16 @@ async function extractVerified(ctx: BackupContext, archive: string, dir: string)
     return sink;
   });
   const meta = checkMeta(raw);
-  if (!meta) throw new TbError("restore_failed", "archive has no valid meta.json", 500);
-  if (meta.product !== ctx.manifest.id) throw new TbError("restore_failed", `archive belongs to product ${meta.product}`, 500);
+  if (!meta) throw new TbError("restore_failed", "archive has no valid meta.json", 500, { reason: "meta_invalid" });
+  if (meta.product !== ctx.manifest.id) throw new TbError("restore_failed", `archive belongs to product ${meta.product}`, 500, { reason: "product_mismatch" });
+  // v0.1.25 (E2/M3): never restore data a NEWER app version wrote (this code cannot read it; older data migrates forward)
+  let newer: boolean;
+  try {
+    newer = compareVersions(meta.version, ctx.manifest.version) > 0;
+  } catch {
+    throw new TbError("restore_failed", `archive version ${meta.version} is not a version`, 500, { reason: "version_invalid" });
+  }
+  if (newer) throw new TbError("restore_failed", `archive was written by version ${meta.version}; this is ${ctx.manifest.version}`, 500, { reason: "version_newer" });
   const listed = new Set(meta.parts.map((p) => p.file));
   for (const name of got.keys()) if (!listed.has(name)) throw new TbError("restore_failed", `archive entry ${name} is not listed in meta.json`, 500);
   const out: VerifiedArchive = { meta, db: "", files: [], services: [] };
@@ -449,28 +556,87 @@ async function extractVerified(ctx: BackupContext, archive: string, dir: string)
     out.services.push({ id: svc.id, staged: g.path });
   }
   if (!out.db) throw new TbError("restore_failed", "archive has no app.db part", 500);
+  // v0.1.25 (E2/M3): the archived database itself must not be at a schema this code does not have (meta can lie or be old)
+  if (ctx.codeSchema) {
+    const got = schemaOfFile(out.db);
+    if (got === null) throw new TbError("restore_failed", "archived app.db cannot be read", 500, { reason: "db_invalid" });
+    if (got.app > ctx.codeSchema.app || got.sdk > ctx.codeSchema.sdk)
+      throw new TbError("restore_failed", `archived data is at schema app ${got.app} / sdk ${got.sdk}; this code has app ${ctx.codeSchema.app} / sdk ${ctx.codeSchema.sdk}`, 500, {
+        reason: "schema_newer",
+      });
+  }
   return out;
+}
+
+/** Schema of a database file (read only); `{0,0}` without tb_migrations; null when unreadable. */
+function schemaOfFile(path: string): SchemaVersion | null {
+  if (!existsSync(path)) return null;
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    const has = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'tb_migrations'").get() as Row | undefined;
+    return has ? storedSchema(db) : { app: 0, sdk: 0 };
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
+/** v0.1.25: what restoreAtBoot did (startApp logs it and reports `lastRestore` in health). */
+export interface RestoreOutcome {
+  archive: string;
+  applied: boolean;
+  /** already_applied: this archive (name + createdAt) was restored before; snapshot_missing / same_schema: pre-update rules */
+  skipped?: "already_applied" | "snapshot_missing" | "same_schema";
+  /** archive createdAt = the data cut-off of an applied restore */
+  createdAt?: string;
+  version?: string;
 }
 
 /**
  * Runs before the store opens. `TB_RESTORE_FROM` set → verify every part of that archive (in TB_BACKUP_DIR), then
  * replace app.db and the files, restore each service through tb-exec, call `afterRestore`, record `backup.restore`.
- * Any failure → `restore_failed` with app.db and files rolled back. The same archive name on a later boot is ignored.
+ * Any failure → `restore_failed` with app.db and files rolled back. The same archive on a later boot is ignored.
+ *
+ * v0.1.25 (E2/M3) — refusals BEFORE anything is replaced: another product, an archive written by a NEWER app version,
+ * an archived database at a schema newer than this code (`details.reason`). Pre-update snapshots
+ * (`tb-preupdate-to-<v>.tar.gz`, the rollback Core asks for after a failed update) follow two extra rules:
+ * - missing → nothing to undo when the current data is at a schema this code runs (the failed version stopped before its
+ *   snapshot, so it migrated nothing): skipped. Missing with newer data → `restore_failed` reason `snapshot_missing`.
+ * - the current data is at the snapshot's schema (the failed version migrated nothing): skipped, data kept.
+ * "Already applied" compares name AND createdAt, so a newer snapshot under the same name is restored again.
  */
-export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | null): Promise<void> {
-  if (restoreFrom === null) return;
-  const fail = (reason: string) => {
+export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | null): Promise<RestoreOutcome | null> {
+  if (restoreFrom === null) return null;
+  const fail = (reason: string, code = "restore_failed") => {
     ctx.log.error("restore failed", { archive: restoreFrom, reason });
-    return new TbError("restore_failed", `restore failed: ${reason}`, 500);
+    return new TbError("restore_failed", `restore failed: ${reason}`, 500, { reason: code });
   };
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(restoreFrom) || restoreFrom.includes("..")) throw fail("TB_RESTORE_FROM must be an archive file name in TB_BACKUP_DIR");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(restoreFrom) || restoreFrom.includes("..")) throw fail("TB_RESTORE_FROM must be an archive file name in TB_BACKUP_DIR", "name_invalid");
   const archive = join(ctx.backupDir, restoreFrom);
-  if (!existsSync(archive)) throw fail(`archive ${restoreFrom} not found in TB_BACKUP_DIR`);
   const dbPath = join(ctx.dataDir, DB_FILE);
+  const preupdate = PREUPDATE_RE.test(restoreFrom);
+  const current = existsSync(dbPath) ? schemaOfFile(dbPath) : null;
+  const runnable = (s: SchemaVersion | null) => !s || !ctx.codeSchema || (s.app <= ctx.codeSchema.app && s.sdk <= ctx.codeSchema.sdk);
+  if (!existsSync(archive)) {
+    if (preupdate && runnable(current)) {
+      ctx.log.info("pre-update snapshot not found and the data is at a schema this version runs; nothing to restore", { archive: restoreFrom });
+      return { archive: restoreFrom, applied: false, skipped: "snapshot_missing" };
+    }
+    throw fail(`archive ${restoreFrom} not found in TB_BACKUP_DIR`, preupdate ? "snapshot_missing" : "archive_missing");
+  }
+  const head = await readMeta(archive).catch(() => null);
+  const marker = head ? `${restoreFrom}@${head.createdAt}` : restoreFrom;
   const before = readStored(dbPath);
-  if (before.restored === restoreFrom) {
+  if (before.restored === marker || (!preupdate && before.restored === restoreFrom)) {
     ctx.log.info("restore already applied; TB_RESTORE_FROM ignored", { archive: restoreFrom });
-    return;
+    return { archive: restoreFrom, applied: false, skipped: "already_applied" };
+  }
+  const headSchema = (head as { schema?: SchemaVersion } | null)?.schema;
+  if (preupdate && current && headSchema && current.app === headSchema.app && current.sdk === headSchema.sdk && runnable(current)) {
+    ctx.log.info("data is at the pre-update schema (the failed version changed no schema); restore skipped, data kept", { archive: restoreFrom });
+    return { archive: restoreFrom, applied: false, skipped: "same_schema" };
   }
   const staging = join(ctx.dataDir, ".tb-restore");
   await rm(staging, { recursive: true, force: true });
@@ -496,6 +662,7 @@ export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | nu
     }
   };
   let keepStaging = false;
+  let outcome: RestoreOutcome = { archive: restoreFrom, applied: false };
   try {
     const v = await extractVerified(ctx, archive, join(staging, "in"));
     const target = v.services.length ? await execTarget(ctx, before.claim ?? readStored(v.db).claim) : null;
@@ -505,7 +672,9 @@ export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | nu
     for (const f of v.files) await replace(f.target, f.staged);
     const db = openStore(ctx.dataDir);
     try {
-      metaSet(db, RESTORED_KEY, restoreFrom);
+      metaSet(db, RESTORED_KEY, marker);
+      // v0.1.25: a snapshot taken during an upgrade carries that boot's migration lock row; it means nothing here
+      db.exec("DELETE FROM tb_migration_lock");
       await createAuditLog(db, []).record({ actor: "system", action: "backup.restore", target: restoreFrom, detail: { createdAt: v.meta.createdAt, version: v.meta.version, instance: v.meta.instance } });
     } finally {
       db.close();
@@ -517,6 +686,7 @@ export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | nu
     }
     await ctx.hooks?.afterRestore?.();
     ctx.log.info("restore applied", { archive: restoreFrom, createdAt: v.meta.createdAt, parts: v.meta.parts.length });
+    outcome = { archive: restoreFrom, applied: true, createdAt: v.meta.createdAt, version: v.meta.version };
   } catch (e) {
     for (const u of undo.reverse()) {
       try {
@@ -526,10 +696,12 @@ export async function restoreAtBoot(ctx: BackupContext, restoreFrom: string | nu
         ctx.log.error("restore rollback step failed; previous files kept for manual recovery", { staging, error: message(ue) });
       }
     }
-    throw fail(message(e));
+    const reason = e instanceof TbError && typeof e.details?.reason === "string" ? e.details.reason : "restore_failed";
+    throw fail(message(e), reason);
   } finally {
     if (!keepStaging) await rm(staging, { recursive: true, force: true });
   }
+  return outcome;
 }
 
 /** Backup runner (cron, UTC, retention) + export (tb.export). Returns the RunningApp `backups` member and a stop function. */

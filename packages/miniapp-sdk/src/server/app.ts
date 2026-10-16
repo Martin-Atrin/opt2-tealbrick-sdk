@@ -1,8 +1,9 @@
 // defineApp / startApp (SDK-API §3): the manifest is the only source; the app registers handlers by operation id and
 // the SDK derives routes, validation, OpenAPI, status and standard ops. startApp refuses to boot on an invalid
 // manifest, handler set or migration set.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { Server } from "node:http";
+import { join } from "node:path";
 import { isValidLaunchPath, keySetFrom, manifestDigest, memoryReplayGuard, sdkMajorOf, ulid, validateManifest, withStandardOps } from "@opt2-tealbrick/manifest";
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519PublicJwk, InstanceId, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
@@ -10,12 +11,13 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { App, AppDefinition, HealthStatus, HoldDecideInput, OperationView, PersonPrincipal, Receipt, RunningApp, SliceAgent } from "@opt2-tealbrick/spec/sdk";
 import { createAppSecrets } from "./app-secrets.ts";
 import { createAuditLog } from "./audit.ts";
-import { createBackupApi, restoreAtBoot } from "./backup.ts";
+import { type BackupContext, createBackupApi, type RestoreOutcome, restoreAtBoot, writePreUpdateSnapshot } from "./backup.ts";
 import { BridgeClient } from "./bridge-client.ts";
 import { logMountAtBoot } from "./claim-guard.ts";
 import type { SdkAppDefinition, SdkEventContext, StartContext } from "./context.ts";
-import { readEnv } from "./env.ts";
+import { readEnv, type SdkConfig } from "./env.ts";
 import { TbError } from "./errors.ts";
+import { startFailedMode } from "./failed.ts";
 import { JOB_KIND_RE, JobRunner, type JobsApi, jobsView, RUNNER_DEFAULTS, sealGrant } from "./jobs.ts";
 import { createKeys } from "./keys.ts";
 import { BridgeLink } from "./link.ts";
@@ -26,12 +28,29 @@ import { dropPrivileges, type PrivilegeProc } from "./privilege.ts";
 import { Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
 import { createScopeStore } from "./scopes.ts";
-import { createSealer, loadInstanceKey, resolveKeks } from "./secrets.ts";
+import { createSealer, loadInstanceKey, resolveKeks, type Sealer } from "./secrets.ts";
 import { createHttpServer } from "./server.ts";
 import { createServiceHelperCaller } from "./service-helper.ts";
 import { AttentionReader, PendingCounter, StatusPusher } from "./status.ts";
-import { appDb, metaGet, metaSet, openStore, type Row, runAppMigrations } from "./store.ts";
+import {
+  type AppliedMigration,
+  appDb,
+  applyAppMigrations,
+  applySdkMigrations,
+  metaGet,
+  metaSet,
+  openDb,
+  pendingAppMigrations,
+  pendingSdkMigrations,
+  type RawDb,
+  type Row,
+  type SchemaVersion,
+  SDK_SCHEMA,
+  scanMigrations,
+  storedSchema,
+} from "./store.ts";
 import { TrustState } from "./trust.ts";
+import { type BootFailure, type BootPhase, bootFailure, type Clock, META, MigrationLock, type PreUpdateSnapshot, readUpgradeMeta, realClock, recordBoot } from "./upgrade.ts";
 
 export const SDK_VERSION: string = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 /**
@@ -111,6 +130,177 @@ function listen(server: Server, port: number): Promise<void> {
   });
 }
 
+/**
+ * v0.1.25: what startApp returns. `failure` is set (and `status()` is "failed") when the data phase failed: the process
+ * then serves failed mode only, and every other member throws `app_failed`.
+ */
+export type StartedApp = RunningApp & { readonly port: number; readonly jobs: JobsApi; readonly failure?: BootFailure };
+
+interface DataPhase {
+  db: RawDb;
+  migrated: AppliedMigration[];
+  schema: SchemaVersion;
+  codeSchema: SchemaVersion;
+  minCompatibleCode: string | null;
+  minCompatibleSdk: string | null;
+  /** the pre-update snapshot written (or reused after a crash) by THIS boot */
+  snapshot: PreUpdateSnapshot | null;
+  lastPreUpdate: PreUpdateSnapshot | null;
+  restore: RestoreOutcome | null;
+}
+
+class DataPhaseError extends Error {
+  readonly failure: BootFailure;
+  readonly schema: SchemaVersion | null;
+  readonly codeSchema: SchemaVersion;
+  readonly minCompatibleCode: string | null;
+  readonly snapshot: PreUpdateSnapshot | null;
+  constructor(failure: BootFailure, schema: SchemaVersion | null, codeSchema: SchemaVersion, minCompatibleCode: string | null, snapshot: PreUpdateSnapshot | null) {
+    super(`boot failed in ${failure.phase}: ${failure.code}`);
+    this.failure = failure;
+    this.schema = schema;
+    this.codeSchema = codeSchema;
+    this.minCompatibleCode = minCompatibleCode;
+    this.snapshot = snapshot;
+  }
+}
+
+/**
+ * The data phase (E2). Order: scan migrations → restore (TB_RESTORE_FROM) → open → refuse data newer than the code →
+ * when anything is pending or the app version changed: take the migration lock, re-check (another instance may have
+ * migrated meanwhile), write the pre-update snapshot (or reuse the one of an interrupted upgrade to the same version),
+ * then SDK migrations and app migrations with a lock heartbeat after each, then ONE tb_meta write (L31) and release.
+ * A fresh database (no migration applied yet) has nothing to snapshot.
+ */
+async function dataPhase(
+  manifest: Manifest,
+  def: SdkAppDefinition<string>,
+  cfg: SdkConfig,
+  env: Record<string, string | undefined>,
+  log: ReturnType<typeof createLogger>,
+  sealer: Sealer,
+  harness: { clock?: Clock; migrationLock?: { leaseMs?: number; waitMs?: number; holder?: string }; freeBytes?: (dir: string) => Promise<number> } | undefined,
+): Promise<DataPhase> {
+  const clock = harness?.clock ?? realClock;
+  let phase: BootPhase = "app_migrations";
+  let db: RawDb | null = null;
+  let lock: MigrationLock | null = null;
+  let codeSchema: SchemaVersion = { app: 0, sdk: SDK_SCHEMA };
+  let snapshot: PreUpdateSnapshot | null = null;
+  const backupCtx = (rawDb: RawDb | null): BackupContext => ({
+    manifest,
+    dataDir: cfg.dataDir,
+    backupDir: cfg.backupDir,
+    instanceId: cfg.instanceId ?? "",
+    sdkVersion: SDK_VERSION,
+    log,
+    hooks: def.backup,
+    env,
+    instanceKey: () => loadInstanceKey(cfg.dataDir, sealer),
+    bridgeId: () => (rawDb ? (metaGet<{ bridge?: { id?: string } }>(rawDb, "claim")?.bridge?.id ?? null) : null) as never,
+    codeSchema,
+    now: clock.now,
+  });
+  try {
+    const files = scanMigrations(def.migrations);
+    codeSchema = { app: files.length, sdk: SDK_SCHEMA };
+    phase = "restore";
+    const restore = await restoreAtBoot(backupCtx(null), cfg.restoreFrom);
+    if (restore && !restore.applied) log.info("restore skipped", { archive: restore.archive, reason: restore.skipped ?? "none" });
+    phase = "open";
+    db = openDb(cfg.dataDir);
+    phase = "schema";
+    const stored = storedSchema(db);
+    let pendingSdk = pendingSdkMigrations(db);
+    let pendingApp = pendingAppMigrations(db, files);
+    const fresh = stored.app === 0 && stored.sdk === 0;
+    const before = readUpgradeMeta(db);
+    if (pendingSdk.length || pendingApp.length || (!fresh && before.appVersion !== manifest.version)) {
+      phase = "lock";
+      lock = new MigrationLock(db, { clock, ...(harness?.migrationLock ?? {}) });
+      await lock.acquire();
+      if (lock.takenOverFrom) log.warn("migration lock taken over from a stopped instance", { from: lock.takenOverFrom });
+      // re-check under the lock: the instance we waited for may have done it all
+      phase = "schema";
+      pendingSdk = pendingSdkMigrations(db);
+      pendingApp = pendingAppMigrations(db, files);
+      const now = readUpgradeMeta(db);
+      if (!fresh && (pendingSdk.length || pendingApp.length || now.appVersion !== manifest.version)) {
+        phase = "snapshot";
+        const reuse = now.upgrade && now.upgrade.to === manifest.version && existsSync(join(cfg.backupDir, now.upgrade.snapshot.file)) ? now.upgrade.snapshot : null;
+        if (reuse) {
+          // an upgrade to this version was interrupted (crash, kill): its snapshot holds the data from BEFORE it; keep it
+          snapshot = reuse;
+          log.warn("resuming an interrupted upgrade; keeping its pre-update snapshot", { file: reuse.file, from: reuse.from, to: reuse.to });
+        } else {
+          snapshot = await writePreUpdateSnapshot(backupCtx(db), db, { from: now.appVersion, to: manifest.version, schema: storedSchema(db), ...(harness?.freeBytes ? { freeBytes: harness.freeBytes } : {}) });
+          metaSet(db, META.upgrade, { from: now.appVersion, to: manifest.version, snapshot, startedAt: clock.now() });
+        }
+        lock.heartbeat();
+      }
+    }
+    phase = "sdk_migrations";
+    const sdkDone = applySdkMigrations(db, () => lock?.heartbeat());
+    phase = "app_migrations";
+    const migrated = await applyAppMigrations(db, def.migrations, pendingAppMigrations(db, files), () => lock?.heartbeat());
+    const schema = storedSchema(db);
+    const prev = readUpgradeMeta(db);
+    const min = recordBoot(db, {
+      version: manifest.version,
+      sdkVersion: SDK_VERSION,
+      schema,
+      appMigrated: migrated.length > 0,
+      sdkMigrated: sdkDone.length > 0,
+      prev: { minCompatibleCode: prev.minCompatibleCode, minCompatibleSdk: prev.minCompatibleSdk },
+      snapshot,
+    });
+    lock?.release();
+    return { db, migrated, schema, codeSchema, ...min, snapshot, lastPreUpdate: prev.lastPreUpdate, restore };
+  } catch (e) {
+    const failure = bootFailure(phase, e, clock.now());
+    log.error("boot data phase failed", { phase, code: failure.code, ...(failure.file ? { file: failure.file } : {}), error: e instanceof Error ? e.message : "unknown" });
+    let schema: SchemaVersion | null = null;
+    let minCompatibleCode: string | null = null;
+    try {
+      if (db) {
+        schema = storedSchema(db);
+        minCompatibleCode = readUpgradeMeta(db).minCompatibleCode;
+      }
+    } catch {
+      // unreadable database: health says so with schemaVersion null
+    }
+    lock?.release();
+    try {
+      db?.close();
+    } catch {
+      // already closed
+    }
+    throw new DataPhaseError(failure, schema, codeSchema, minCompatibleCode, snapshot);
+  }
+}
+
+/** The RunningApp of a failed boot: status "failed", the failure, stop(); everything else throws `app_failed`. */
+function failedApp(f: { port: number; stop(): Promise<void> }, failure: BootFailure): StartedApp {
+  const unavailable = (): never => {
+    throw new TbError("app_failed", `the app failed to boot (${failure.code})`, 503);
+  };
+  let stopped: Promise<void> | null = null;
+  const stop = (): Promise<void> => {
+    stopped ??= (async () => {
+      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSignal);
+      await f.stop();
+    })();
+    return stopped;
+  };
+  const onSignal = () => void stop();
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
+  const out = { port: f.port, failure, status: () => "failed" as const, stop };
+  for (const k of ["receipts", "scopes", "keys", "audit", "backups", "jobs"]) Object.defineProperty(out, k, { get: unavailable, enumerable: false });
+  return out as unknown as StartedApp;
+}
+
 /** Reads only the TB_* names of `env`; refuses to boot on an invalid manifest, handler set or migration set. */
 /**
  * `harness` is for test harnesses only, never read from env and never set by Portal: `privilegeProc` (not part of
@@ -131,8 +321,14 @@ export async function startApp(
     port?: number;
     /** v0.1.21: job runner pacing for tests (poll, drain) */
     jobs?: Partial<{ pollMs: number; concurrency: number; drainMs: number }>;
+    /** v0.1.25 (E2): injected clock for the migration lock (lease, wait) and snapshot times */
+    clock?: Clock;
+    /** v0.1.25 (E2): migration lock lease / wait / holder id (tests: double instance, crashed holder) */
+    migrationLock?: { leaseMs?: number; waitMs?: number; holder?: string };
+    /** v0.1.25 (E2): free bytes on the backup volume (tests: the no-space guard) */
+    freeBytes?: (dir: string) => Promise<number>;
   },
-): Promise<RunningApp & { readonly port: number; readonly jobs: JobsApi }> {
+): Promise<StartedApp> {
   const def = definitions.get(app);
   if (!def) throw new TbError("app_invalid", "startApp needs the value returned by defineApp", 500);
   const v = validateManifest(def.manifest);
@@ -155,11 +351,30 @@ export async function startApp(
   logMountAtBoot(cfg.dataDir, { ephemeral: cfg.dataEphemeral, ...(harness?.mountinfoPath ? { mountinfoPath: harness.mountinfoPath } : {}), log });
 
   const sealer = createSealer(resolveKeks(cfg.dataDir, cfg.kek, cfg.kekPrevious));
-  await restoreAtBoot(
-    { manifest, dataDir: cfg.dataDir, backupDir: cfg.backupDir, instanceId: cfg.instanceId ?? "", sdkVersion: SDK_VERSION, log, hooks: def.backup, env, instanceKey: () => loadInstanceKey(cfg.dataDir, sealer), bridgeId: () => null },
-    cfg.restoreFrom,
-  );
-  const db = openStore(cfg.dataDir);
+  // v0.1.25 (E2, UPGRADE-SAFETY M1–M3): restore → schema check → lock → pre-update snapshot → migrations. Any failure
+  // here → failed mode (health + status push with the reason), never an exit and a crash loop (M2, L3).
+  let data: DataPhase;
+  try {
+    data = await dataPhase(manifest, def, cfg, env, log, sealer, harness);
+  } catch (e) {
+    if (!(e instanceof DataPhaseError)) throw e;
+    const failed = await startFailedMode({
+      manifest,
+      digest: v.digest,
+      sdkVersion: SDK_VERSION,
+      cfg,
+      log,
+      sealer,
+      failure: e.failure,
+      schemaVersion: e.schema,
+      codeSchema: e.codeSchema,
+      minCompatibleCode: e.minCompatibleCode,
+      preUpdateSnapshot: e.snapshot,
+      port: harness?.port ?? manifest.runtime.port,
+    });
+    return failedApp(failed, e.failure);
+  }
+  const db = data.db;
   const closeOnFail = <T>(fn: () => T): T => {
     try {
       return fn();
@@ -168,14 +383,9 @@ export async function startApp(
       throw e;
     }
   };
-  let migrated: { version: number; name: string }[];
-  try {
-    migrated = await runAppMigrations(db, def.migrations);
-  } catch (e) {
-    db.close();
-    throw e;
-  }
+  const migrated = data.migrated;
   const audit = createAuditLog(db, def.auditActions ?? []);
+  if (data.snapshot) await audit.record({ actor: "system", action: "backup.create", target: data.snapshot.file, detail: { kind: "preupdate", from: data.snapshot.from, to: data.snapshot.to } });
   for (const m of migrated) await audit.record({ actor: "system", action: "migration.apply", target: `${String(m.version).padStart(4, "0")}_${m.name}`, detail: null });
 
   // reseal app-own keys after a KEK rotation (CREDENTIALS §9.1)
@@ -338,6 +548,14 @@ export async function startApp(
     },
     replay: memoryReplayGuard(),
     state,
+    upgrade: {
+      schemaVersion: data.schema,
+      codeSchema: data.codeSchema,
+      minCompatibleCode: data.minCompatibleCode,
+      minCompatibleSdk: data.minCompatibleSdk,
+      preUpdateSnapshot: data.snapshot ?? data.lastPreUpdate,
+      lastRestore: data.restore,
+    },
     mountinfoPath: harness?.mountinfoPath,
     health(): HealthStatus {
       if (state.failed) return "failed";

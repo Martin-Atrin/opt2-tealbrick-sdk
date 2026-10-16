@@ -41,8 +41,28 @@ const MIME: Record<string, string> = {
 export async function health(rt: Runtime): Promise<Health & { attention?: AttentionCode }> {
   const h: Health = { status: rt.health(), sdk: rt.sdkVersion, version: rt.manifest.version, manifestDigest: rt.digest, keys: await rt.keys.status() };
   // v0.1.22 (SDK-03, spec 0.1.31 Health.backup): the scheduled-backup state (schedule, last good / failed run, failures, overdue)
-  const out = { ...h, backup: rt.backupHealth() };
+  const out = { ...h, backup: rt.backupHealth(), ...upgradeHealth(rt) };
   return rt.state.attention ? { ...out, attention: rt.state.attention } : out;
+}
+
+/**
+ * v0.1.25 (E2, SPEC-GAP additive Health/AppStatus members): the data's schema, the oldest code that can run it and the
+ * newest pre-update snapshot, so Core's health gate and rollback can decide (UPGRADE-SAFETY M4/M5).
+ */
+export function upgradeHealth(rt: Runtime): {
+  schemaVersion: { app: number; sdk: number };
+  minCompatibleCode: string | null;
+  minCompatibleSdk: string | null;
+  preUpdateSnapshot: { file: string; sha256: string; createdAt: string; from: string | null; to: string } | null;
+} {
+  const u = rt.upgrade;
+  const s = u.preUpdateSnapshot;
+  return {
+    schemaVersion: u.schemaVersion,
+    minCompatibleCode: u.minCompatibleCode,
+    minCompatibleSdk: u.minCompatibleSdk,
+    preUpdateSnapshot: s ? { file: s.file, sha256: s.sha256, createdAt: s.createdAt, from: s.from, to: s.to } : null,
+  };
 }
 
 /** Content-hashed asset directory written by the template's build-ui (`assets-<hex>/…`): immutable for a year. */
