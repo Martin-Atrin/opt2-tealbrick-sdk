@@ -45,7 +45,7 @@ function main(argv: string[]): number {
         "  pnpm conformance",
         '  git init && git add -A && git commit -m "chore: scaffold"',
         "",
-        `Push to github.com/Martin-Atrin/opt2-tealbrick-${r.id}; release with a v<semver> tag equal to the manifest version.`,
+        `Push to github.com/Tealbrick/opt2-tealbrick-${r.id}; release with a v<semver> tag equal to the manifest version.`,
       ].join("\n"),
     );
     return 0;

@@ -13,7 +13,7 @@ const PLATFORM_CI = fileURLToPath(new URL("../../../../opt2-tealbrick-platform/c
 const PLATFORM_GH = fileURLToPath(new URL("../../../../opt2-tealbrick-platform/ci/github/opt2-release.yml", import.meta.url));
 // same rule as the platform CI setup step (ci/tb-ci.ts RELEASE_URL_RE)
 const RELEASE_URL_RE =
-  /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\/[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
+  /^https:\/\/github\.com\/(?:Martin-Atrin|Tealbrick)\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\/[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
 
 function temp(t: TestContext): string {
   const dir = mkdtempSync(join(tmpdir(), "create-tb-miniapp-"));
@@ -171,7 +171,7 @@ describe("createMiniapp", () => {
     assert.equal(ci.kind, "miniapp");
     assert.deepEqual(ci.images, [{ name: "opt2-tealbrick-tasks", product: "tasks", kind: "app", manifest: "tealbrick.manifest.json" }]);
     const pipeline = read(dir, ".woodpecker/ci.yaml");
-    assert.match(pipeline, /GENERATED from Martin-Atrin\/opt2-tealbrick-platform: ci\/woodpecker\/ci\.yaml/);
+    assert.match(pipeline, /GENERATED from (?:Martin-Atrin|Tealbrick)\/opt2-tealbrick-platform: ci\/woodpecker\/ci\.yaml/);
     if (existsSync(PLATFORM_CI)) assert.equal(pipeline, readFileSync(PLATFORM_CI, "utf8"), "byte-identical copy of the platform template");
     // ci-v9 (C72): releases publish through GitHub Actions with the built-in token
     if (existsSync(PLATFORM_GH)) assert.equal(read(dir, ".github/workflows/opt2-release.yml"), readFileSync(PLATFORM_GH, "utf8"), "byte-identical copy of the platform release workflow");
@@ -249,6 +249,8 @@ describe("createMiniapp", () => {
       assert.ok(third.includes(name), `THIRD_PARTY_NOTICES.md mentions ${name}`);
     assert.equal(readJson(dir, "package.json").license, "Apache-2.0");
     assert.equal(readJson(dir, "tealbrick.manifest.json").source.license, "Apache-2.0", "the manifest names the same licence");
+    assert.equal(readJson(dir, "tealbrick.manifest.json").source.repo, "https://github.com/Tealbrick/opt2-tealbrick-alpha", "C206: source repo is under the Tealbrick org");
+    assert.ok(!third.includes("github.com/Martin-Atrin/"), "C206: source links point at the Tealbrick org");
   });
 
   it("derives the name from the id when --name is omitted", (t) => {
@@ -304,6 +306,7 @@ describe("cli", () => {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Created Hello World \(hello\) in hello/);
     assert.match(r.stdout, /pnpm install/);
+    assert.match(r.stdout, /Push to github\.com\/Tealbrick\/opt2-tealbrick-hello;/);
     assert.equal(readJson(join(cwd, "hello"), "tealbrick.manifest.json").name, "Hello World");
   });
 
