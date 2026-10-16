@@ -33,6 +33,13 @@ function appAt(version: string, migrations: string, port: number) {
   return defineApp({ manifest, migrations, handlers });
 }
 
+/**
+ * CI runs as root: without this the first startApp drops THIS test process to uid 1000 (C53), which then cannot reach the
+ * temp dirs. Tests keep their uid (the privilege drop has its own tests).
+ */
+const KEEP_UID = { privilegeProc: { getuid: () => 4242 } };
+const boot = (app: Parameters<typeof startApp>[0], env: Record<string, string>, harness: Parameters<typeof startApp>[2] = {}) => startApp(app, env, { ...KEEP_UID, ...harness });
+
 /** One data dir; `files` per app version live in their own code dir (an image per version). */
 function rig() {
   const t = tempDir("tb-upgrade-");
@@ -79,7 +86,7 @@ async function health(port: number) {
 
 async function seedV1(r: ReturnType<typeof rig>) {
   const v1 = r.code("v1", V1);
-  const a = await startApp(appAt("1.0.0", v1, await freePort()), r.env);
+  const a = await boot(appAt("1.0.0", v1, await freePort()), r.env);
   await a.stop();
   r.sql((db) => db.exec("INSERT INTO notes VALUES ('n1', 'nb', 'first'), ('n2', 'nb', 'second')"));
   return v1;
@@ -92,7 +99,7 @@ test("M1: an update with pending migrations writes the pre-update snapshot first
     assert.equal(r.meta("app_version"), "1.0.0");
     assert.equal(r.meta("min_compatible_code"), "1.0.0", "the first boot applied 0001");
     const port = await freePort();
-    const b = await startApp(appAt("2.0.0", r.code("v2", V2), port), r.env);
+    const b = await boot(appAt("2.0.0", r.code("v2", V2), port), r.env);
     try {
       assert.equal(b.status(), "ok");
       const h = await health(port);
@@ -116,7 +123,7 @@ test("M1: an update with pending migrations writes the pre-update snapshot first
     assert.equal(r.sql((db) => db.prepare("SELECT count(*) AS n FROM tb_audit WHERE action = 'backup.create' AND target = 'tb-preupdate-to-2.0.0.tar.gz'").get())?.n, 1);
     // a plain restart of the same version writes no new snapshot
     const mtime = statSync(r.snapPath("2.0.0")).mtimeMs;
-    const c = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
+    const c = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
     await c.stop();
     assert.equal(statSync(r.snapPath("2.0.0")).mtimeMs, mtime);
   } finally {
@@ -138,7 +145,7 @@ test("M2: a migration that fails half-way → failed mode with the reason (no ex
     const v1 = await seedV1(r);
     const v2 = r.code("v2b", V2_BROKEN);
     const port = await freePort();
-    const b = await startApp(appAt("2.0.0", v2, port), r.env);
+    const b = await boot(appAt("2.0.0", v2, port), r.env);
     let sha: string;
     try {
       assert.equal(b.status(), "failed");
@@ -163,17 +170,17 @@ test("M2: a migration that fails half-way → failed mode with the reason (no ex
     assert.equal(r.meta("upgrade_in_progress").to, "2.0.0");
     // a restart of the broken version (Railway restart) fails the same way and does NOT overwrite the snapshot with
     // the half-migrated data
-    const b2 = await startApp(appAt("2.0.0", v2, await freePort()), r.env);
+    const b2 = await boot(appAt("2.0.0", v2, await freePort()), r.env);
     assert.equal(b2.status(), "failed");
     await b2.stop();
     // the old code on the half-migrated data refuses explicitly (was: "applied migration 2 is missing")
-    const old = await startApp(appAt("1.0.0", v1, await freePort()), r.env);
+    const old = await boot(appAt("1.0.0", v1, await freePort()), r.env);
     assert.equal(old.status(), "failed");
     assert.equal(old.failure?.code, "app_schema_newer");
     await old.stop();
     // rollback = old image + TB_RESTORE_FROM=<the deterministic snapshot name> (what Core sets)
     const rbPort = await freePort();
-    const rb = await startApp(appAt("1.0.0", v1, rbPort), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
+    const rb = await boot(appAt("1.0.0", v1, rbPort), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
     try {
       assert.equal(rb.status(), "ok");
       const h = await health(rbPort);
@@ -187,7 +194,7 @@ test("M2: a migration that fails half-way → failed mode with the reason (no ex
     assert.match(restored, /^tb-preupdate-to-2\.0\.0\.tar\.gz@/);
     // TB_RESTORE_FROM still set (Core clears it after health): a restart does not restore again; new writes survive
     r.sql((db) => db.exec("INSERT INTO notes VALUES ('n3', 'nb', 'after rollback')"));
-    const rb2 = await startApp(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
+    const rb2 = await boot(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
     assert.equal(rb2.status(), "ok");
     await rb2.stop();
     assert.equal(r.rows().length, 3);
@@ -204,14 +211,14 @@ test("M2: failed mode pushes the failure to the bridge (readiness degraded + att
   try {
     const bridgeUrl = await bridge.start(await slice(w, "jotter"));
     const env = { TB_INSTANCE_ID: w.ins, TB_ENROL_CODE: "tbe_test", TB_BRIDGE_URL: bridgeUrl, TB_PORTAL_KEYS: JSON.stringify({ keys: [w.portal.publicJwk] }), TB_DATA_DIR: r.data, TB_DATA_EPHEMERAL: "1", TB_LOG_LEVEL: "error" };
-    const a = await startApp(appAt("1.0.0", r.code("v1", V1), await freePort()), env, testRoots(w));
+    const a = await boot(appAt("1.0.0", r.code("v1", V1), await freePort()), env, testRoots(w));
     await until(async () => a.status() === "ok");
     await a.stop();
     const healthy = bridge.statuses.at(-1) as Record<string, any>;
     assert.deepEqual(healthy.schemaVersion, { app: 1, sdk: SDK_SCHEMA }, "a healthy status carries the schema too");
     assert.equal(healthy.minCompatibleCode, "1.0.0");
     bridge.statuses.length = 0;
-    const b = await startApp(appAt("2.0.0", r.code("v2b", V2_BROKEN), await freePort()), env, testRoots(w));
+    const b = await boot(appAt("2.0.0", r.code("v2b", V2_BROKEN), await freePort()), env, testRoots(w));
     try {
       const s = await until(async () => bridge.statuses.find((x) => (x as { readiness?: string }).readiness === "degraded") as Record<string, any> | undefined);
       assert.equal(s.version, "2.0.0");
@@ -239,11 +246,11 @@ test("M2 lock: a second instance waits for the first (injected clock), then find
     const clock = fakeClock(Date.now(), async (n) => {
       if (n !== 2 || aRan) return;
       aRan = true; // while B waits: A (same holder id as the row) migrates and releases
-      const a = await startApp(appAt("2.0.0", v2, await freePort()), r.env, { migrationLock: { holder: "A" } });
+      const a = await boot(appAt("2.0.0", v2, await freePort()), r.env, { migrationLock: { holder: "A" } });
       assert.equal(a.status(), "ok");
       await a.stop();
     });
-    const b = await startApp(appAt("2.0.0", v2, await freePort()), r.env, { clock, migrationLock: { holder: "B" } });
+    const b = await boot(appAt("2.0.0", v2, await freePort()), r.env, { clock, migrationLock: { holder: "B" } });
     try {
       assert.ok(aRan);
       assert.equal(b.status(), "ok");
@@ -268,7 +275,7 @@ test("M2 lock: a live holder that never finishes → failed mode migration_locke
       r.sql((db) => db.prepare("UPDATE tb_migration_lock SET until = ?").run(clock.t + 60_000));
     });
     r.sql((db) => db.prepare("INSERT INTO tb_migration_lock (id, holder, until) VALUES (1, 'other', ?)").run(clock.t + 60_000));
-    const b = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env, { clock, migrationLock: { waitMs: 10_000 } });
+    const b = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env, { clock, migrationLock: { waitMs: 10_000 } });
     assert.equal(b.status(), "failed");
     assert.deepEqual([b.failure?.phase, b.failure?.code], ["lock", "migration_locked"]);
     await b.stop();
@@ -307,7 +314,7 @@ export function up(db) {
 import { fixtureManifest } from ${JSON.stringify(fixture)};
 const manifest = fixtureManifest(${port}); manifest.version = "2.0.0";
 const h = { note_create: { scope: () => "nb", run: async () => ({}) }, note_get: async () => ({}), note_delete: async () => ({}), notebook_rename: async () => ({}) };
-await startApp(defineApp({ manifest, migrations: ${JSON.stringify(v2)}, handlers: h }), { TB_DATA_DIR: ${JSON.stringify(r.data)}, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" });
+await startApp(defineApp({ manifest, migrations: ${JSON.stringify(v2)}, handlers: h }), { TB_DATA_DIR: ${JSON.stringify(r.data)}, TB_STANDALONE: "1", TB_LOG_LEVEL: "error" }, { privilegeProc: { getuid: () => 4242 } });
 `,
     );
     const child = spawn(process.execPath, [script], { stdio: "ignore" });
@@ -323,7 +330,7 @@ await startApp(defineApp({ manifest, migrations: ${JSON.stringify(v2)}, handlers
     rmSync(flag);
     // restart (Railway restarts the container): the lease must have run out; a fake clock 3 minutes ahead
     const clock = fakeClock(Date.now() + 3 * 60_000);
-    const b = await startApp(appAt("2.0.0", v2, await freePort()), r.env, { clock });
+    const b = await boot(appAt("2.0.0", v2, await freePort()), r.env, { clock });
     try {
       assert.equal(b.status(), "ok");
     } finally {
@@ -332,7 +339,7 @@ await startApp(defineApp({ manifest, migrations: ${JSON.stringify(v2)}, handlers
     assert.deepEqual(r.appVersions(), [1, 2, 3]);
     assert.equal(r.meta("last_preupdate").sha256, snapSha, "the snapshot of the pre-update data was kept, not rewritten from half-migrated data");
     // rollback still possible
-    const rb = await startApp(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
+    const rb = await boot(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
     assert.equal(rb.status(), "ok");
     await rb.stop();
     assert.deepEqual(r.appVersions(), [1]);
@@ -347,18 +354,18 @@ test("M3: restore refuses a NEWER app version, a newer schema and another produc
   try {
     const v1 = await seedV1(r);
     const v2 = r.code("v2", V2);
-    const b = await startApp(appAt("2.0.0", v2, await freePort()), r.env);
+    const b = await boot(appAt("2.0.0", v2, await freePort()), r.env);
     const { file: v2Backup } = await b.backups.runNow();
     await b.stop();
     // the v1 code is given a v2 backup (written by a newer version)
     const before = r.appVersions();
-    const a = await startApp(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: v2Backup });
+    const a = await boot(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: v2Backup });
     assert.equal(a.status(), "failed");
     assert.deepEqual([a.failure?.phase, a.failure?.code, a.failure?.reason], ["restore", "restore_failed", "version_newer"]);
     await a.stop();
     assert.deepEqual(r.appVersions(), before, "nothing replaced");
     // a 1.0.0 code that claims a newer version number but has fewer migrations: the archived DB schema is checked
-    const fake = await startApp(appAt("3.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: v2Backup });
+    const fake = await boot(appAt("3.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: v2Backup });
     assert.equal(fake.status(), "failed");
     assert.equal(fake.failure?.reason, "schema_newer");
     await fake.stop();
@@ -366,11 +373,11 @@ test("M3: restore refuses a NEWER app version, a newer schema and another produc
     const other = fixtureManifest(await freePort());
     other.id = "other-app";
     other.version = "9.0.0";
-    const o = await startApp(defineApp({ manifest: other, migrations: v2, handlers }), { ...r.env, TB_RESTORE_FROM: v2Backup });
+    const o = await boot(defineApp({ manifest: other, migrations: v2, handlers }), { ...r.env, TB_RESTORE_FROM: v2Backup });
     assert.equal(o.failure?.reason, "product_mismatch");
     await o.stop();
     // the pre-update snapshot (v1 data) restored by the v2 code: older data, migrated forward on the same boot
-    const c = await startApp(appAt("2.0.0", v2, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
+    const c = await boot(appAt("2.0.0", v2, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
     assert.equal(c.status(), "ok");
     await c.stop();
     assert.deepEqual(r.appVersions(), [1, 2, 3]);
@@ -384,23 +391,23 @@ test("M3: rollback rules of a pre-update snapshot: missing + compatible data →
   try {
     const v1 = await seedV1(r);
     // missing snapshot, data at the old schema (the failed version stopped before its snapshot)
-    const a = await startApp(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
+    const a = await boot(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
     assert.equal(a.status(), "ok");
     await a.stop();
     // a version change without a migration (1.0.1 has the same files): snapshot written; rolling back keeps the data
-    const b = await startApp(appAt("1.0.1", r.code("v101", V1), await freePort()), r.env);
+    const b = await boot(appAt("1.0.1", r.code("v101", V1), await freePort()), r.env);
     await b.stop();
     assert.ok(existsSync(r.snapPath("1.0.1")));
     r.sql((db) => db.exec("INSERT INTO notes VALUES ('n9', 'nb', 'written by 1.0.1')"));
-    const c = await startApp(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("1.0.1") });
+    const c = await boot(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("1.0.1") });
     assert.equal(c.status(), "ok");
     await c.stop();
     assert.equal(r.rows().length, 3, "same schema: no restore, the 1.0.1 write is kept");
     // missing snapshot with data newer than the code → refused
-    const d = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
+    const d = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
     await d.stop();
     rmSync(r.snapPath("2.0.0"));
-    const e = await startApp(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
+    const e = await boot(appAt("1.0.0", v1, await freePort()), { ...r.env, TB_RESTORE_FROM: preUpdateName("2.0.0") });
     assert.equal(e.status(), "failed");
     assert.equal(e.failure?.reason, "snapshot_missing");
     await e.stop();
@@ -413,10 +420,10 @@ test("M3: data newer than the code → failed mode schema_newer (app and SDK sco
   const r = rig();
   try {
     const v1 = await seedV1(r);
-    const b = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
+    const b = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
     await b.stop();
     const port = await freePort();
-    const a = await startApp(appAt("1.0.0", v1, port), r.env);
+    const a = await boot(appAt("1.0.0", v1, port), r.env);
     try {
       assert.equal(a.failure?.code, "app_schema_newer");
       const h = await health(port);
@@ -427,7 +434,7 @@ test("M3: data newer than the code → failed mode schema_newer (app and SDK sco
       await a.stop();
     }
     r.sql((db) => db.prepare("INSERT INTO tb_migrations (scope, version, name, sha256, applied_at) VALUES ('sdk', ?, 'future', 'x', 0)").run(SDK_SCHEMA + 1));
-    const c = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
+    const c = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
     assert.equal(c.failure?.code, "sdk_schema_newer");
     await c.stop();
   } finally {
@@ -439,7 +446,7 @@ test("M1: no free space for the snapshot → failed mode preupdate_snapshot_no_s
   const r = rig();
   try {
     await seedV1(r);
-    const b = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env, { freeBytes: async () => 0 });
+    const b = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env, { freeBytes: async () => 0 });
     assert.deepEqual([b.failure?.phase, b.failure?.code], ["snapshot", "preupdate_snapshot_no_space"]);
     await b.stop();
     assert.deepEqual(r.appVersions(), [1]);
@@ -455,7 +462,7 @@ test("M1: retention keeps the newest 3 pre-update snapshots; cron backups are se
     await seedV1(r);
     const v1 = r.code("v1", V1);
     for (const v of ["1.0.1", "1.0.2", "1.0.3", "1.0.4"]) {
-      const a = await startApp(appAt(v, v1, await freePort()), r.env);
+      const a = await boot(appAt(v, v1, await freePort()), r.env);
       if (v === "1.0.4") assert.deepEqual(await a.backups.list(), []);
       await a.stop();
       await new Promise((res) => setTimeout(res, 15)); // distinct mtimes
@@ -471,7 +478,7 @@ test("M1: retention keeps the newest 3 pre-update snapshots; cron backups are se
 test("a fresh install writes no snapshot; semver compare", async () => {
   const r = rig();
   try {
-    const a = await startApp(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
+    const a = await boot(appAt("2.0.0", r.code("v2", V2), await freePort()), r.env);
     await a.stop();
     assert.deepEqual(r.backups(), []);
     assert.equal(r.meta("app_version"), "2.0.0");
