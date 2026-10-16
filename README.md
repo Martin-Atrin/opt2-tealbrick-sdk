@@ -1,25 +1,62 @@
-# opt2-tealbrick-sdk
+# Tealbrick SDK
 
-Teal Brick opt2: Miniapp SDK (manifest, miniapp-sdk, create-tealbrick-miniapp, conformance).
+The owner of every crypto and decision primitive (`@opt2-tealbrick/manifest`), the mini app runtime (`@opt2-tealbrick/miniapp-sdk`), the conformance suite (`@opt2-tealbrick/conformance`) and the scaffold (`create-tealbrick-miniapp`).
 
-**Status: opt2 build (clean-room v2 of Teal Brick), work in progress.** This repository is part of the opt2 build and lives under `Martin-Atrin` during the build; it moves to the Teal Brick organisation as one clean commit when opt2 is released. It is not the current production system.
+- Repository: `Tealbrick/opt2-tealbrick-sdk` (GitHub organisation `Tealbrick`)
+- Visibility target: PRIVATE. The repo is PUBLIC for now (the flip is held for the org Actions billing). Consumers install from the dist host (`Tealbrick/opt2-tealbrick-dist`).
+- Licence: declared MIT in the package files today. The target is the Tealbrick SDK licence. The Apache-2.0 apps depend on and bundle these packages, so a grant text for redistribution is still needed.
+- Status: manifest 0.1.18, miniapp-sdk 0.1.25 (upgrade safety), conformance 0.1.18, create-tealbrick-miniapp 0.1.14. CI template ci-v9.9. No app uses miniapp-sdk 0.1.25 yet.
 
-Owner lane: Lead · Specs & SDK.
+Do not put secrets, tokens, keys, customer data or personal data in this repository, its issues or its pull requests. This repository is public for now and must stay clean either way: no API keys, tokens, passwords, private keys, `.env` files (use `.env.example` with placeholders), connection strings, personal names, private agent configurations or customer data. Every CI run starts with a secret scan (gitleaks, a step in `.woodpecker/ci.yaml`). GitHub secret scanning with push protection is enabled. An optional local guard is `pre-commit install`. If a secret is committed, rotate it first, then remove it from history.
 
-## No secrets policy
+## What this repo is and is not
 
-This repository is public. It must never contain secrets or personal data:
+The SDK is the one definition of what a mini app is: a spec, a runtime library, a template and conformance checks. It makes an app work standalone (no Portal) and behind a bridge.
 
-- No API keys, tokens, passwords, private keys, deployment secrets, `.env` files or connection strings. Use `.env.example` with placeholder values only.
-- Runtime secrets live in the deployment platform (Railway variables, Woodpecker secrets) and are copied between services without printing them.
-- No personal names, private agent configurations or customer data.
-- Every push runs a secret scan (`.woodpecker/secret-scan.yaml`, gitleaks). GitHub secret scanning with push protection is enabled. Optional local guard: `pre-commit install`.
-- If a secret is committed anyway: rotate it first, then remove it from history.
+`manifest` has pure, synchronous functions with no I/O, so the bridge and every app run identical code. Copying a primitive elsewhere is a CI failure (CORE section 3 in `Tealbrick/opt2-tealbrick-specs`).
 
-## CI
+## Quick start
 
-Woodpecker CI (shared opt2 pipeline template from `opt2-tealbrick-platform`).
+pnpm workspace, TypeScript run directly by Node 24+ (type stripping).
+
+```sh
+corepack enable && pnpm install --frozen-lockfile --ignore-scripts
+pnpm typecheck && pnpm lint && pnpm test      # builds manifest first
+pnpm conformance
+```
+
+New app: `npx create-tealbrick-miniapp <dir> --id <slug> --name "<Name>"` (from the released tarball).
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `packages/manifest/src` | JCS, digests, JWS, keys and key sets, token verifiers, sealing, `gate()` and `authorize()` (`decision.ts`), cron, hook helpers, privilege drop, version helpers, vocabulary re-exports |
+| `packages/miniapp-sdk/src/server` | `defineApp` and `startApp`: store, receipts and holds, scopes, keys, secrets, backups, jobs, status, person sessions, bridge client and routes, trust |
+| `packages/miniapp-sdk/src/client` | React client (`TbProvider`, `useHolds`, `callOp`) |
+| `packages/miniapp-sdk/src/exec`, `src/gen` | `tb-exec` (companion service wrapper) and `tb-gen` (openapi, kit, docs, railway, check) |
+| `packages/conformance/src` | Fake Portal, fake bridge, checks, runners for app, bridge, core, relay, manifest |
+| `packages/create-tealbrick-miniapp/template` | The scaffold (manifest, src, UI, migrations, Dockerfile, CI files, licence files) |
+| `tealbrick-ci.json` | Repo-specific CI settings (kind `library`, conformance on, `distBaseUrl`) |
+
+## Configuration
+
+App runtime variables (read by `miniapp-sdk`): `TB_INSTANCE_ID`, `TB_SERVICE`, `TB_ENROL_CODE`, `TB_BRIDGE_URL`, `TB_PORTAL_KEYS`, `TB_KEK`, `TB_KEK_PREVIOUS`, `TB_DATA_DIR` (required), `TB_BACKUP_DIR`, `TB_STANDALONE`, `TB_STANDALONE_RESET`, `TB_RESTORE_FROM`, `TB_LOG_LEVEL`, `TB_DATA_EPHEMERAL` (tests only). Unknown `TB_*` names raise a warning.
+
+## CI and release
+
+Woodpecker CI with the shared opt2 pipeline template ci-v9.9 (`.woodpecker/ci.yaml` and `.github/workflows/opt2-release.yml` are generated copies; do not edit them, change `tealbrick-ci.json` or the template in `Tealbrick/opt2-tealbrick-platform`). Library pins come from the dist host.
+
+Tag `<package dir>-v<x>`: `manifest-v`, `miniapp-sdk-v`, `conformance-v`, `create-tealbrick-miniapp-v`. The Action installs, builds, rewrites in-repo `workspace:` dependencies to released tarball URLs (the dependency must be released first), packs, runs the pack guard, and attaches the tarball plus `.sha256` and `.integrity`. Never npm.
 
 ## Language
 
-New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
+New code is TypeScript (Node 24+).
+
+## Documentation
+
+- `ARCHITECTURE.md` explains the design.
+- `CONTRIBUTING.md` explains how to change it.
+- `Tealbrick/opt2-tealbrick-specs`: `docs/SDK-API.md`, `MANIFEST.md`, `CONFORMANCE.md`.
+- `Tealbrick/opt2-tealbrick-samples`: fixture apps.
+- System documentation (overview, environments, runbooks) lives in the private repo Tealbrick/opt2-tealbrick-docs.

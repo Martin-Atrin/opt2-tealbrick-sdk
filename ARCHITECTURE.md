@@ -1,0 +1,52 @@
+# Tealbrick SDK: architecture
+
+State: verified against the repo on 2026-10-16. Claims cite paths in this repo. Anything not verified is marked UNVERIFIED. For the whole system see the system `ARCHITECTURE.md` and `SYSTEM-OVERVIEW.md`.
+
+## 1. `@opt2-tealbrick/manifest` (crypto and decisions)
+
+- **Sealing** (`seal.ts`): AES-256-GCM, 12 byte IV, blob `{v:1, alg, kek, iv, ct, tag}`, AAD `tb:seal:<purpose>:<record id>` so a blob cannot move to another record. `TB_KEK` is exactly 32 bytes (base64url 43 chars or hex 64 chars); anything else throws. Key id `kek_` + first 16 hex of sha256. `TB_KEK_PREVIOUS` opens old blobs; `needsReseal` drives the reseal. The doc comment about SHA-256 reduction of long values is stale: the code throws.
+- **JWS** (`jws.ts`): sign and verify with required `typ`, `aud`, `iss`, lifetime caps; 30 s skew; 4 MiB document cap; external signer support for offline root signing; replay guard.
+- **Key sets** (`keyset.ts`): `portalRootKeys(channel)`, `signKeySetStatement`, `verifyKeySetStatement`, `trustedPortalKeys`, `isPrivateInternalUrl`.
+- **Tokens** (`tokens.ts`): verify and sign grants, call proofs (op, hook, bridge-op), tickets, slices, configs, pairing codes, agent sessions, release index.
+- **Decisions** (`decision.ts`): `gate()` for the bridge (paused, grant, CRUD, audience, scope type, workflow) and `authorize()` for the app (paused per slice, grant, scope access, hold by hook, hold family, caps, money always held). `ANY_GRANT_OPS` are `tb.hold_status` and `tb.holds_pending`.
+- **Other shared rules**: `dropPrivileges` (root to uid 1000, used by the SDK, `tb-exec` and the bridge), `sdkMajorOf` (0.x counts as major 1), `requiredBridgeVersion` and `BRIDGE_FEATURES`, `MIN_BRIDGE_FREE_WF` 0.1.19 and `MIN_SDK_FREE_WF` 0.1.16, `deriveIdempotencyKey`, `tagsMatch` (an empty `anyOf` passes nothing; **do not use 0.1.15**), `isValidLaunchPath`, `hookResponseProblem`, `reduceBeforeChain`, cron helpers with IANA time zones, manifest validation and digest.
+- Vocabularies (`vocab.ts`) are re-exports from the spec package. They are declared once.
+
+## 2. `@opt2-tealbrick/miniapp-sdk` (runtime)
+
+`defineApp({manifest, handlers, hooks?, dynamic?, publicRoutes?, migrations, backup?, events?, onStart?, onStop?, jobs?, pendingCount?, attention?})` then `startApp(app, process.env)`. Boot refuses an invalid manifest, a handler set that does not match the ops (exactly one handler per non-dynamic op), or an invalid migration set.
+
+- **Store**: one SQLite file `TB_DATA_DIR/app.db` (`node:sqlite`, WAL). SDK tables `tb_*`: meta, receipts, idempotency, scope instances, scopes, scope defaults, agents, sessions, used jti, keys, audit, secrets, jobs, cap usage, migrations. Apps never open their own database.
+- **Migrations**: `migrations/NNNN_name.sql` or `.ts`, forward-only, gap-free from 0001, one transaction each, sha256 recorded. A changed, missing, misnamed or `down` migration stops boot with `migration_invalid`.
+- **Receipts and holds**: ONE table, `tb_receipts`. A hold is a receipt row. Statuses: run, held, approved, denied, refused, failed, after_failed. Raw input is never stored (`inputDigest` only). One approval per call: repeat the same call within 15 minutes of the decision; matched by (caller, op, inputDigest); consumed once. Pending TTL 15 minutes (max 24 hours); expiry denies with `decidedBy: "expiry"`.
+- **Hold view binding** (0.1.23, 0.1.24): see the system `ARCHITECTURE.md` section 3.4. Code: `src/server/ops.ts` (`dynamicHoldText`, `holdViewDigest`, `HOLD_VIEW_UNREADABLE`).
+- **Scopes**: manifest `scopes[]` with `defaultGrants` (own, shared, all) applied on first sight of an agent. Effective access is `grant.crud ∩ op.crud ∩ scope access`.
+- **Keys**: `getKey(name)` prefers an app-own key (sealed in `tb_keys`) over the bridge's account default (`GET /tb/v1/keys/<name>`). Without a required key readiness is `needs_keys`.
+- **Secrets**: `ctx.secrets {put, get, delete}` sealed under `TB_KEK`, excluded from export, sealed inside backups. The one app-secret mechanism (C31).
+- **Backups**: cron from the manifest, `tb-backup-<UTC>.tar.gz` (`tealbrick.backup/1`) with `app.db` (VACUUM INTO) and per-service dumps through `tb-exec`; restore with `TB_RESTORE_FROM` at next boot (every part hash checked); export `tealbrick.export/1`. Instance key and KEK are never archived. Health carries backup status; the SDK raises attention for invalid, never, failed or overdue backups.
+- **Status loop**: `POST <TB_BRIDGE_URL>/tb/v1/status?wait=60` with readiness, versions, scopes revision, slice revision, keys revision, `pendingHolds`, `attention`. A slice older than 12 hours makes ops answer 503 `slice_stale`; the person UI stays up.
+- **Routes the SDK mounts**: `/tb/v1/ops/:op`, `/tb/v1/hooks/:hookId`, `/tb/v1/bridge/{catalog,resolve,mark,scope-summary}`, `/tb/v1/manifest`, `/tb/v1/openapi.json`, `/tb/v1/health`, `/a/<product>/tb/launch`, `/a/<product>/tb/v1/{session,logout,ops/:op}`, UI static, declared public routes.
+- **Person session**: cookie `tb_session` (32 random bytes, sha256 stored, `Path=/a/<product>/; HttpOnly; Secure; SameSite=Lax`, 8 hours) and CSRF header `TB-CSRF`.
+- **Privilege drop**: a process that starts as root chowns the volumes to uid 1000 and drops before opening files, keys or listeners. A mount-point guard refuses to claim an identity on ephemeral disk (L9).
+- **Jobs** (0.1.21): `ctx.jobs` (leased, resumable ticks with checkpoints), `ctx.schedule` (scheduled ops re-authorized at fire time), `onStop`. Types are local to the SDK, not in the spec package.
+- **Companion calls**: `ctx.callApp(product, op, input)` goes through the bridge; an undeclared op throws `companion_undeclared` before any network call; `grant_stale` or `grant_expired` re-reads the slice and retries once.
+- **`tb-exec`**: wrapper entrypoint for companion containers. Claims as a service, fetches declared keys, spawns the upstream process with them as env, control port 7077 (backup and restore). Drops privileges only if the service opts in (C54). **`tb-gen`**: deterministic `openapi | kit | docs | railway | check | all`.
+
+### Upgrade-safe boot (0.1.25, E2)
+
+Boot order: scan migrations, restore from `TB_RESTORE_FROM` if set, open, refuse data newer than the code (`app_schema_newer`, `sdk_schema_newer`), then, if a migration is pending or the app version changed, take the migration lock (table `tb_migration_lock`, 120 s lease; a second instance waits up to 150 s, then `migration_locked`), write a pre-update snapshot (`TB_BACKUP_DIR/tb-preupdate-to-<version>.tar.gz`, backup `kind: "preupdate"`, newest 3 kept, never listed by `backups.list()`, `preupdate_snapshot_no_space` when free space is under 2x the database, an interrupted upgrade reuses its snapshot), then migrate with a heartbeat per file in one `tb_meta` transaction. New `tb_meta` keys: `app_version`, `schema`, `min_compatible_code`, `min_compatible_sdk`, `upgrade_in_progress`, `last_preupdate`. **Failed mode:** any failure in restore, open, schema, lock, snapshot or migrations no longer exits (no Railway crash loop). `GET /tb/v1/health` answers 200 `FailedHealth {status: "failed", failure, attention, schemaVersion, codeSchema, minCompatibleCode, preUpdateSnapshot}`; `/tb/v1/manifest` is served; every other route answers 503 `app_failed`; a claimed instance pushes status `degraded` with the failure every 15 s. **Restore checks** refuse before replacing anything: `product_mismatch`, `version_newer`, `schema_newer`. A restored database drops the lock row. No new environment variable names. Code: `src/server/upgrade.ts`, `failed.ts`, `backup.ts`, `app.ts`; test `test/upgrade.test.ts`. Core's side is E3 (see the system `ARCHITECTURE.md` section 2.8).
+
+## 3. `@opt2-tealbrick/conformance`
+
+`tb-conformance app|manifest|core|bridge|relay`. Fakes (Portal, bridge, upstream) are generated from the spec and the manifest and must derive from the SDK's shared rules, never from the side under test (L1). The catalog has 558 distinct check ids (manifest 21, app 124, bridge 252, core 154, relay 10). Waivers are dated and per check id (`--waive <id>@<untilVersion>` or `tealbrick-conformance.json`), covering only while the suite version is below `until`. Test roots are passed in `TBCONF_PORTAL_ROOT_KEYS`. Conformance is not release evidence: QA is. Note: the package also depends on `miniapp-sdk` for the `real_app` bridge group (an intentional exception not in `CONFORMANCE.md`).
+
+## 4. Template
+
+`create-tealbrick-miniapp` writes a working app: manifest with one read op, one write op and one scope type, `src/`, a React UI, migrations, skills, Dockerfile, CI files, Apache-2.0 `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`. The Dockerfile pattern is two stages on `node:24-slim` pinned by digest, `pnpm install --frozen-lockfile --ignore-scripts`, build, prune, `ENV TB_DATA_DIR=/data TB_BACKUP_DIR=/data/backup`, `USER node`, no `VOLUME`. Template pins lag the repo today (SDK 0.1.19, conformance 0.1.16, ui 0.2.3).
+
+## 5. Known gaps
+
+- Package pins differ: manifest pins spec 0.1.27, miniapp-sdk 0.1.35, conformance 0.1.31 (a workspace build sees three spec versions).
+- `PORTAL_ROOT_CHANNEL` is hard-coded to `"dev"` in `packages/miniapp-sdk/src/server/trust.ts`. A stable build needs production roots.
+- Template pins lag (SDK 0.1.19, conformance 0.1.16, ui 0.2.3); its CI copies were moved to ci-v9.9. Test counts in old release notes are stale.
+- The `conformance` stage of CI runs only packages that define a `conformance` script (UNVERIFIED which).
