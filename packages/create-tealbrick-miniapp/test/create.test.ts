@@ -153,9 +153,9 @@ describe("createMiniapp", () => {
     const tb = Object.entries<string>({ ...pkg.dependencies, ...pkg.devDependencies }).filter(([n]) => n.startsWith("@opt2-tealbrick/"));
     assert.deepEqual(tb.map(([n]) => n).sort(), ["@opt2-tealbrick/conformance", "@opt2-tealbrick/manifest", "@opt2-tealbrick/miniapp-sdk", "@opt2-tealbrick/ui"]);
     for (const [n, url] of tb) assert.match(url, RELEASE_URL_RE, n);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /\/ui-v0\.2\.3\//);
-    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /\/miniapp-sdk-v0\.1\.19\//);
-    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /\/conformance-v0\.1\.16\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/ui"], /[/-]ui-v0\.2\.3\//);
+    assert.match(pkg.dependencies["@opt2-tealbrick/miniapp-sdk"], /[/-]miniapp-sdk-v0\.1\.19\//);
+    assert.match(pkg.devDependencies["@opt2-tealbrick/conformance"], /[/-]conformance-v0\.1\.16\//);
     // BSA-07: the ONE app shell from ui, no local frame
     const ui = read(dir, "src/ui/App.tsx");
     assert.match(ui, /import \{[^}]*\bAppShell\b[^}]*\} from "@opt2-tealbrick\/ui";/);
