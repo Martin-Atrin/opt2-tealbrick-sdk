@@ -607,13 +607,16 @@ describe("validateAppFiles: path bases (MANIFEST §3, v0.1.11 (C70))", async () 
 
 describe("C107 (spec 0.1.16): outward ops and hold families", () => {
   test("outward op with family outward or identity is valid; absent is still accepted (one release of grace)", () => {
-    for (const hf of ["outward", "identity", "first_contact", undefined]) {
+    for (const hf of ["outward", "identity", "first_contact", "public_link", undefined]) {
       const r = mutate((m) => {
         m.operations.push({ id: "post_send", title: "Send", description: "Send a post.", input: { type: "object" }, output: { type: "object" }, crud: ["create"], effect: "outward", idempotency: "required", receipt: true, audience: "agent", ...(hf ? { holdFamily: hf } : {}) });
       });
       assert.equal(r.ok, true, String(hf));
     }
   });
+  test("C232: public_link is not valid for a write effect", refuses("M-OP-4", "hold_family_invalid", (m) => {
+    m.operations.push({ id: "page_put", title: "Put", description: "Put.", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: true, audience: "agent", holdFamily: "public_link" });
+  }));
   test("outward / identity are not valid for write or destructive effects", refuses("M-OP-4", "hold_family_invalid", (m) => {
     m.operations.push({ id: "note_put", title: "Put", description: "Put.", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: true, audience: "agent", holdFamily: "outward" });
   }));
