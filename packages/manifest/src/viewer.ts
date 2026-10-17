@@ -2,8 +2,9 @@
 // (bridge image, TB_ROLE=views), the bridge private views route, the SDK and conformance (L1). Pure, no Node APIs.
 
 /** The response headers every views response carries, even when the app sends none. The app may replace ONLY
- *  `Content-Security-Policy` (and may mark content-hashed assets `Cache-Control: … immutable`). No X-Frame-Options: framing
- *  is controlled by the app's CSP `frame-ancestors <viewUrl> <publicUrl>` (owner preview from the main origin). */
+ *  `Content-Security-Policy`, and `Cache-Control` on static asset paths (`/v/<product>/_s/…`) with an `immutable` value
+ *  (viewerFloorOverride). No X-Frame-Options: framing is controlled by the app's CSP `frame-ancestors <viewUrl> <publicUrl>`
+ *  (owner preview from the main origin). */
 export const VIEWER_HEADER_FLOOR: Readonly<Record<string, string>> = Object.freeze({
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
@@ -64,4 +65,25 @@ export function viewerDocumentCspOk(cspHeaderValues: readonly string[]): boolean
     }
   }
   return sandboxed;
+}
+
+/** True for the reserved static-asset path `/v/<product>/_s/…` (content-hashed shell assets; M-PR-2). */
+export function isViewerAssetPath(path: string): boolean {
+  return /^\/v\/[a-z][a-z0-9-]{1,31}\/_s\//.test(path);
+}
+
+/**
+ * May the app's value of a floor header replace the floor's (manifest 0.1.22, one rule for the SDK, tb-views and the
+ * bridge)? `content-security-policy`: always (the `_d` gate still applies). `cache-control`: only on a static asset path
+ * and only a public, immutable value with a max-age (`public, max-age=<n>, immutable`, any order, no private/no-store/
+ * no-cache) — never on a token page, a data answer or a document, which must stay `no-store` so a revoked link is not
+ * served from a cache. Every other floor header: never.
+ */
+export function viewerFloorOverride(name: string, value: string, path: string): boolean {
+  const n = name.toLowerCase();
+  if (n === "content-security-policy") return true;
+  if (n !== "cache-control" || !isViewerAssetPath(path) || isViewerDocumentPath(path)) return false;
+  const parts = value.toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+  if (!parts.includes("immutable") || !parts.some((x) => /^max-age=\d{1,9}$/.test(x))) return false;
+  return parts.every((x) => x === "immutable" || x === "public" || /^max-age=\d{1,9}$/.test(x));
 }

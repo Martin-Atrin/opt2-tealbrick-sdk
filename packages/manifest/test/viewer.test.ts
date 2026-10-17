@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isViewerDocumentPath, VIEWER_HEADER_FLOOR, VIEWER_REQUEST_HEADERS, viewerDocumentCspOk, viewerResponseHeaderDropped } from "../src/index.ts";
+import { isViewerAssetPath, isViewerDocumentPath, VIEWER_HEADER_FLOOR, VIEWER_REQUEST_HEADERS, viewerDocumentCspOk, viewerFloorOverride, viewerResponseHeaderDropped } from "../src/index.ts";
 
 test("LA-1: the header floor has the agreed members and no X-Frame-Options (framing is the app's frame-ancestors)", () => {
   for (const k of ["x-content-type-options", "referrer-policy", "cache-control", "x-robots-tag", "permissions-policy", "cross-origin-opener-policy", "cross-origin-resource-policy", "x-dns-prefetch-control", "strict-transport-security", "content-security-policy"]) assert.ok(VIEWER_HEADER_FLOOR[k], k);
@@ -31,4 +31,17 @@ test("LA-1 (b): the _d path and the CSP gate — quiet on good, fires on every f
   // a weak policy cannot hide behind a strict one (two headers, or two policies in one header)
   assert.equal(viewerDocumentCspOk(["sandbox allow-scripts", "sandbox allow-scripts allow-same-origin"]), false);
   assert.equal(viewerDocumentCspOk(["sandbox allow-scripts, sandbox allow-popups"]), false);
+});
+
+test("manifest 0.1.22: viewerFloorOverride — CSP always; immutable Cache-Control only on /_s/ assets (quiet on good, fires on bad)", () => {
+  const asset = "/v/live-artifacts/_s/app.3f9a1c.js";
+  assert.equal(isViewerAssetPath(asset), true);
+  assert.equal(isViewerAssetPath("/v/live-artifacts/tbv_x"), false);
+  assert.equal(viewerFloorOverride("Content-Security-Policy", "sandbox allow-scripts", "/v/live-artifacts/_d/t"), true);
+  assert.equal(viewerFloorOverride("cache-control", "public, max-age=31536000, immutable", asset), true);
+  assert.equal(viewerFloorOverride("cache-control", "max-age=31536000, immutable", asset), true);
+  for (const bad of ["public, max-age=31536000", "immutable", "private, max-age=60, immutable", "public, max-age=60, immutable, no-store", "no-cache, immutable, max-age=1"]) assert.equal(viewerFloorOverride("cache-control", bad, asset), false, bad);
+  // never on a token page, a data answer or a document
+  for (const p of ["/v/live-artifacts/tbv_abc", "/v/live-artifacts/tbv_abc/data", "/v/live-artifacts/_d/tkt"]) assert.equal(viewerFloorOverride("cache-control", "public, max-age=31536000, immutable", p), false, p);
+  for (const n of ["x-frame-options", "referrer-policy", "permissions-policy", "strict-transport-security"]) assert.equal(viewerFloorOverride(n, "anything", asset), false, n);
 });
