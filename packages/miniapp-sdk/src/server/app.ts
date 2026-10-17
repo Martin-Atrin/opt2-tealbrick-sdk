@@ -571,6 +571,8 @@ export async function startApp(
       const slice = trust.slice;
       return {
         publicUrl: (slice?.bridge as { publicUrl?: unknown } | undefined)?.publicUrl?.toString() ?? null,
+        // v0.1.26 (LA-1): tb-views origin; only a non-empty string counts, anything else (absent, null) is null
+        viewUrl: typeof slice?.bridge.viewUrl === "string" && slice.bridge.viewUrl !== "" ? slice.bridge.viewUrl : null,
         workspace: (() => {
           // spec 0.1.3 (C31): non-null; before the first verified slice there is no workspace to give
           if (!trust.ws) throw new TbError("workspace_unknown", "the workspace is not known yet (no verified slice)", 503);

@@ -1,5 +1,5 @@
 // Context members added by Coordinator C31 on top of types/sdk.ts §B (SPEC-GAP until the spec package declares them):
-// `publicUrl` (slice `bridge.publicUrl`), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
+// `publicUrl` (slice `bridge.publicUrl`), `viewUrl` (slice `bridge.viewUrl`, 0.1.26), `workspace`, `scopes.instances` and `secrets` (the ONE app-secret store).
 import type { ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import type { WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { AppDefinition, EventContext, HookContext, OpContext, PublicHandler, ScopeStore, SliceAgent, StartContext as SpecStartContext } from "@opt2-tealbrick/spec/sdk";
@@ -9,6 +9,12 @@ import type { JobHandler, JobSpec, JobsView } from "./jobs.ts";
 export interface ContextExtras {
   /** bridge public origin (`https://<bridge>`) for third-party callbacks `…/p/<product><path>`; null until the slice names it */
   publicUrl: string | null;
+  /**
+   * v0.1.26 (LA-1, C232, spec 0.1.43): the workspace views service origin (`https://<tb-views>`) from the verified slice
+   * (`bridge.viewUrl`); null until Core created tb-views. Re-read from the CURRENT slice on every context, so it changes
+   * when a new slice arrives. While it is null an app answers 409 `view_origin_missing` (`requireViewUrl`).
+   */
+  viewUrl: string | null;
   /** workspace from the verified slice; before the first slice the SDK refuses with 503 workspace_unknown */
   workspace: WorkspaceId;
   scopes: Pick<ScopeStore, "instances">;

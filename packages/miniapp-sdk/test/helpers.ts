@@ -84,6 +84,8 @@ export async function slice(
     companionTargets?: { product: string; ins: string }[];
     companionCallers?: { product: string; ins: string; name: string }[];
     appsPolicy?: { held: string[] };
+    /** spec 0.1.43 (LA-1): bridge.viewUrl (string = tb-views origin, null = Core has none yet, absent = member omitted) */
+    viewUrl?: string | null;
   } = {},
 ): Promise<string> {
   w.rev += 1;
@@ -100,7 +102,7 @@ export async function slice(
       ins: w.ins,
       product,
       portalKeys: [{ jwk: w.portal.publicJwk, status: "active" }],
-      bridge: { id: w.brg, keys: [w.bridgeKey.publicJwk] },
+      bridge: { id: w.brg, keys: [w.bridgeKey.publicJwk], ...(over.viewUrl !== undefined ? { viewUrl: over.viewUrl } : {}) },
       pause: over.pause ?? { workspace: false, agents: [], instances: [] },
       revoked: over.revoked ?? { jtis: [] },
       personNbf: over.personNbf ?? 0,

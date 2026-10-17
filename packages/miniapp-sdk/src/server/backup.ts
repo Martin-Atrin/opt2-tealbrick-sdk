@@ -6,7 +6,7 @@
 // inside app.db (backups); the export never carries tb_keys, tb_secrets, tb_sessions or tb_used_jti.
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, stat, statfs, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Readable } from "node:stream";
@@ -67,6 +67,8 @@ const BACKUP_STATE_KEY = "backup_state";
 
 const BACKUP_FORMAT = "tealbrick.backup/1";
 const EXPORT_FORMAT = "tealbrick.export/1";
+/** v0.1.26 (OD-3): index of the app files an export carries under `files/` (absent when the manifest has no backups.files) */
+export const EXPORT_FILES_INDEX = "files.json";
 const BACKUP_RE = /^tb-backup-\d{8}T\d{6}\.\d{3}Z\.tar\.gz$/;
 /**
  * v0.1.25 (E2/M1): the pre-update snapshot. ONE deterministic name per target version, so Core can name it in
@@ -172,6 +174,16 @@ async function exec(ctx: BackupContext, target: ExecTarget, serviceId: string, p
 }
 
 // ── backup ──
+/** True when `p` (as the OS resolves it, symlinks followed) is inside `root` (also resolved); a missing path is inside. */
+async function realWithin(root: string, p: string): Promise<boolean> {
+  try {
+    return within(await realpath(root), await realpath(p));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw e;
+  }
+}
+
 async function collectFiles(ctx: BackupContext): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   const skip = excluded(ctx);
@@ -193,6 +205,8 @@ async function collectFiles(ctx: BackupContext): Promise<Map<string, string>> {
     };
     const start = resolve(root, f.path);
     if (!within(root, start)) throw new TbError("backup_failed", `backups.files path escapes its volume: ${f.path}`, 500);
+    // v0.1.26 (OD-3): a symlinked parent directory must not lead out of the volume either (lstat of the leaf alone follows it)
+    if (!(await realWithin(root, start))) throw new TbError("backup_failed", `backups.files path escapes its volume through a symlink: ${f.path}`, 500);
     await walk(start);
   }
   return out;
@@ -455,6 +469,24 @@ async function runExport(ctx: BackupContext, db: RawDb): Promise<{ file: string;
       for (const t of tables) await dump(`tables/${encodeURIComponent(t.name)}.jsonl`, `SELECT * FROM ${quoteIdent(t.name)}`);
       await dump("receipts.jsonl", "SELECT * FROM tb_receipts ORDER BY created_at, id");
       await dump("audit.jsonl", "SELECT * FROM tb_audit ORDER BY at, id");
+      // v0.1.26 (OD-3): the manifest `backups.files` paths travel under files/<volume>/<path> with a files.json index
+      // [{path, volume, bytes, sha256}] (additive: an app without backups.files gets exactly the archive it had before).
+      // Same walk as the backup (collectFiles): inside the volume, symlinks and special files left out, the live
+      // database / instance key / backup dir excluded. Each file is copied to staging first so the hash is of the bytes archived.
+      if (ctx.manifest.backups.files?.length) {
+        const index: { path: string; volume: string; bytes: number; sha256: string }[] = [];
+        for (const [entry, abs] of await collectFiles(ctx)) {
+          const copy = join(staging, `file-${index.length}`);
+          await copyFile(abs, copy);
+          const h = await hashFile(copy);
+          const [volume, ...rest] = entry.slice("files/".length).split("/");
+          index.push({ path: rest.join("/"), volume: volume as string, bytes: h.bytes, sha256: h.sha256 });
+          sources.push({ name: entry, path: copy, size: h.bytes });
+        }
+        const indexPath = join(staging, "files.json");
+        await writeFile(indexPath, JSON.stringify(index, null, 2));
+        sources.push({ name: EXPORT_FILES_INDEX, path: indexPath, size: (await stat(indexPath)).size });
+      }
     } finally {
       snap.close();
     }
