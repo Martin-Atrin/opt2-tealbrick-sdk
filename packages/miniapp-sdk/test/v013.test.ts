@@ -91,7 +91,7 @@ async function boot(opts: Opts = {}): Promise<Booted> {
         note_get: async (_input, ctx) => {
           b.runs.note_get += 1;
           const c = ctx as SdkOpContext;
-          return { link: c.ownerLink("/notes/1"), targets: c.companionTargets(), caller: c.caller.name };
+          return { link: c.ownerLink("/notes/1"), targets: c.companionTargets(), caller: c.caller.name, product: c.caller.product ?? null };
         },
         note_delete: async () => ({}),
         notebook_rename: async () => ({}),
@@ -630,6 +630,54 @@ describe("units", () => {
     }
   });
 
+  test("migration 6 (SDK-CALLER-PRODUCT): additive column; a 0.1.26 store keeps every row (product absent), new rows carry it, a second open changes nothing", () => {
+    const t = tempDir();
+    try {
+      const raw = new DatabaseSync(`${t.dir}/app.db`);
+      raw.exec("CREATE TABLE tb_migrations (scope TEXT NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, applied_at INTEGER NOT NULL, PRIMARY KEY (scope, version)) STRICT");
+      for (const m of SDK_MIGRATIONS.slice(0, 5)) {
+        raw.exec(m.sql);
+        raw.prepare("INSERT INTO tb_migrations VALUES ('sdk', ?, ?, ?, 1)").run(m.version, m.name, createHash("sha256").update(m.sql).digest("hex"));
+      }
+      const oldId = `hld_${ulid()}`;
+      raw
+        .prepare("INSERT INTO tb_receipts (id, caller_type, caller_id, caller_name, op, effect, hold_family, status, input_digest, summary, meta, created_at, expires_at) VALUES (?, 'app', 'ins_1', 'Observer', 'pay', 'money', 'money', 'held', 'sha256:x', 'keep me', '{\"k\":1}', 1, ?)")
+        .run(oldId, Date.now() + 60_000);
+      raw.close();
+      const db = openStore(t.dir);
+      const rc = new Receipts(db);
+      const old = rc.getSync(oldId);
+      assert.deepEqual(old?.caller, { type: "app", id: "ins_1", name: "Observer" });
+      assert.equal(old?.summary, "keep me");
+      assert.deepEqual(old?.meta, { k: 1 });
+      assert.equal(rc.pending({ caller: null }, Date.now()).items[0]?.caller.product, undefined);
+      const fresh = rc.insert({
+        kind: "rcp",
+        callId: null,
+        caller: { type: "app", id: "ins_2" as InstanceId, name: "Observer", product: "impostor" as never },
+        op: "pay",
+        effect: "write",
+        holdFamily: null,
+        status: "run",
+        inputDigest: "sha256:y" as never,
+        summary: "s",
+        meta: null,
+        idempotencyKey: null,
+      });
+      assert.equal(fresh.caller.product, "impostor");
+      // an agent row never stores a product, even if one were passed
+      const agent = rc.insert({ kind: "rcp", callId: null, caller: { type: "agent", id: "agt_1" as never, name: "A", product: "x" as never }, op: "pay", effect: "write", holdFamily: null, status: "run", inputDigest: "sha256:z" as never, summary: "s", meta: null, idempotencyKey: null });
+      assert.equal(agent.caller.product, undefined);
+      db.close();
+      const again = openStore(t.dir);
+      assert.equal(new Receipts(again).getSync(fresh.id)?.caller.product, "impostor");
+      assert.equal((again.prepare("SELECT count(*) AS n FROM tb_migrations WHERE scope = 'sdk'").get() as { n: number }).n, SDK_MIGRATIONS.length);
+      again.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
   test("AttentionReader: valid value passes (reason cleaned and cut); error, timeout and malformed values count as none and warn ≤ 1/min", async () => {
     const lines: { msg: string; fields?: Record<string, unknown> }[] = [];
     const log = { debug() {}, info() {}, warn: (msg: string, fields?: Record<string, unknown>) => lines.push({ msg, fields }), error() {} } as never;
@@ -655,5 +703,88 @@ describe("units", () => {
     assert.equal(await failing.read(), null);
     assert.ok(!JSON.stringify(lines).includes("app secret detail"), "never logs the app's error text");
     assert.equal(await new AttentionReader(undefined, {} as never, log).read(), null);
+  });
+});
+
+// ── spec 0.1.44 (SDK-CALLER-PRODUCT): Caller.product = the VERIFIED product of an app caller ──────────────────────────
+describe("SDK-CALLER-PRODUCT: Caller.product is verified, never derived from the name", () => {
+  let b: Booted;
+  const insImpostor = `ins_${ulid()}` as InstanceId;
+  const insObserver = `ins_${ulid()}` as InstanceId;
+  const insUnlisted = `ins_${ulid()}` as InstanceId;
+  const grantAs = (ins: InstanceId, over: { held?: ("destructive" | "money")[]; wf?: string[] } = {}) =>
+    signGrant(
+      { iss: "tb:portal", sub: `tb:ins:${ins}`, aud: `tb:ins:${b.w.ins}`, iat: nowS(), ws: b.w.ws, cnf: { brg: b.w.brg }, crud: ["read", "delete"], mode: "bound", held: over.held ?? [], caps: {}, wf: over.wf ?? ["note_get", "note_delete"], polrev: 1 },
+      b.w.portal,
+    );
+  before(async () => {
+    b = await boot();
+    // the impostor companion is NAMED "Observer" but its slice entry says product "impostor"; the real Observer is another instance
+    b.bridge.push(
+      await slice(b.w, PRODUCT, {
+        companionCallers: [
+          { product: "impostor", ins: insImpostor, name: "Observer" },
+          { product: "observer", ins: insObserver, name: "Observer" },
+        ],
+      }),
+    );
+    await until(async () => (await callOp(b, "note_get", { id: "probe" }, { grantToken: await grantAs(insImpostor) })).body.output?.caller === "Observer");
+  });
+  after(async () => b.cleanup());
+
+  test("an app caller's product comes from the companionCallers entry by instance; two apps with one name stay apart", async () => {
+    const a = await callOp(b, "note_delete", { id: "x1" }, { grantToken: await grantAs(insImpostor) });
+    assert.equal(a.status, 200, JSON.stringify(a.body));
+    const o = await callOp(b, "note_delete", { id: "x2" }, { grantToken: await grantAs(insObserver) });
+    assert.equal(o.status, 200, JSON.stringify(o.body));
+    const ra = await b.running.receipts.get(a.body.receiptId);
+    const ro = await b.running.receipts.get(o.body.receiptId);
+    assert.deepEqual(ra?.caller, { type: "app", id: insImpostor, name: "Observer", product: "impostor" });
+    assert.deepEqual(ro?.caller, { type: "app", id: insObserver, name: "Observer", product: "observer" });
+    const list = await b.running.receipts.list({ caller: insImpostor });
+    assert.equal(list.items[0]?.caller.product, "impostor");
+  });
+
+  test("an agent caller has no product; the op context carries product for an app caller only", async () => {
+    const viaApp = await callOp(b, "note_get", { id: "ctx-a" }, { grantToken: await grantAs(insImpostor) });
+    assert.deepEqual([viaApp.body.output.caller, viaApp.body.output.product], ["Observer", "impostor"]);
+    const viaAgent = await callOp(b, "note_get", { id: "ctx-b" });
+    assert.equal(viaAgent.body.output.product, null);
+    const agent = await callOp(b, "note_delete", { id: "x3" });
+    assert.equal(agent.status, 200, JSON.stringify(agent.body));
+    const r = await b.running.receipts.get(agent.body.receiptId);
+    assert.equal(r?.caller.type, "agent");
+    assert.equal("product" in (r?.caller ?? {}), false);
+  });
+
+  test("an app caller that is not in the slice has no product (the receipt row stays valid)", async () => {
+    const res = await callOp(b, "note_get", { id: "x4" }, { grantToken: await grantAs(insUnlisted) });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual([res.body.output.caller, res.body.output.product], [insUnlisted, null], "named by the instance id, no product");
+  });
+
+  test("a hold records the product; tb.holds_pending and the decision page show it", async () => {
+    const held = await callOp(b, "note_delete", { id: "x5" }, { grantToken: await grantAs(insImpostor, { held: ["destructive"] }) });
+    assert.equal(held.status, 202, JSON.stringify(held.body));
+    const hold = await b.running.receipts.get(held.body.holdId);
+    assert.equal(hold?.caller.product, "impostor");
+    const pend = await callOp(b, "tb.holds_pending", {}, { grantToken: await grantAs(insObserver, { wf: ["tb.holds_pending"] }) });
+    assert.equal(pend.status, 200, JSON.stringify(pend.body));
+    const item = pend.body.output.items.find((i: { id: string }) => i.id === held.body.holdId);
+    assert.deepEqual(item?.caller, { type: "app", id: insImpostor, name: "Observer", product: "impostor" });
+  });
+
+  test("a receipt written before the migration (no caller_product) reads without product", async () => {
+    const db = new DatabaseSync(`${b.dir}/app.db`);
+    try {
+      db.prepare(
+        "INSERT INTO tb_receipts (id, call_id, caller_type, caller_id, caller_name, op, effect, status, input_digest, summary, meta, created_at) VALUES ('rcp_01OLDROW00000000000000000', NULL, 'app', ?, 'Observer', 'note_delete', 'destructive', 'run', 'sha256:x', 's', 'null', 1)",
+      ).run(insObserver);
+    } finally {
+      db.close();
+    }
+    const old = await b.running.receipts.get("rcp_01OLDROW00000000000000000");
+    assert.equal(old?.caller.name, "Observer");
+    assert.equal("product" in (old?.caller ?? {}), false);
   });
 });

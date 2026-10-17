@@ -103,6 +103,14 @@ INSERT INTO tb_cap_usage (id, caller_id, effect, op, state, created_at)
   WHERE status = 'run' AND effect IN ('write', 'outward', 'destructive');
 `,
   },
+  {
+    // v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): `caller_product` = Receipt.caller.product, the VERIFIED product id of an app
+    // caller (slice companionCallers entry by instance), set when the receipt/hold is written. Additive and nullable;
+    // existing rows keep NULL (product absent: it cannot be verified after the fact) and nothing is rewritten.
+    version: 6,
+    name: "sdk_receipt_caller_product",
+    sql: "ALTER TABLE tb_receipts ADD COLUMN caller_product TEXT;",
+  },
 ];
 
 function sha256(text: string | Uint8Array): string {
