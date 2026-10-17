@@ -207,8 +207,12 @@ function Loading({ what }: { what: string }) {
 function Head({ title, lede }: { title: string; lede?: ReactNode }) {
   return (
     <div className="page-head">
-      <h1>{title}</h1>
-      {lede ? <p className="tb-lede">{lede}</p> : null}
+      {/* the title and its lede are ONE flex item (the mockups' page-head): a lede as a second item of the flex row
+          sat beside the title at 1280px with a wide gap between them. */}
+      <div className="page-title">
+        <h1>{title}</h1>
+        {lede ? <p className="tb-lede">{lede}</p> : null}
+      </div>
     </div>
   );
 }

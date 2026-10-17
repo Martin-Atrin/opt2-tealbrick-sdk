@@ -4,7 +4,7 @@
 // happy-dom.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -70,6 +70,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   const failure = stub.fail[op];
   if (failure) return json(failure.status, { error: { code: failure.code, message: `raw upstream text for ${failure.code}`, requestId: "req_1" } });
   if (op === "tb.holds_list") return json(200, { status: "ok", output: { items: stub.holds, nextCursor: null } });
+  if (op === "tb.agents_list") return json(200, { status: "ok", output: { agents: [{ id: "agt_1", name: "Front desk", mode: "read", status: "active" }] } });
   if (op === "tb.holds_decide") {
     const id = (body.input as { holdId: string }).holdId;
     stub.holds = stub.holds.filter((h) => h.id !== id);
@@ -233,6 +234,36 @@ describe("Holds page", () => {
     m = await mount(h(std.HoldsPage, { empty: "Nothing waits.", only: `hld_${ULID.slice(0, 25)}9` }));
     assert.equal(m.host.querySelector(".tb-empty h3")?.textContent, "This approval is no longer waiting.");
     await m.unmount();
+  });
+});
+
+describe("page header", () => {
+  const read = (rel: string) => readFileSync(join(root, rel), "utf8");
+
+  it("the title and its lede are ONE flex item of .page-head, the lede under the title (never beside it)", async () => {
+    reset([A]);
+    for (const [name, el] of [
+      ["Agents & scopes", h(std.AgentsPage, { lede: "Scout may read." })],
+      ["Holds", h(std.HoldsPage, { empty: "Nothing waits.", lede: "Scout may read." })],
+    ] as const) {
+      const m = await mount(el);
+      const head = m.host.querySelector(".page-head");
+      assert.ok(head, `${name}: .page-head`);
+      assert.deepEqual([...head.children].map((c) => c.className), ["page-title"], `${name}: the lede is not a second flex item (it sat beside the title at 1280px)`);
+      assert.deepEqual([...(head.firstElementChild?.children ?? [])].map((c) => `${c.tagName.toLowerCase()}${c.className ? `.${c.className}` : ""}`), ["h1", "p.tb-lede"], `${name}: title first, lede under it`);
+      assert.equal(head.querySelector("h1")?.textContent, name);
+      await m.unmount();
+    }
+    const m = await mount(h(std.AgentsPage, {}));
+    assert.deepEqual([...(m.host.querySelector(".page-title")?.children ?? [])].map((c) => c.tagName), ["H1"], "no lede: the title only, as in the mockup");
+    await m.unmount();
+  });
+
+  it("pages.css stacks the title block and does not put a lede in the head row", () => {
+    const css = read("src/ui/pages.css");
+    assert.match(css, /\.page-title \{[^}]*display: grid;/);
+    assert.doesNotMatch(css, /\.page-head > \.tb-lede/);
+    assert.match(css, /\.page-head \{ display: flex;[^}]*justify-content: space-between;/, "the head row keeps the title block left and actions right");
   });
 });
 

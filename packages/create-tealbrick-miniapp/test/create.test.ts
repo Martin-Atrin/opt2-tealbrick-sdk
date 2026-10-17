@@ -219,6 +219,10 @@ describe("createMiniapp", () => {
     const gone =
       /--tb-(?:radius|surface|canvas|accent|border|text-(?:xs|sm|md|lg|xl|2xl))(?![\w-])|--tb-(?:burgundy|teal-\d)|tone="(?:ok|action|progress|blocked)"|variant="(?:accent|ghost)"|\bEyebrow\b|\bSetupSteps\b|\bSetupOverlay\b/;
     for (const f of ["src/ui/App.tsx", "src/ui/standard.tsx", "src/ui/pages.css"]) assert.doesNotMatch(read(a, f), gone, `${f} has no 0.1.x name`);
+    // page header: title + lede are ONE flex item under the title (a lede beside the title left a wide gap at 1280px)
+    assert.match(standard, /<div className="page-title">\s*<h1>\{title\}<\/h1>\s*\{lede \? <p className="tb-lede">\{lede\}<\/p> : null\}\s*<\/div>/, "Head wraps the title and the lede in .page-title");
+    assert.doesNotMatch(standard, /<div className="page-head">\s*(?:\{\/\*[\s\S]*?\*\/\}\s*)?<h1>/, "the h1 is not a direct item of .page-head with a lede beside it");
+    assert.match(read(a, "src/ui/pages.css"), /\.page-title \{[^}]*display: grid;/);
     // the app CSS is page layout only and uses tokens, never a raw colour, radius or font
     assert.doesNotMatch(read(a, "src/ui/pages.css"), /#[0-9a-f]{3,8}\b|rgb\(|border-radius:\s*\d|font-family:(?!\s*var)/i);
     // build-ui: kit sheets first, then pages.css/app.css; Nunito files and the still travel with the build
