@@ -34,8 +34,15 @@ test("compareSemver and requiredBridgeVersion (C104): feature table + declared, 
 
 test("C105/C107: DEFAULT_HELD_FAMILIES / KNOWN_HOLD_FAMILIES are re-exported from the spec vocabulary (L1)", async () => {
   const m = await import("../src/index.ts");
-  assert.deepEqual([...m.DEFAULT_HELD_FAMILIES], ["destructive", "money", "first_contact", "identity"]);
+  // spec 0.1.41 (C232, LA-2): + public_link
+  assert.deepEqual([...m.DEFAULT_HELD_FAMILIES], ["destructive", "money", "first_contact", "identity", "public_link"]);
   assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes("outward") && !(m.DEFAULT_HELD_FAMILIES as readonly string[]).includes("outward"), "outward known, not held by default");
   assert.deepEqual([...m.KNOWN_HOLD_FAMILIES], [...m.HOLD_FAMILIES]);
   for (const f of m.DEFAULT_HELD_FAMILIES) assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes(f));
+});
+
+test("C232 (LA-2): an outward op may declare public_link; a typo stays refused; old grants with the word verify (C108)", async () => {
+  const m = await import("../src/index.ts");
+  assert.ok((m.KNOWN_HOLD_FAMILIES as readonly string[]).includes("public_link"));
+  assert.ok((m.HOOK_HOLD_FAMILIES as readonly string[]).includes("public_link"));
 });

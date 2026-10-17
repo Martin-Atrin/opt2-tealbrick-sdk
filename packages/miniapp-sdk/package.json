@@ -29,7 +29,7 @@
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.35/opt2-tealbrick-spec-0.1.35.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.41/opt2-tealbrick-spec-0.1.41.tgz",
     "@opt2-tealbrick/manifest": "workspace:*"
   },
   "peerDependencies": {
