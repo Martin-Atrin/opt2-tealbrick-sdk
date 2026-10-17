@@ -80,6 +80,10 @@ export interface MiniAppFaults {
   pendingHoldsZero?: boolean;
   /** v0.1.14 (C102): names app callers by their instance id, ignoring slice companionCallers (fails A12.caller_name) */
   callerNameIgnoresSlice?: boolean;
+  /** spec 0.1.44 (SDK-CALLER-PRODUCT, security): looks the caller's product up by its NAME (first companionCallers entry with that name) instead of by its instance (fails A12.caller_product_verified) */
+  callerProductFromName?: boolean;
+  /** pre-0.1.44: never sets caller.product (fails A12.caller_product_verified) */
+  noCallerProduct?: boolean;
   /** v0.1.15 (C105a): never holds an app caller (ignores the companion grant's held; fails A12.app_caller_held) */
   appCallerNoHold?: boolean;
   /** v0.1.16 (C107): resolve answers drop holdFamily (outward / money entries; fails A11.resolve_family) */
@@ -135,7 +139,7 @@ const DYN_ENTRIES = [
 interface Receipt {
   id: string;
   callId: string | null;
-  caller: { type: "agent" | "app"; id: string; name: string };
+  caller: { type: "agent" | "app"; id: string; name: string; product?: string };
   op: string;
   effect: string;
   holdFamily: string | null;
@@ -556,9 +560,18 @@ export async function startMiniApp(manifest: Manifest, env: Record<string, strin
     } else if (d.decision === "refuse") throw new E(403, d.reason);
     // C102: an app caller is named from slice companionCallers (verified grant sub), fallback the instance id
     const callerName = callerType === "app" && !faults.callerNameIgnoresSlice ? ((slice?.companionCallers ?? []).find((x) => x.ins === callerId)?.name ?? callerId) : callerId;
+    // spec 0.1.44 (SDK-CALLER-PRODUCT): app callers only; the product of the companionCallers entry whose `ins` is the verified
+    // grant's caller instance. The fault looks it up by NAME instead (the impostor-by-name hole).
+    const listed = slice?.companionCallers ?? [];
+    const callerProduct =
+      callerType !== "app" || faults.noCallerProduct
+        ? undefined
+        : faults.callerProductFromName
+          ? listed.find((x) => x.name === callerName)?.product
+          : listed.find((x) => x.ins === callerId)?.product;
     const base = {
       callId,
-      caller: { type: callerType, id: callerId, name: callerName },
+      caller: { type: callerType, id: callerId, name: callerName, ...(callerProduct !== undefined ? { product: callerProduct } : {}) },
       op: op.id,
       effect: op.effect,
       inputDigest,

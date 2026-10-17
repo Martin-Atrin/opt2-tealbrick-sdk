@@ -473,6 +473,27 @@ describe("scheduled ops: authorize() again at fire time (SDK-2, CON-01)", () => 
     assert.equal(r?.caller_id, b.w.agents.a);
   });
 
+  test("SDK-CALLER-PRODUCT: a scheduled op of an APP caller writes its receipt with the verified product, not the name", async () => {
+    const { signGrant, ulid } = await import("@opt2-tealbrick/manifest");
+    const ins = `ins_${ulid()}` as never;
+    await b.push({ companionCallers: [{ product: "impostor", ins, name: "Observer" }] });
+    const g = await signGrant(
+      { iss: "tb:portal", sub: `tb:ins:${ins}`, aud: `tb:ins:${b.w.ins}`, iat: Math.floor(Date.now() / 1000), ws: b.w.ws, cnf: { brg: b.w.brg }, crud: ["read", "delete"], mode: "bound", held: [], caps: {}, wf: ["note_get", "note_delete"], polrev: 1 },
+      b.w.portal,
+    );
+    const id = await schedule("app-prod-1", 300, g);
+    const j = await settled(id);
+    assert.equal(j.status, "done", j.lastError ?? "");
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(`${b.dir}/app.db`, { readOnly: true });
+    try {
+      const row = db.prepare("SELECT caller_type, caller_name, caller_product, status FROM tb_receipts WHERE op = 'note_delete' AND caller_id = ?").get(ins) as Record<string, string> | undefined;
+      assert.deepEqual({ ...row }, { caller_type: "app", caller_name: "Observer", caller_product: "impostor", status: "run" });
+    } finally {
+      db.close();
+    }
+  });
+
   test("fires: the agent is paused before fire time → refused `paused`, never runs, refused receipt", async () => {
     const id = await schedule("paused-1", 400);
     await b.push({ pause: { workspace: false, agents: [b.w.agents.a], instances: [] } });

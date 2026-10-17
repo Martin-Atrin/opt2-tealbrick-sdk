@@ -38,6 +38,7 @@ describe("app target", () => {
     assert.equal(st("A11.resolve_family"), "not_applicable");
     assert.equal(st("A11.narrowing_empty_anyof"), "not_applicable");
     assert.equal(st("A12.caller_name"), "pass");
+    assert.equal(st("A12.caller_product_verified"), "pass");
     assert.match(r.checks.find((c) => c.id === "C3.grant_held_unknown")?.asserted ?? "", /item_delete \(destructive\): 202 held/);
   });
 
@@ -68,6 +69,9 @@ describe("app target", () => {
     ["reports pendingHolds 0", { pendingHoldsZero: true }, ["A17.pending_count"]],
     // v0.1.15 (spec 0.1.15, conformance 0.1.11)
     ["names app callers by their instance id although companionCallers lists them", { callerNameIgnoresSlice: true }, ["A12.caller_name"]],
+    // v0.1.19 (spec 0.1.44, SDK-CALLER-PRODUCT): the product comes from the verified instance, never from the name
+    ["finds the caller's product by its NAME (an impostor named like another product is taken for it)", { callerProductFromName: true }, ["A12.caller_product_verified"]],
+    ["never reports caller.product (pre-0.1.44)", { noCallerProduct: true }, ["A12.caller_product_verified"]],
     // v0.1.17 (C108)
     ["refuses a grant whose held names an unknown family (strict reader)", { strictHeld: true }, ["C3.grant_held_unknown"]],
     // v0.1.19 (C111a, conformance 0.1.12)
