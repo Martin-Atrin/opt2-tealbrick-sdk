@@ -24,6 +24,7 @@ export type {
   Companion,
   Condition,
   ConditionValue,
+  ContractId,
   CrudAction,
   DefaultGrantKind,
   DynamicCallInput,
@@ -47,7 +48,9 @@ export type {
   ManifestValidation,
   Operation,
   OperationAudience,
+  OperationListing,
   PublicRoute,
+  PublicRoutePurpose,
   Scope,
   Service,
   SettingField,
@@ -61,9 +64,11 @@ export type {
 export {
   AGENT_MODES,
   CATEGORIES,
+  /** v0.1.20 (spec 0.1.42): shared app-to-app contract ids */
+  CONTRACT_IDS,
   CRUD_ACTIONS,
   DEFAULT_GRANT_KINDS,
-  /** v0.1.15 (C105): held families of a new agent card and the default workspace apps policy (companion grants) */
+  /** v0.1.20 (spec 0.1.41, C232): + public_link — held families of a new agent card and the default apps policy */
   DEFAULT_HELD_FAMILIES,
   DYNAMIC_MODES,
   EFFECTS,
@@ -77,6 +82,9 @@ export {
   KNOWN_HOLD_FAMILIES,
   MANIFEST_SCHEMA,
   OPERATION_AUDIENCES,
+  /** v0.1.21 (spec 0.1.43, LR-1) */
+  OPERATION_LISTINGS,
+  /** v0.1.21 (spec 0.1.43, LA-1): + viewer */
   PUBLIC_ROUTE_PURPOSES,
   SETTING_TYPES,
   STANDARD_OPERATIONS,

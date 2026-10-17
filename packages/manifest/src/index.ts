@@ -17,4 +17,5 @@ export * from "./skills.ts";
 export * from "./tokens.ts";
 export * from "./validate.ts";
 export * from "./version.ts";
+export * from "./viewer.ts";
 export * from "./vocab.ts";

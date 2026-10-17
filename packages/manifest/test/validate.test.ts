@@ -621,3 +621,21 @@ describe("C107 (spec 0.1.16): outward ops and hold families", () => {
     m.operations.push({ id: "note_put", title: "Put", description: "Put.", input: { type: "object" }, output: { type: "object" }, crud: ["update"], effect: "write", idempotency: "supported", receipt: true, audience: "agent", holdFamily: "outward" });
   }));
 });
+
+describe("v0.1.21 (spec 0.1.43): viewer routes (M-PR-2) and listing (M-OP-11)", () => {
+  test("one viewer route at /v validates", () => {
+    const r = mutate((m) => (m.publicRoutes = [...(m.publicRoutes ?? []), { path: "/v", purpose: "viewer" }]));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("a viewer route not at /v", refuses("M-PR-2", "viewer_route_invalid", (m) => (m.publicRoutes = [{ path: "/view", purpose: "viewer" }])));
+  test("two viewer routes", refuses("M-PR-2", "viewer_route_invalid", (m) => (m.publicRoutes = [{ path: "/v", purpose: "viewer" }, { path: "/w", purpose: "viewer" }])));
+  test("listing workflow on an agent op validates", () => {
+    const r = mutate((m) => (m.operations.find((o: any) => o.audience === "agent").listing = "workflow"));
+    assert.equal(r.ok, true, JSON.stringify(!r.ok && r.errors));
+  });
+  test("listing on a person op", refuses("M-OP-11", "listing_invalid", (m) => (m.operations.find((o: any) => o.audience === "person").listing = "workflow")));
+  test("contracts field (spec 0.1.42) validates; an unknown contract id is refused by the schema", () => {
+    assert.equal(mutate((m) => (m.contracts = { produces: ["messages/1"] })).ok, true);
+    expectIssue(mutate((m) => (m.contracts = { produces: ["messages/9"] })), "schema", "schema_invalid");
+  });
+});

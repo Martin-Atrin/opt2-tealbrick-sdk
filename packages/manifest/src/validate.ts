@@ -768,6 +768,16 @@ function backupArtifactRouteRules(m: Manifest, add: Add): void {
     (r) => r.path,
     (r, i) => add("M-PR-1", "route_duplicate", ptr("publicRoutes", i, "path"), `public route ${r.path} repeated`),
   );
+  // v0.1.21 (spec 0.1.43, LA-1 C232): at most one viewer route, path exactly /v (served only by the views service)
+  const viewers = (m.publicRoutes ?? []).map((r, i) => ({ r, i })).filter((x) => x.r.purpose === "viewer");
+  viewers.forEach(({ r, i }, k) => {
+    if (k > 0) add("M-PR-2", "viewer_route_invalid", ptr("publicRoutes", i, "purpose"), "at most one viewer route");
+    if (r.path !== "/v") add("M-PR-2", "viewer_route_invalid", ptr("publicRoutes", i, "path"), "a viewer route has path /v");
+  });
+  // v0.1.21 (spec 0.1.43, LR-1 C234): `listing` only on agent ops
+  m.operations.forEach((op, i) => {
+    if (op.listing !== undefined && op.audience !== "agent") add("M-OP-11", "listing_invalid", ptr("operations", i, "listing"), "listing applies to agent ops only");
+  });
 }
 
 // ───────────────────────────── public surface ─────────────────────────────
