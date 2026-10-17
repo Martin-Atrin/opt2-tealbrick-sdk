@@ -14,6 +14,7 @@ import { escapeHtml, readRaw, requestId, sendError, sendHtml, sendJson } from ".
 import { buildOpenApi } from "./openapi.ts";
 import { handleAgentOp, handlePersonOp } from "./ops.ts";
 import type { Runtime } from "./runtime.ts";
+import { handleViewer, isViewerPath } from "./viewer.ts";
 
 const BRIDGE_OP_ROUTES: Record<string, BridgeOp> = { catalog: "catalog", resolve: "resolve", mark: "mark", "scope-summary": "scope_summary" };
 const PUBLIC_BODY_MAX = 1024 * 1024;
@@ -118,7 +119,8 @@ function serveUi(uiRoot: string, rel: string, res: ServerResponse): void {
 async function publicRoute(rt: Runtime, req: IncomingMessage, res: ServerResponse, path: string): Promise<boolean> {
   const route = rt.manifest.publicRoutes?.find((r) => r.path === path);
   const handler = route ? rt.def.publicRoutes?.[route.path] : undefined;
-  if (!route || !handler) return false;
+  // v0.1.26 (LA-3c): a viewer route is a PREFIX route served by handleViewer on /v/<product>/…, never by exact path
+  if (!route || !handler || route.purpose === "viewer") return false;
   const method = route.purpose === "oauth_callback" ? "GET" : "POST";
   if (req.method !== method) {
     sendError(res, requestId(), new TbError("method_not_allowed", `${route.path} accepts ${method}`, 405), { allow: method });
@@ -185,6 +187,9 @@ export function createHttpServer(rt: Runtime): Server {
       }
       return serveUi(uiRoot, rest === "" ? "/" : rest, res);
     }
+
+    // v0.1.26 (LA-1 / LA-3c): the viewer prefix route; the bridge private views route forwards GET /v/<product>/<rest> unchanged
+    if (isViewerPath(rt, path) && (await handleViewer(rt, req, res, url))) return;
 
     // manifest public routes: BRIDGE §9.2 forwards /p/<product>/<path> unchanged; SDK-API §3.2 names <path> (SPEC-GAP: both served)
     const pub = path.startsWith(`/p/${rt.product}/`) ? path.slice(`/p/${rt.product}`.length) : path;

@@ -74,7 +74,7 @@ export type {
   StartContext,
   StopContext,
 } from "./context.ts";
-export { TbError } from "./errors.ts";
+export { requireViewUrl, TbError, VIEW_ORIGIN_MISSING, viewOriginMissing } from "./errors.ts";
 // v0.1.21 (Scribe R1, SDK-1/SDK-2, RUL-11): the job runner
 export type {
   EnqueueOptions,

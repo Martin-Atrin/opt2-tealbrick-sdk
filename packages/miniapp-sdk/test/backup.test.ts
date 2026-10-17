@@ -2,7 +2,7 @@
 // instance assertion, a startApp round trip, and the refusals (tampered part, traversal, foreign product).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -661,6 +661,91 @@ test("SDK-03: no good backup for more than two schedule periods → backup_overd
     assert.equal(r.api.attention()?.code, "backup_overdue");
     await r.api.api.runNow();
     assert.equal(r.api.health().overdue, false, "a good backup restarts the clock");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+type FileIndex = { path: string; volume: string; bytes: number; sha256: string }[];
+
+test("v0.1.26 (OD-3): exportNow carries the backups.files paths under files/ with a files.json index; the live db, tb/ and symlinks stay out", async () => {
+  const r = await rig({ files: [{ volume: "data", path: "uploads" }] });
+  try {
+    const up = join(r.ctx.dataDir, "uploads");
+    mkdirSync(join(up, "deep"), { recursive: true });
+    writeFileSync(join(up, "a.txt"), "upload-a");
+    writeFileSync(join(up, "deep", "b.bin"), Buffer.from([0, 1, 2, 255]));
+    // a file outside the declared path, the instance key dir and a symlink to a secret outside the volume
+    writeFileSync(join(r.ctx.dataDir, "other.txt"), "NOT-DECLARED");
+    mkdirSync(join(r.ctx.dataDir, "tb"), { recursive: true });
+    writeFileSync(join(r.ctx.dataDir, "tb", "kek"), "KEK-MUST-NOT-LEAVE");
+    writeFileSync(join(r.dir, "outside-secret.txt"), "OUTSIDE-SECRET");
+    symlinkSync(join(r.dir, "outside-secret.txt"), join(up, "link.txt"));
+
+    const { file, meta, stream } = await r.api.api.exportNow();
+    for await (const _ of stream) void _;
+    const got = await entries(join(r.ctx.backupDir, file));
+    assert.deepEqual([...got.keys()].sort(), ["audit.jsonl", "files.json", "files/data/uploads/a.txt", "files/data/uploads/deep/b.bin", "meta.json", "receipts.jsonl", "tables/blobs.jsonl", "tables/notes.jsonl"]);
+    const index = JSON.parse(got.get("files.json")?.toString() ?? "null") as FileIndex;
+    assert.deepEqual(index, [
+      { path: "uploads/a.txt", volume: "data", bytes: 8, sha256: sha(Buffer.from("upload-a")) },
+      { path: "uploads/deep/b.bin", volume: "data", bytes: 4, sha256: sha(Buffer.from([0, 1, 2, 255])) },
+    ]);
+    for (const f of index) assert.equal(sha(got.get(`files/${f.volume}/${f.path}`) as Buffer), f.sha256, f.path);
+    // meta.files still lists the JSONL parts only (readers of the format are not surprised)
+    assert.deepEqual((meta as ExportMeta).files.map((f) => f.file), ["tables/blobs.jsonl", "tables/notes.jsonl", "receipts.jsonl", "audit.jsonl"]);
+    const all = Buffer.concat([...got.values()]).toString("utf8");
+    for (const leak of ["OUTSIDE-SECRET", "KEK-MUST-NOT-LEAVE", "NOT-DECLARED"]) assert.ok(!all.includes(leak), leak);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("v0.1.26 (OD-3): an export refuses a backups.files path that leaves the volume, also through a symlinked directory", async () => {
+  const outside = (dir: string) => {
+    mkdirSync(join(dir, "outside"), { recursive: true });
+    writeFileSync(join(dir, "outside", "secret.txt"), "OUTSIDE-SECRET");
+    return join(dir, "outside");
+  };
+  // 1. the declared path itself climbs out
+  const r1 = await rig({ files: [{ volume: "data", path: "../outside" }] });
+  try {
+    outside(r1.dir);
+    await assert.rejects(r1.api.api.exportNow(), isCode("export_failed"));
+    assert.deepEqual(readdirSync(r1.ctx.backupDir).filter((n) => n.startsWith("tb-export-")), [], "no archive is left behind");
+  } finally {
+    await r1.cleanup();
+  }
+  // 2. a symlinked parent directory leads out (the leaf lstat alone would follow it)
+  const r2 = await rig({ files: [{ volume: "data", path: "link/inner" }] });
+  try {
+    const target = outside(r2.dir);
+    mkdirSync(join(target, "inner"), { recursive: true });
+    writeFileSync(join(target, "inner", "x.txt"), "OUTSIDE-SECRET");
+    symlinkSync(target, join(r2.ctx.dataDir, "link"));
+    await assert.rejects(r2.api.api.exportNow(), isCode("export_failed"));
+    await assert.rejects(r2.api.api.runNow(), isCode("backup_failed"), "the backup shares the rule");
+  } finally {
+    await r2.cleanup();
+  }
+  // 3. a declared path that is itself a symlink to a directory outside is refused as well
+  const r3 = await rig({ files: [{ volume: "data", path: "uploads" }] });
+  try {
+    symlinkSync(outside(r3.dir), join(r3.ctx.dataDir, "uploads"));
+    await assert.rejects(r3.api.api.exportNow(), isCode("export_failed"));
+  } finally {
+    await r3.cleanup();
+  }
+});
+
+test("v0.1.26 (OD-3): an app without backups.files exports exactly as before (no files.json, no files/)", async () => {
+  const r = await rig();
+  try {
+    mkdirSync(join(r.ctx.dataDir, "uploads"), { recursive: true });
+    writeFileSync(join(r.ctx.dataDir, "uploads", "a.txt"), "upload-a");
+    const { file } = await r.api.api.exportNow();
+    const names = [...(await entries(join(r.ctx.backupDir, file))).keys()].sort();
+    assert.deepEqual(names, ["audit.jsonl", "meta.json", "receipts.jsonl", "tables/blobs.jsonl", "tables/notes.jsonl"]);
   } finally {
     await r.cleanup();
   }
