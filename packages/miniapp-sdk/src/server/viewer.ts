@@ -6,7 +6,7 @@
 //               Access-Control-*, X-Frame-Options are dropped; a `/_d/` response with an unsafe CSP is refused (502)
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
-import { isViewerDocumentPath, VIEWER_HEADER_FLOOR, VIEWER_REQUEST_HEADERS, viewerDocumentCspOk, viewerResponseHeaderDropped } from "@opt2-tealbrick/manifest";
+import { isViewerDocumentPath, VIEWER_HEADER_FLOOR, VIEWER_REQUEST_HEADERS, viewerDocumentCspOk, viewerFloorOverride, viewerResponseHeaderDropped } from "@opt2-tealbrick/manifest";
 import type { SdkPublicContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import { requestId, sendError } from "./http.ts";
@@ -59,8 +59,8 @@ export async function handleViewer(rt: Runtime, req: IncomingMessage, res: Serve
     response.headers.forEach((v, k) => {
       const name = k.toLowerCase();
       if (viewerResponseHeaderDropped(name)) return;
-      if (name === "content-security-policy") out[name] = v;
-      else if (!FLOOR_KEYS.includes(name)) out[name] = v;
+      // manifest 0.1.22: CSP always; Cache-Control only `public, max-age, immutable` on /_s/ assets (one shared rule)
+      if (FLOOR_KEYS.includes(name) ? viewerFloorOverride(name, v, url.pathname) : true) out[name] = v;
     });
     // defence in depth (tb-views and the bridge route enforce it too): an untrusted document needs a safe sandbox CSP
     if (isViewerDocumentPath(url.pathname) && !viewerDocumentCspOk([out["content-security-policy"] ?? ""])) {

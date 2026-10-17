@@ -4,7 +4,7 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, PUBLIC_ROUTE_PURPOSES, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -1406,9 +1406,10 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run("A9", "app has no public address", "manifest declares no public exposure (only bridge-served publicRoutes, no public-binding env), the app answers on a private address; with a deploy template: no app service has a public domain", () => {
     if (ctx.deployTemplate === undefined) {
       // Manifest level (Lead · Specs): the schema has no public-address field (strict, M1); publicRoutes are served only
-      // through the bridge at /p/<product>/…; runtime.port is the internal listen port.
+      // through the bridge at /p/<product>/… (viewer routes, spec 0.1.43: through the workspace views service at /v/<product>/…,
+      // never the app); runtime.port is the internal listen port.
       const problems: string[] = [];
-      for (const r of m.publicRoutes ?? []) if (!r.path.startsWith("/") || !["oauth_callback", "webhook"].includes(r.purpose)) problems.push(`publicRoute ${r.path}`);
+      for (const r of m.publicRoutes ?? []) if (!r.path.startsWith("/") || !(PUBLIC_ROUTE_PURPOSES as readonly string[]).includes(r.purpose)) problems.push(`publicRoute ${r.path}`);
       const envs = [...(m.runtime.env ?? []), ...(m.runtime.services ?? []).flatMap((x) => x.env ?? [])];
       for (const e of envs) if (/^(PORT|HOST|HOSTNAME|BIND|LISTEN)$|PUBLIC_(URL|DOMAIN|HOST)/.test(e.name)) problems.push(`env ${e.name}`);
       const host = new URL(c().url).hostname.replace(/^\[|\]$/g, "");
