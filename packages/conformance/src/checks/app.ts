@@ -4,7 +4,7 @@
 // can access (from the person op `tb.agents_list`), or come from caller-supplied fixtures.
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
+import { digest, type Ed25519KeyPair, HOLDS_PENDING_OP, hookResponseProblem, KNOWN_HOLD_FAMILIES, manifestDigest, normalizeTag, opaqueDigest, PUBLIC_ROUTE_PURPOSES, ulid, validateInput, withStandardOps } from "@opt2-tealbrick/manifest";
 import { type HoldVerdictClaim, type InstanceId, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { CrudAction, Hook, Manifest, Operation, ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
@@ -849,6 +849,30 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
     const [n1, n2] = [nameOf(id1), nameOf(id2)];
     return verdict(n1 === name && n2 === unlisted, `${shown}; row caller.name: listed ${n1 === name ? "= companionCallers name" : JSON.stringify(n1)}, unlisted ${n2 === unlisted ? "= instance id" : JSON.stringify(n2)}`);
   });
+  // spec 0.1.44 (SDK-CALLER-PRODUCT, security): `caller.product` of a receipt row = the VERIFIED product of the app caller
+  // (slice companionCallers entry by the grant's caller instance), never a product looked up by the caller's NAME. Apps
+  // decide per calling app (Rules, Connect data sharing, Observer) on it; a companion named "Observer" must not be Observer.
+  await s.run("A12.caller_product_verified", "an app caller's receipt reports the verified product of its companionCallers entry, not a product found by name (SDK-CALLER-PRODUCT)", "two instances are listed in companionCallers under the SAME name \"Observer\": a decoy (product tbconf-observer, listed first) and the calling app caller (product tbconf-impostor); the caller runs a receipt op (companion grant sub tb:ins:<ins>) → its tb.receipts_list row has caller.product = tbconf-impostor and caller.name = Observer", async () => {
+    const op = byRank(agentOps.filter((o) => o.receipt)).sort((x, y) => Number(x.effect === "money") - Number(y.effect === "money"))[0];
+    if (!op) return na("no agent op with receipt: true");
+    if (!sess) return bad("no person session");
+    const name = "Observer";
+    const decoy = `ins_${ulid()}` as InstanceId;
+    await b.control.listCompanionCaller({ product: "tbconf-observer" as ProductId, ins: decoy, name });
+    await b.control.waitForSliceRevision(await b.control.listCompanionCaller({ product: "tbconf-impostor" as ProductId, ins: appCaller, name }), T);
+    const one = await appCall(appCaller, op);
+    const shown = `${op.id}: ${show(one.answer)} (${one.how})`;
+    const id = rowIdOf(one.answer);
+    if (!id) {
+      const authLike = AUTH_CODES.has(one.answer.code ?? "") || one.answer.code === "audience_not_agent";
+      return authLike ? bad(shown) : notRun(`${shown} — no receipt row to read; supply an inputs fixture an app caller can run`);
+    }
+    const row = (await receiptRows()).find((x) => x.id === id);
+    const caller = row && isObj(row.caller) ? row.caller : undefined;
+    const got = `caller.product ${JSON.stringify(caller?.product)}, caller.name ${JSON.stringify(caller?.name)}`;
+    if (caller?.product === "tbconf-observer") return bad(`${shown}; ${got}: the product was taken from the caller NAME (the decoy "tbconf-observer" has the same name), not from the entry of the grant's caller instance`);
+    return verdict(caller?.product === "tbconf-impostor" && caller?.name === name, `${shown}; row ${got} (expected product "tbconf-impostor" from the companionCallers entry of ${appCaller}, name "${name}")`);
+  });
   await s.run("A12.app_caller_held", "an app caller's first_contact call is held from the companion grant held (C105a); the approval runs once (C8)", "app caller with a companion grant held = appsPolicy.held (DEFAULT_HELD_FAMILIES) calls a first_contact op → 202 held + holdId; approve via the person session; same input + same idempotency key → ok (not held); same call with a new key → held again (new holdId)", async () => {
     const op = byRank(agentOps.filter((o) => o.holdFamily === "first_contact"))[0];
     if (!op) return na("no agent op with holdFamily first_contact");
@@ -1382,9 +1406,10 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   await s.run("A9", "app has no public address", "manifest declares no public exposure (only bridge-served publicRoutes, no public-binding env), the app answers on a private address; with a deploy template: no app service has a public domain", () => {
     if (ctx.deployTemplate === undefined) {
       // Manifest level (Lead · Specs): the schema has no public-address field (strict, M1); publicRoutes are served only
-      // through the bridge at /p/<product>/…; runtime.port is the internal listen port.
+      // through the bridge at /p/<product>/… (viewer routes, spec 0.1.43: through the workspace views service at /v/<product>/…,
+      // never the app); runtime.port is the internal listen port.
       const problems: string[] = [];
-      for (const r of m.publicRoutes ?? []) if (!r.path.startsWith("/") || !["oauth_callback", "webhook"].includes(r.purpose)) problems.push(`publicRoute ${r.path}`);
+      for (const r of m.publicRoutes ?? []) if (!r.path.startsWith("/") || !(PUBLIC_ROUTE_PURPOSES as readonly string[]).includes(r.purpose)) problems.push(`publicRoute ${r.path}`);
       const envs = [...(m.runtime.env ?? []), ...(m.runtime.services ?? []).flatMap((x) => x.env ?? [])];
       for (const e of envs) if (/^(PORT|HOST|HOSTNAME|BIND|LISTEN)$|PUBLIC_(URL|DOMAIN|HOST)/.test(e.name)) problems.push(`env ${e.name}`);
       const host = new URL(c().url).hostname.replace(/^\[|\]$/g, "");

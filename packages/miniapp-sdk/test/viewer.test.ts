@@ -229,6 +229,20 @@ describe("viewer route and ctx.viewUrl", () => {
     assert.equal(b.seen[0]?.headers["sec-fetch-dest"], undefined);
   });
 
+  test("manifest 0.1.22: a content-hashed /_s/ asset keeps `public, max-age, immutable`; a token page stays no-store", async () => {
+    b.next.respond = () => new Response("x", { headers: { "content-type": "text/javascript", "cache-control": "public, max-age=31536000, immutable" } });
+    const asset = await get(`/v/${PRODUCT}/_s/app.3f9a1c.js`);
+    assert.equal(asset.headers.get("cache-control"), "public, max-age=31536000, immutable");
+    await asset.text();
+    const page = await get(`/v/${PRODUCT}/tok`);
+    assert.equal(page.headers.get("cache-control"), "no-store");
+    await page.text();
+    b.next.respond = () => new Response("x", { headers: { "cache-control": "public, max-age=600" } });
+    const notImmutable = await get(`/v/${PRODUCT}/_s/app.js`);
+    assert.equal(notImmutable.headers.get("cache-control"), "no-store");
+    await notImmutable.text();
+  });
+
   test("ETag / 304 round trip: the handler sees If-None-Match and a 304 has no body", async () => {
     b.next.respond = (req) => (req.headers.get("if-none-match") === '"v1"' ? new Response(null, { status: 304, headers: { etag: '"v1"' } }) : new Response("body", { headers: { etag: '"v1"' } }));
     const first = await get(`/v/${PRODUCT}/tok`);

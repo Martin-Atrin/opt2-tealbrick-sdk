@@ -45,7 +45,8 @@ export async function handleHoldPage(rt: Runtime, req: IncomingMessage, res: Ser
     const rows: [string, string][] = [
       ["Status", h.status],
       ["Operation", title],
-      ["Caller", `${h.caller.name} (${h.caller.type})`],
+      // v0.1.27: an app caller's name is display only; the verified product id is what identifies it
+      ["Caller", `${h.caller.name} (${h.caller.type}${h.caller.product ? `, ${h.caller.product}` : ""})`],
       ["Family", h.holdFamily ?? "policy"],
       ["Reason", reason],
       ["Held by", h.heldBy ?? "—"],

@@ -30,6 +30,7 @@ import { header, readJson, requestId, sendError, sendJson } from "./http.ts";
 import { type ClaimedJob, jobsView, type OpFireOutcome, unsealGrant } from "./jobs.ts";
 import { HOLD_TTL_MS, type NewReceipt, type Receipts } from "./receipts.ts";
 import type { Runtime } from "./runtime.ts";
+import { appCallerProduct } from "./trust.ts";
 
 export const OP_TIMEOUT_MS = 30_000;
 const SUMMARY_MAX = 280;
@@ -437,6 +438,9 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       // v0.1.14 (C102): app callers are named from slice companionCallers (verified grant sub), fallback the instance id
       name: sliceAgent?.name ?? (g.caller.type === "app" ? (rt.trust.companionCallers().find((x) => x.ins === callerId)?.name ?? callerId) : callerId),
       mode: g.caller.type === "agent" ? (sliceAgent?.mode ?? g.claims.mode) : null,
+      // v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): app callers only, the VERIFIED product of the slice companionCallers entry
+      // whose `ins` is the verified grant's caller instance. Never derived from the name.
+      ...appCallerProduct(rt, g.caller.type, callerId),
     };
     const callId = proof.claims.call;
     // v0.1.22 (SDK-05, fail closed): an agent that is not in the verified slice is refused — no invented agent record,
@@ -544,7 +548,7 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
       );
       const decision = d.decision;
       slot = d.slot;
-      const receiptCaller = { type: caller.type as "agent" | "app", id: callerId, name: caller.name };
+      const receiptCaller = receiptCallerOf(caller, callerId);
       const base = { callId, caller: receiptCaller, op: op.id, effect: eff.effect, inputDigest: inputDigest as Sha256Digest, idempotencyKey: idemKey };
       const meta0: Json = dyn ? { tool: dyn.tool } : null;
 
@@ -617,6 +621,11 @@ export async function handleAgentOp(rt: Runtime, req: IncomingMessage, res: Serv
   }
 }
 
+/** The caller a receipt / hold records (app callers carry the verified `product`). */
+function receiptCallerOf(caller: Caller, id: AgentId | InstanceId): Receipt["caller"] {
+  return { type: caller.type as "agent" | "app", id, name: caller.name, ...(caller.type === "app" && caller.product !== undefined ? { product: caller.product } : {}) };
+}
+
 type ReceiptBase = Pick<NewReceipt, "callId" | "caller" | "op" | "effect" | "inputDigest" | "idempotencyKey">;
 
 /** A hold receipt for a `hold` decision (called op or scheduled op); refuses `hold_view_too_large`. */
@@ -667,7 +676,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   const input = job.input;
   const inputDigest = digest(input) as Sha256Digest;
   const spec = handlerSpec(rt, op.id);
-  const caller: Caller = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null };
+  const caller: Caller = { type: who.type, id: who.id as Caller["id"], name: who.name, mode: (job.callerMode as Caller["mode"]) ?? null, ...appCallerProduct(rt, who.type, who.id) };
   const effect = op.effect;
 
   if (who.type === "person") {
@@ -680,7 +689,7 @@ export async function fireScheduledOp(rt: Runtime, job: ClaimedJob, signal: Abor
   }
 
   const callerId = who.id as AgentId | InstanceId;
-  const receiptCaller = { type: who.type as "agent" | "app", id: callerId, name: who.name };
+  const receiptCaller = receiptCallerOf(caller, callerId);
   const base: ReceiptBase = { callId: null, caller: receiptCaller, op: op.id, effect, inputDigest, idempotencyKey: job.key };
   const refuse = (reason: string): OpFireOutcome => {
     rt.receipts.insert({ ...base, kind: "rcp", holdFamily: null, status: "refused", summary: clampSummary(op.title), meta: { reason, scheduled: job.id } });

@@ -72,11 +72,19 @@ export type CappedEffect = "write" | "outward" | "destructive";
 export const CAPPED_EFFECTS: readonly CappedEffect[] = ["write", "outward", "destructive"];
 export const isCappedEffect = (e: string): e is CappedEffect => (CAPPED_EFFECTS as readonly string[]).includes(e);
 
+/** The stored caller; `product` (v0.1.27, SDK-CALLER-PRODUCT) only for an app caller whose receipt recorded one (older rows: absent). */
+function callerOf(r: Row): Receipt["caller"] {
+  const type = String(r.caller_type) as "agent" | "app";
+  const caller: Receipt["caller"] = { type, id: String(r.caller_id) as Receipt["caller"]["id"], name: String(r.caller_name) };
+  if (type === "app" && typeof r.caller_product === "string" && r.caller_product !== "") caller.product = r.caller_product as NonNullable<Receipt["caller"]["product"]>;
+  return caller;
+}
+
 function toReceipt(r: Row, withView: boolean): Receipt {
   const rec: Receipt = {
     id: String(r.id) as Receipt["id"],
     callId: (r.call_id as Receipt["callId"]) ?? null,
-    caller: { type: String(r.caller_type) as "agent" | "app", id: String(r.caller_id) as Receipt["caller"]["id"], name: String(r.caller_name) },
+    caller: callerOf(r),
     op: String(r.op),
     effect: String(r.effect) as Effect,
     holdFamily: (r.hold_family as Receipt["holdFamily"]) ?? null,
@@ -240,7 +248,7 @@ export class Receipts implements ReceiptStore {
     }
     const rows = this.#db
       .prepare(
-        `SELECT id, op, hold_family, hold_reason, held_by, summary, caller_type, caller_id, caller_name, created_at FROM tb_receipts
+        `SELECT id, op, hold_family, hold_reason, held_by, summary, caller_type, caller_id, caller_name, caller_product, created_at FROM tb_receipts
           WHERE ${where.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`,
       )
       .all(...args, limit + 1) as Row[];
@@ -252,7 +260,7 @@ export class Receipts implements ReceiptStore {
         reason: holdReasonOf(r.hold_reason, r.hold_family),
         heldBy: (r.held_by as string | null) ?? null,
         summary: String(r.summary),
-        caller: { type: String(r.caller_type) as "agent" | "app", id: String(r.caller_id) as Receipt["caller"]["id"], name: String(r.caller_name) },
+        caller: callerOf(r),
         createdAt: Number(r.created_at),
       }),
     );
@@ -266,7 +274,7 @@ export class Receipts implements ReceiptStore {
     this.#db
       .prepare(
         `INSERT INTO tb_receipts (id, call_id, caller_type, caller_id, caller_name, op, effect, hold_family, status, input_digest,
-          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          summary, meta, idempotency_key, view, created_at, expires_at, held_by, hold_reason, caller_product) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -287,6 +295,7 @@ export class Receipts implements ReceiptStore {
         n.expiresAt ?? null,
         n.heldBy ?? null,
         n.holdReason ?? null,
+        n.caller.type === "app" ? (n.caller.product ?? null) : null,
       );
     return this.getSync(id) as Receipt;
   }

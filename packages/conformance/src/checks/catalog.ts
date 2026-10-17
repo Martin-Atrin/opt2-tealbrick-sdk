@@ -126,6 +126,7 @@ export const APP_CHECK_IDS = [
   "A12.companion_call",
   "A12.companion_refresh_retry",
   "A12.caller_name",
+  "A12.caller_product_verified",
   "A12.app_caller_held",
   "A12.scope_request",
   "A11.resolve_family",

@@ -14,6 +14,7 @@ import {
 } from "@opt2-tealbrick/manifest";
 import type { InstanceSlice, ScopeRequest } from "@opt2-tealbrick/spec/bridge";
 import { type BridgeId, type Ed25519PublicJwk, type InstanceId, type InstanceRef, LIFETIME_S, TYP, type WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { ProductId } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet, Refusal, SliceAgent, TrustContext } from "@opt2-tealbrick/spec/sdk";
 import { metaDelete, metaGet, metaSet, type RawDb } from "./store.ts";
 
@@ -178,6 +179,15 @@ export class TrustState {
     return raw.filter((e) => e && typeof e.product === "string" && typeof e.ins === "string" && typeof e.name === "string" && e.name !== "").map((e) => ({ product: e.product, ins: e.ins, name: e.name }));
   }
 
+  /**
+   * v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): the VERIFIED product id of the app caller instance `ins` = the slice
+   * `companionCallers[]` entry whose `ins` equals it (Portal-signed slice). The ONLY source of `Caller.product`: never
+   * derived from a name. undefined = `ins` is not a companion caller in the current slice.
+   */
+  companionProduct(ins: string): string | undefined {
+    return this.companionCallers().find((x) => x.ins === ins)?.product;
+  }
+
   /** v0.1.18 (C106a): the slice's scopeRequest of `agt`, only when it targets `product` */
   agentScopeRequest(agt: string, product: string): ScopeRequest | null {
     const r = this.slice?.agents.find((a) => a.id === agt)?.scopeRequest;
@@ -265,4 +275,15 @@ function peekPayload(token: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * v0.1.27 (SDK-CALLER-PRODUCT, spec 0.1.44): `Caller.product` for an APP caller = the verified product id of the slice
+ * `companionCallers[]` entry whose `ins` is the caller instance. Empty for agents, persons and an app not in the slice.
+ * The only place a product is attached to a caller; it never reads a name.
+ */
+export function appCallerProduct(rt: { trust: Pick<TrustState, "companionProduct"> }, type: string, ins: string): { product?: ProductId } {
+  if (type !== "app") return {};
+  const product = rt.trust.companionProduct(ins);
+  return product === undefined ? {} : { product: product as ProductId };
 }

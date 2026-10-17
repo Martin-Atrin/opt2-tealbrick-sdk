@@ -16,6 +16,7 @@ import type { SdkEventContext } from "./context.ts";
 import { TbError } from "./errors.ts";
 import type { Runtime } from "./runtime.ts";
 import { metaGet, metaSet, type RawDb, type Row, tx } from "./store.ts";
+import { appCallerProduct } from "./trust.ts";
 
 // ── limits and defaults ──────────────────────────────────────────────────────
 export const JOB_KIND_RE = /^[a-z][a-z0-9_.-]{0,63}$/;
@@ -1055,7 +1056,9 @@ export function jobsView(rt: Runtime, runner: JobRunner, who: JobCaller | null):
 }
 
 function jobContext(rt: Runtime, runner: JobRunner, job: ClaimedJob, signal: AbortSignal): JobContext {
-  const who: JobCaller | null = job.caller ? { caller: { type: job.caller.type, id: job.caller.id as Caller["id"], name: job.caller.name, mode: (job.callerMode as Caller["mode"]) ?? null }, grant: null } : null;
+  const who: JobCaller | null = job.caller
+    ? { caller: { type: job.caller.type, id: job.caller.id as Caller["id"], name: job.caller.name, mode: (job.callerMode as Caller["mode"]) ?? null, ...appCallerProduct(rt, job.caller.type, job.caller.id) }, grant: null }
+    : null;
   const view = jobsView(rt, runner, who);
   return {
     ...rt.eventContext(),
