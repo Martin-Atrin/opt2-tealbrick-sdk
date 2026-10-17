@@ -198,10 +198,35 @@ test("opInGrantWorkflow / opVisibleToGrant (L1): tools/list shows exactly what g
     { mode: "bound" as const, wf: ["notes_add"], crud: ["read"] as ("read" | "create")[] },
   ]) {
     const s = await setup(grant);
-    for (const op of [view("notes_search", ["read"]), view("notes_add", ["create"]), view("notes_other", ["read"], { scopeType: "ghost" }), view("person_op", ["read"], { audience: "person" }), hp]) {
+    for (const op of [view("notes_search", ["read"]), view("notes_add", ["create"]), view("notes_other", ["read"], { scopeType: "ghost" }), view("person_op", ["read"], { audience: "person" }), view("node_pump", ["read"], { listing: "workflow" }), view("notes_add", ["create"], { listing: "workflow" }), hp]) {
       const listed = opVisibleToGrant(op, grant, ["area"]);
       const passes = g(s.gateIn({ op })).decision === "pass";
       assert.equal(listed, passes, `${grant.mode} wf[${grant.wf}] crud[${grant.crud}] ${op.id}`);
     }
+  }
+});
+
+test("v0.1.21 (LR-1, C234): a listing workflow op is visible and passes ONLY when the grant wf names it, in any mode", async () => {
+  const { gate: g, opInGrantWorkflow, opVisibleToGrant } = await import("../src/decision.ts");
+  // fires on bad: a Free card with an empty wf saw every op before; a workflow op must stay hidden from it
+  assert.equal(opInGrantWorkflow({ mode: "free", wf: [] }, "node_pump", "workflow"), false);
+  assert.equal(opInGrantWorkflow({ mode: "free", wf: ["other"] }, "node_pump", "workflow"), false);
+  assert.equal(opInGrantWorkflow({ mode: "bound", wf: ["other"] }, "node_pump", "workflow"), false);
+  // quiet on good: the machine card's wf names it
+  assert.equal(opInGrantWorkflow({ mode: "free", wf: ["node_pump"] }, "node_pump", "workflow"), true);
+  assert.equal(opInGrantWorkflow({ mode: "bound", wf: ["node_pump"] }, "node_pump", "workflow"), true);
+  // default listing keeps the old rule
+  assert.equal(opInGrantWorkflow({ mode: "free", wf: [] }, "x", "default"), true);
+  const pump = { standard: false, id: "node_pump", title: "p", description: "p", crud: ["read"], effect: "read", audience: "agent", idempotency: "none", receipt: false, input: { type: "object" }, output: { type: "object" }, listing: "workflow" } as unknown as OperationView;
+  for (const grant of [
+    { mode: "free" as const, wf: [] as string[], crud: ["read"] as "read"[] },
+    { mode: "free" as const, wf: ["node_pump"], crud: ["read"] as "read"[] },
+  ]) {
+    const s = await setup(grant);
+    const listed = opVisibleToGrant(pump, grant, []);
+    const d = g(s.gateIn({ op: pump }));
+    assert.equal(listed, grant.wf.includes("node_pump"));
+    assert.equal(d.decision === "pass", grant.wf.includes("node_pump"), JSON.stringify(d));
+    if (!listed) assert.equal(d.reason, "not_in_workflow");
   }
 });

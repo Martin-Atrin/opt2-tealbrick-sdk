@@ -35,9 +35,12 @@ const subset = (a: readonly CrudAction[], b: readonly CrudAction[]) => a.every((
  * its `wf` is non-empty, and `wf` lists the op; otherwise (Free with an empty `wf`) every op passes this step. gate()
  * step (4) and tools/list use this one function.
  */
-export function opInGrantWorkflow(claims: { mode: string; wf: readonly string[] }, opId: string): boolean {
+export function opInGrantWorkflow(claims: { mode: string; wf: readonly string[] }, opId: string, listing?: string): boolean {
+  // v0.1.21 (spec 0.1.43, LR-1 C234): a `listing: "workflow"` op passes ONLY when the grant's wf names it, in any mode
+  if (listing === "workflow") return claims.wf.includes(opId);
   return !(claims.mode === "bound" || claims.wf.length > 0) || claims.wf.includes(opId);
 }
+const listingOf = (op: GateInput["op"]): string | undefined => (op.standard ? undefined : op.listing);
 
 /**
  * v0.1.21 (L1): THE tools/list rule — the static part of gate() steps (3)–(4) for one op and one verified grant: the
@@ -50,7 +53,7 @@ export function opVisibleToGrant(op: GateInput["op"], claims: { mode: string; wf
   if (!subset(op.crud, claims.crud) || op.audience !== "agent") return false;
   const scopeType = op.standard ? undefined : op.scopeType;
   if (scopeType !== undefined && !declaredScopeTypes.includes(scopeType)) return false;
-  return opInGrantWorkflow(claims, op.id);
+  return opInGrantWorkflow(claims, op.id, listingOf(op));
 }
 
 /**
@@ -71,7 +74,7 @@ export function gate(input: GateInput): GateDecision {
   const scopeType = op.standard ? undefined : op.scopeType;
   if (scopeType !== undefined && !input.declaredScopeTypes.includes(scopeType)) return { decision: "refuse", reason: DECISION_REASON.scopeTypeUnknown };
   // v0.1.19 (C111a): `wf`, when non-empty, limits ops in ANY mode (bound grants always carry a non-empty wf)
-  if (!opInGrantWorkflow(g.claims, op.id)) return { decision: "refuse", reason: DECISION_REASON.notInWorkflow };
+  if (!opInGrantWorkflow(g.claims, op.id, listingOf(op))) return { decision: "refuse", reason: DECISION_REASON.notInWorkflow };
   return { decision: "pass", reason: DECISION_REASON.pass };
 }
 
