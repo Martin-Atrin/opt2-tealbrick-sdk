@@ -7,6 +7,7 @@
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--tb-s3) var(--tb-s5); }
 .page-head h1 { font-size: 2rem; line-height: 36px; }
 .page-head .tb-lede { max-width: 60ch; }
+.page-title { display: grid; gap: var(--tb-s2); min-width: 0; }
 
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: var(--tb-s6); align-items: start; }
 .split > aside { position: sticky; top: calc(var(--tb-head-app) + 16px); }
