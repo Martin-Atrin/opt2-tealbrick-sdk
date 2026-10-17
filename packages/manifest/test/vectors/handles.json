@@ -1,0 +1,31 @@
+{
+  "$comment": "G-4 shared handle vectors (manifest 0.1.19). Rules, Governance and Inbox may run their own parsers against this file. npub vectors cross-checked with NIP-19 and Connect's independent encoder.",
+  "npubFromHex": [
+    { "hex": "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d", "npub": "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "note": "NIP-19 example" },
+    { "hex": "0000000000000000000000000000000000000000000000000000000000000000", "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme" },
+    { "hex": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "npub": "npub1lllllllllllllllllllllllllllllllllllllllllllllllllllsq7lrjw", "note": "upper-case hex" }
+  ],
+  "npubFromHexThrows": ["", "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459", "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d0", "zz f0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa45"],
+  "normalizeHandle": [
+    { "in": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "out": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6" },
+    { "in": "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "out": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "note": "bare npub reads as buzz" },
+    { "in": "buzz:3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d", "out": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "note": "64-hex becomes npub" },
+    { "in": "buzz:NPUB180CVV07TJDRRGPA0J7J7TMNYL2YR6YR7L8J4S3EVF6U64TH6GKWSYJH6W6", "out": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "note": "upper-case npub value" },
+    { "in": "  buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6  ", "out": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "note": "trimmed" },
+    { "in": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w7", "out": null, "note": "bad checksum" },
+    { "in": "buzz:npub1qqqq", "out": null, "note": "too short" },
+    { "in": "buzz:3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459", "out": null, "note": "63 hex" },
+    { "in": "slack:U012ABCDEF", "out": "slack:U012ABCDEF" },
+    { "in": "slack:u012abcdef", "out": "slack:U012ABCDEF", "note": "upper-cased" },
+    { "in": "slack:W0ENTERPRISE1", "out": "slack:W0ENTERPRISE1" },
+    { "in": "slack:C012ABCDEF", "out": null, "note": "channel id, not a user" },
+    { "in": "telegram:123456789", "out": "telegram:123456789" },
+    { "in": "telegram:-1001234567890", "out": "telegram:-1001234567890", "note": "group chat id" },
+    { "in": "telegram:0123", "out": null, "note": "leading zero" },
+    { "in": "telegram:@someone", "out": null, "note": "username is not an id" },
+    { "in": "whatsapp:+421900000000", "out": null, "note": "unknown channel" },
+    { "in": "buzz:", "out": null },
+    { "in": "", "out": null },
+    { "in": "no-colon", "out": null }
+  ]
+}
