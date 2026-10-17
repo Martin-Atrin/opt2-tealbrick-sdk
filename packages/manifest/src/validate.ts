@@ -115,6 +115,8 @@ export function validateAgainstSchema(schema: JsonSchemaObject, value: Json): In
 }
 
 const NO_INPUT: JsonSchemaObject = { type: "object", additionalProperties: false };
+/** M-OP-4: the families an `outward` op may declare (every hold family except the effect-bound destructive and money). */
+const OUTWARD_FAMILIES = ["first_contact", "profile_change", "live_call", "outward", "identity", "public_link"] as const;
 
 /** Validates a call input against the op's input schema (C21; BRIDGE §8.1 step 4). Standard ops use the SDK-API §6 shapes,
  * dynamic ops `DynamicCallInput`, an op without `input` accepts only `{}`. */
@@ -407,9 +409,9 @@ function operationRules(m: Manifest, add: Add): void {
           ? hf === "destructive"
           : op.effect === "money"
             ? hf === "money"
-            : // outward (v0.1.16 C107: + outward, identity). An ABSENT family is still accepted for one release (Core keeps
-              // deploying current manifests); conformance 0.1.11 warns (M2.outward_family) and manifest 0.1.12 refuses it.
-              hf === undefined || hf === "first_contact" || hf === "profile_change" || hf === "live_call" || hf === "outward" || hf === "identity";
+            : // outward (v0.1.16 C107: + outward, identity; spec 0.1.41 C232: + public_link). An ABSENT family is still accepted
+              // for one release (Core keeps deploying current manifests); conformance 0.1.11 warns (M2.outward_family).
+              hf === undefined || (OUTWARD_FAMILIES as readonly string[]).includes(hf);
     if (!hfOk) add("M-OP-4", "hold_family_invalid", `${p}/holdFamily`, `holdFamily ${hf ?? "(absent)"} invalid for effect ${op.effect}`);
 
     if (op.crud.includes("create") && op.idempotency !== "required") {
