@@ -17,9 +17,11 @@ import { APP_CHECK_IDS } from "./checks/catalog.ts";
 import { runManifestChecks } from "./checks/manifest.ts";
 import { createFakeBridge, type FakeAgent, type FakeBridge } from "./fake-bridge.ts";
 import { request } from "./http.ts";
+import { type MultiAppDeps, preparePeers, runPeerChecks } from "./multi-app.ts";
+import { type PeerSourceOptions, removePeerCaches } from "./peer-source.ts";
 import { buildReport, type PayloadScan, type Report } from "./report.ts";
 import { bad, Suite } from "./suite.ts";
-import { type ConformanceConfig, EMPTY_CONFIG, loadConformanceConfig } from "./waivers.ts";
+import { type ConformanceConfig, EMPTY_CONFIG, loadConformanceConfig, type PeerSpec } from "./waivers.ts";
 
 export interface AppStartResult {
   /** private-network origin of the app (e.g. http://127.0.0.1:8080) */
@@ -67,6 +69,13 @@ export interface RunAppOptions {
    * strict app cannot boot against the fake bridge (the boot failure says so).
    */
   testRoots?: boolean;
+  /**
+   * CONF-MULTIAPP (conformance 0.1.20, CLI `--peers`): run REAL peer apps (released SDK apps from the signed release
+   * index) behind the fake bridge and report group X. `specs` default: `config.peers` (tealbrick-conformance.json).
+   * `source` makes the index lookup and the checkout injectable (the suite's own tests use local fixture apps and no
+   * network); `cleanup` removes the peer checkouts after the run. Off unless set; needs test roots.
+   */
+  peers?: { specs?: PeerSpec[]; source?: PeerSourceOptions; cleanup?: boolean };
 }
 
 /** Harness-only env name carrying the test root JWKs (never read by the SDK or the bridge; CONFORMANCE §7). */
@@ -150,6 +159,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   let app: AppStartResult | null = null;
   let client: AppClient | null = null;
   let scan: PayloadScan | undefined;
+  const loadedPeers: Parameters<typeof removePeerCaches>[0][number][] = [];
   const notes: string[] = [...mres.notes];
   try {
     if (opts.start) app = await opts.start(env);
@@ -177,6 +187,12 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       return buildReport({ target: "app", subject: subjectOf(url), startedAt, checks: s.results, sdk: { majors: bridge.sdkMajors, reported: null }, notes: bootNotes });
     }
     const start = opts.start;
+    // CONF-MULTIAPP: peers are downloaded / installed / built BEFORE the checks (a failure is that peer's X1 row, never an abort)
+    const peerSpecs = opts.peers ? (opts.peers.specs ?? config.peers) : [];
+    if (opts.peers && peerSpecs.length === 0) throw new TypeError("runApp: peers requested but none declared (tealbrick-conformance.json peers)");
+    const prepared = peerSpecs.length > 0 ? await preparePeers(peerSpecs, opts.peers?.source ?? {}, notes) : [];
+    loadedPeers.push(...prepared.flatMap((p) => ("peer" in p ? [p.peer] : [])));
+    const deps: MultiAppDeps = { appEnv, freeTcpPort, testRootsEnv: TEST_ROOTS_ENV, portEnv: PORT_ENV };
     scan = await runAppChecks(s, {
       bridge,
       client: () => client as AppClient,
@@ -197,6 +213,9 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
       setup: config.setup,
       dynamic: config.dynamic,
       ...(config.narrowing ? { narrowing: config.narrowing } : {}),
+      ...(prepared.length > 0
+        ? { multi: (driver) => runPeerChecks({ suite: s, deps, app: { manifest: manifest as Manifest, bridge, driver, timeoutMs }, prepared, config, testRoots, notes }) }
+        : {}),
       notes,
       testRoots,
       ...(opts.deployTemplate !== undefined ? { deployTemplate: opts.deployTemplate } : {}),
@@ -215,6 +234,7 @@ export async function runApp(opts: RunAppOptions): Promise<Report> {
   } finally {
     await app?.stop().catch(() => undefined);
     await bridge.close();
+    if (opts.peers?.cleanup) removePeerCaches(loadedPeers);
     if (ownDir && !opts.keepData) rmSync(dataDir, { recursive: true, force: true });
   }
 }

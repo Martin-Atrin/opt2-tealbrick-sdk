@@ -4,6 +4,8 @@
 //     --start: the module default-exports `start(env) → Promise<{ url, stop, backupNow? }>` (runApp's harness contract);
 //     the CLI runs it in a child process (forkStart), a fresh one per (re)start, so the app's own process changes (the
 //     SDK's root → uid 1000 drop) never reach the suite
+//     --peers (CONF-MULTIAPP, package 0.1.20): also run the REAL peer apps declared in tealbrick-conformance.json `peers`
+//     (released versions from the signed release index) behind the fake bridge and report group X; --no-peers: off (default)
 //   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>]
 //     --repo: the repository root for M6 (build paths are repo-relative; skill files are relative to <file>'s directory)
 //   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>]
@@ -44,6 +46,11 @@ const USAGE = `usage:
         a --cmd / --url app must honour TBCONF_PORTAL_ROOT_KEYS the same way, or run with --no-test-roots
       --no-test-roots: no test roots (A13 not_run); a spec-0.1.12 app then refuses every fake-bridge slice and the run fails at boot
       --test-roots: accepted, no-op (the default)
+      --peers: also boot the REAL peer apps of ${WAIVER_FILE} "peers": [{"product", "version", "channel"?, "settings"?}] (max 3) behind the fake
+        bridge (group X: peer boot, real companion calls, refusals, contract schema, hold round trip). Each peer is the source at the commit
+        of its record in the SIGNED release index, installed with pnpm --frozen-lockfile --ignore-scripts and built; needs pnpm, network
+        (registry, codeload.github.com) and test roots; adds minutes to the run. --no-peers: off (the default). --clean-peers: remove the
+        peer checkouts (<tmp>/tbconf-peers) after the run
   tb-conformance manifest <file> [--scan <dir>]... [--expect-digest <sha256:…>] [--repo <dir>] [--json] [--report <base>]
   tb-conformance core [--url <gateway origin>] [--live-readonly] [--max-requests <n>] [--interval-ms <ms>] [--json] [--report <base>]
   tb-conformance bridge (--start <module.ts> | --cmd "<command>") [--groups <a,b>] [--pause-latency <ms>] [--no-test-roots] [--timeout <ms>] [--json] [--report <base>]
@@ -152,6 +159,9 @@ export async function main(argv: string[]): Promise<number> {
       "login-cmd": { type: "string" },
       "echo-logs": { type: "boolean", default: false },
       "test-roots": { type: "boolean", default: false },
+      peers: { type: "boolean", default: false },
+      "no-peers": { type: "boolean", default: false },
+      "clean-peers": { type: "boolean", default: false },
       "no-test-roots": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       "allow-not-run": { type: "boolean", default: false },
@@ -168,6 +178,8 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (values["test-roots"] && values["no-test-roots"]) throw new Error("use one of --test-roots (the default) and --no-test-roots");
   const testRoots = !values["no-test-roots"];
+  if (values.peers && values["no-peers"]) throw new Error("use one of --peers and --no-peers (the default)");
+  if ((values.peers || values["clean-peers"]) && target !== "app") throw new Error("--peers and --clean-peers apply to the app target only");
   // waivers and the config file are checked before anything runs: an unknown id or a malformed entry is a usage error (exit 2)
   let waivers: Waiver[];
   let config: ConformanceConfig = EMPTY_CONFIG;
@@ -193,6 +205,10 @@ export async function main(argv: string[]): Promise<number> {
       if (!values.start && !values.cmd && !values.url) throw new Error("app: --start, --cmd or --url required");
       if ([values.start, values.cmd].filter(Boolean).length > 1) throw new Error("app: use one of --start and --cmd");
       if (!values.start && !values.cmd && !values["env-out"]) throw new Error("app: --url mode needs --env-out <file> (the env the app must boot with)");
+      if (values.peers && config.peers.length === 0) {
+        process.stderr.write(`tb-conformance: --peers needs "peers" in ${WAIVER_FILE} next to the manifest (none declared)\n${USAGE}\n`);
+        return 2;
+      }
       const envOut = values["env-out"];
       const manifest = loadManifest({ manifestPath: values.manifest }) as { runtime?: { port?: number } };
       const timeoutMs = values.timeout ? Number(values.timeout) : 20_000;
@@ -218,6 +234,7 @@ export async function main(argv: string[]): Promise<number> {
         ...(values["deploy-template"] ? { deployTemplate: readJson(values["deploy-template"]) } : {}),
         testRoots,
         timeoutMs,
+        ...(values.peers ? { peers: { ...(values["clean-peers"] ? { cleanup: true } : {}) } } : {}),
       });
       break;
     }

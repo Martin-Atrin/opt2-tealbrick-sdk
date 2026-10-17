@@ -158,6 +158,32 @@ export const APP_CHECK_IDS = [
   "A11",
 ] as const;
 
+/**
+ * CONF-MULTIAPP (conformance 0.1.20): group X, real peer apps behind the fake bridge (`--peers`). A run reports ONE ROW
+ * per peer (X1) or per declared companion op of a peer (X2..X5), so the row ids carry the peer product and the op:
+ * `X1.peer_boot.<peer>`, `X2.companion_call.<peer>.<op>`, `X3.companion_refused.<peer>.<op>`,
+ * `X4.contract_schema.<peer>.<op>`, `X5.hold_round_trip.<peer>.<op>`. They are not in CHECK_IDS (no peers, no X rows);
+ * `isCheckId` accepts them (waivers name them, the id tests use it).
+ */
+export const PEER_CHECK_BASES = {
+  "X1.peer_boot": "each peer boots under the conformance env and claims through its own fake bridge",
+  "X2.companion_call": "a real callApp of the app under test through the fake bridge reaches the real peer; the peer's receipt names the verified caller",
+  "X3.companion_refused": "the real peer refuses a crud beyond the grant, a grant for another instance, a tampered proof and no proof",
+  "X4.contract_schema": "the peer's real output validates against the pinned contract schema",
+  "X5.hold_round_trip": "a held companion op: hold listed in the peer, approved, the retried call runs once",
+} as const;
+
+const PEER_ROW = /^(X[1-5]\.[a-z_]+)\.([a-z][a-z0-9-]{1,31})(?:\.([a-z][a-z0-9_]{1,39}))?$/;
+/** True for a catalogued id, or a group X row id (`<base>.<peer>[.<op>]`; X1 has no op). */
+export function isCheckId(id: string): boolean {
+  if (CHECK_IDS.has(id)) return true;
+  const m = PEER_ROW.exec(id);
+  if (!m) return false;
+  const base = m[1] as string;
+  if (!(base in PEER_CHECK_BASES)) return false;
+  return base === "X1.peer_boot" ? m[3] === undefined : m[3] !== undefined;
+}
+
 export interface PendingCheck {
   id: string;
   title: string;
