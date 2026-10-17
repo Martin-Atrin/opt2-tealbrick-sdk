@@ -45,7 +45,7 @@ import type {
   Sha256Digest,
   WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
-import type { AgentMode, HoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { AgentMode, CrudAction, HoldFamily, Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { AppClient } from "./app-client.ts";
 import { closeServer, HttpError, header, listen, parseJson, readRaw, sendError, sendJson } from "./http.ts";
@@ -70,6 +70,35 @@ export interface FakeBridgeOptions {
   /** cap for status long-polls in seconds (default 60, BRIDGE §10.3) */
   maxWaitS?: number;
   port?: number;
+  /**
+   * CONF-MULTIAPP (conformance 0.1.20): join the world of another fake bridge: the SAME workspace, bridge id, Portal keys,
+   * bridge keys and test root, so the grants and call proofs of one fake bridge verify at the app behind this one (a REAL
+   * peer app of the app under test has its own claim, slice and status long-poll, hence its own fake bridge).
+   */
+  joinWorld?: FakeBridge;
+  /** CONF-MULTIAPP: instance ids for companion products that are other (real) apps of this world; others get a fresh fake id */
+  peerInstances?: Record<string, InstanceId>;
+}
+
+/** One forwarded companion call (CONF-MULTIAPP): what the fake bridge hands to the real peer app and relays back. */
+export interface PeerCall {
+  envelope: CallEnvelope;
+  /** the verified calling instance (TB-Assert) */
+  caller: InstanceId;
+  /** the companion grant the caller presented (already checked by gate()) */
+  grant: string;
+}
+export interface PeerAnswer {
+  status: number;
+  body: unknown;
+}
+/** Routes a companion call to a REAL app instead of the `companionResponder` fake (CONF-MULTIAPP). */
+export type PeerRoute = (call: PeerCall) => Promise<PeerAnswer>;
+/** A real peer target as the fake bridge's gate() needs it: the target manifest's operations and scope types. */
+export interface PeerTarget {
+  ops: readonly OperationView[];
+  scopeTypes: readonly string[];
+  route: PeerRoute;
 }
 
 export interface CapturedPayload {
@@ -129,6 +158,8 @@ export class FakeBridge {
   readonly keyFetches: { name: string; ins: InstanceId; at: number }[] = [];
   readonly violations: Violation[] = [];
   readonly companionCalls: { envelope: CallEnvelope; caller: InstanceId; answer: number; at: number; grant: string }[] = [];
+  /** CONF-MULTIAPP: companion targets that are REAL apps (product → target); every other target keeps the `companionResponder` fake */
+  readonly peerTargets = new Map<string, PeerTarget>();
   /** companion calls refused on purpose by `control.refuseNextCompanionCalls` (the SDK's refresh-and-retry path) */
   readonly companionRefusals: { envelope: CallEnvelope; caller: InstanceId; code: string; at: number }[] = [];
   companionRefuseQueue: { status: number; code: string }[] = [];
@@ -199,10 +230,10 @@ export class FakeBridge {
       { id: newId("agt") as AgentId, name: "Conformance agent C", mode: "bound" },
     ];
     const peers: Record<string, InstanceId> = {};
-    for (const c of opts.manifest.companions ?? []) peers[c.product] = newId("ins") as InstanceId;
+    for (const c of opts.manifest.companions ?? []) peers[c.product] = opts.peerInstances?.[c.product] ?? (newId("ins") as InstanceId);
     this.ids = {
-      ws: newId("ws") as WorkspaceId,
-      bridge: newId("brg") as BridgeId,
+      ws: opts.joinWorld?.ids.ws ?? (newId("ws") as WorkspaceId),
+      bridge: opts.joinWorld?.ids.bridge ?? (newId("brg") as BridgeId),
       ins: opts.instanceId ?? (newId("ins") as InstanceId),
       person: newId("per") as PersonId,
       agents,
@@ -225,8 +256,16 @@ export class FakeBridge {
   }
 
   static async create(opts: FakeBridgeOptions): Promise<FakeBridge> {
-    const [portal, bridge, stranger, root] = await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair(), generateKeyPair()]);
+    const w = opts.joinWorld;
+    const [portal, bridge, stranger, root] = w
+      ? [w.activePortalKey(), w.bridgeKeys[0], w.stranger, w.testRoot]
+      : await Promise.all([generateKeyPair(), generateKeyPair(), generateKeyPair(), generateKeyPair()]);
     const fb = new FakeBridge(opts, { portal, bridge, stranger, root });
+    if (w) {
+      // the whole key state of the joined world (rotated / retired keys included), so its grants and proofs verify here
+      fb.portalKeys = w.portalKeys.map((k) => ({ key: k.key, status: k.status }));
+      fb.bridgeKeys = [...w.bridgeKeys];
+    }
     fb.url = await listen(fb.#server, opts.port ?? 0);
     await fb.rebuildSlice();
     return fb;
@@ -311,6 +350,18 @@ export class FakeBridge {
       );
     }
     return out;
+  }
+
+  /**
+   * CONF-MULTIAPP: a companion grant of this app for the companion `product`, minted exactly as the slice's own (sub self,
+   * aud the target instance, mode bound, held = the workspace apps policy, wf = the declared ops); `over` changes `wf` /
+   * `crud` / `aud` for the negative cases (a crud beyond the grant, another instance); `op` picks the companion entry that lists it.
+   */
+  companionGrantFor(product: string, over: { op?: string; wf?: string[]; crud?: CrudAction[]; aud?: InstanceId } = {}): Promise<string> {
+    const c = (this.manifest.companions ?? []).find((x) => x.product === product && (over.op === undefined || x.operations.includes(over.op)));
+    const aud = over.aud ?? this.ids.peers[product];
+    if (!c || !aud) throw new Error(`fake bridge: ${this.manifest.id} declares no companion ${product}`);
+    return this.mint.grant({ sub: `tb:ins:${this.ids.ins}`, aud: `tb:ins:${aud}`, crud: over.crud ?? c.crud, mode: "bound", held: [...this.appsPolicy.held], caps: {}, wf: over.wf ?? c.operations });
   }
 
   /** Signs a new slice (`rev` + 1) with the active Portal key and wakes the status long-polls. */
@@ -567,7 +618,11 @@ export class FakeBridge {
       this.companionRefusals.push({ envelope: env as CallEnvelope, caller: who.ins, code: refuse.code, at: Date.now() });
       throw new HttpError(refuse.status, refuse.code, "companion call refused by the control API");
     }
-    const op: OperationView = {
+    // CONF-MULTIAPP: a REAL peer app answers from its own manifest (the op's crud / audience / scope type decide gate())
+    const real = this.peerTargets.get(env.target);
+    const realOp = real?.ops.find((o) => o.id === env.op);
+    if (real && !realOp) throw new HttpError(404, "unknown_tool", `the target app has no operation ${env.op}`);
+    const op: OperationView = realOp ?? {
       standard: false,
       id: env.op,
       title: env.op,
@@ -591,13 +646,23 @@ export class FakeBridge {
         revokedJtis: new Set(this.revoked.map((r) => r.jti)),
       },
       op,
-      declaredScopeTypes: [],
+      declaredScopeTypes: real ? [...real.scopeTypes] : [],
     });
     if (g.decision === "refuse") throw new HttpError(403, g.reason, "refused by gate()");
     for (const h of this.hooks) {
       if (h.behaviour === "deny") throw new HttpError(403, "hook_denied", `${h.phase} hook denied the call`);
       if (h.behaviour === "timeout") await new Promise((r) => setTimeout(r, 2100));
       throw new HttpError(502, "hook_failed", `${h.phase} hook failed (fail closed)`);
+    }
+    if (real) {
+      const r = await real.route({ envelope: env as CallEnvelope, caller: who.ins, grant });
+      if (r.status !== 200 && r.status !== 202) {
+        // the peer's refusal is relayed with its status and error code (the caller's callApp sees what the peer said)
+        const e = (r.body as { error?: { code?: unknown; message?: unknown } } | null)?.error;
+        throw new HttpError(r.status, typeof e?.code === "string" ? e.code : "peer_error", typeof e?.message === "string" ? e.message : `the target app answered ${r.status}`);
+      }
+      this.companionCalls.push({ envelope: env as CallEnvelope, caller: who.ins, answer: r.status, at: Date.now(), grant });
+      return sendJson(res, r.status, r.body);
     }
     const answer = await this.companionResponder(env as CallEnvelope, who.ins);
     this.companionCalls.push({ envelope: env as CallEnvelope, caller: who.ins, answer: answer.status === "held" ? 202 : 200, at: Date.now(), grant });

@@ -6,8 +6,9 @@
 // and malformed entries are usage errors (exit 2): a waiver must never silently cover nothing.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CONTRACT_IDS } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
-import { CHECK_IDS } from "./checks/catalog.ts";
+import { isCheckId } from "./checks/catalog.ts";
 import type { Waiver } from "./report.ts";
 
 /** This package's version (`package.json` one level above src/ and dist/). */
@@ -24,7 +25,7 @@ export class WaiverError extends Error {}
 export const ConfigError = WaiverError;
 
 function checked(w: Waiver, where: string): Waiver {
-  if (!CHECK_IDS.has(w.id)) throw new WaiverError(`${where}: unknown check id ${JSON.stringify(w.id)}`);
+  if (!isCheckId(w.id)) throw new WaiverError(`${where}: unknown check id ${JSON.stringify(w.id)}`);
   if (!VERSION_RE.test(w.until)) throw new WaiverError(`${where}: until ${JSON.stringify(w.until)} is not a version (x.y.z)`);
   if (w.reason.trim().length === 0) throw new WaiverError(`${where}: reason required`);
   return w;
@@ -68,8 +69,31 @@ export interface SetupStep {
   capture: Record<string, string>;
 }
 
+/**
+ * CONF-MULTIAPP (package 0.1.20): one REAL peer app of the app under test, at a released version of the signed release
+ * index. `channel` defaults to "stable"; "dev" admits a pre-release pair. `settings` reach the peer's start module in
+ * the harness-only env TBCONF_PEER_SETTINGS (JSON), e.g. `{"engine": "stub"}` for a peer that needs a companion service.
+ */
+export interface PeerSpec {
+  product: string;
+  version: string;
+  channel: "stable" | "dev";
+  settings?: Record<string, Json>;
+}
+/** At most this many peers per run (CI cost: each is a download, a frozen install, a build and a boot). */
+export const MAX_PEERS = 3;
+/** `contractOps` value: the companion op of a declared peer whose output is the contract (X4). */
+export interface ContractOp {
+  peer: string;
+  op: string;
+}
+
 export interface ConformanceConfig {
   waivers: Waiver[];
+  /** CONF-MULTIAPP: real peer apps for `--peers` (empty = none) */
+  peers: PeerSpec[];
+  /** CONF-MULTIAPP (X4): contract id → the `<peer product>.<op>` whose real output is validated against the pinned schema */
+  contractOps: Record<string, ContractOp>;
   setup: SetupStep[];
   /** known-good inputs per op id (merged over `--inputs`; the file wins per key) */
   inputs: Record<string, Json>;
@@ -95,13 +119,17 @@ export interface NarrowingFixture {
   itemsPath?: string;
 }
 
-export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
+export const EMPTY_CONFIG: ConformanceConfig = Object.freeze({ waivers: [], peers: [], contractOps: {}, setup: [], inputs: {}, inputsAs: {}, dynamic: {} });
 
 /** A whole-string placeholder `${name}`; any other string (also one that merely contains `${`) is a literal. */
 export const PLACEHOLDER_RE = /^\$\{([A-Za-z_][A-Za-z0-9_.]*)\}$/;
 const CAPTURE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const STEP_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
-const TOP_KEYS = new Set(["waivers", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "$schema", "$comment"]);
+const TOP_KEYS = new Set(["waivers", "peers", "contractOps", "setup", "inputs", "inputsAs", "dynamic", "narrowing", "$schema", "$comment"]);
+const PEER_KEYS = new Set(["product", "version", "channel", "settings"]);
+const PRODUCT_RE = /^[a-z][a-z0-9-]{1,31}$/;
+const SEMVER_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
+const OP_RE = /^(?!tb_)[a-z][a-z0-9_]{1,39}$/;
 const NARROWING_KEYS = new Set(["op", "input", "tag", "itemsPath"]);
 const STEP_KEYS = new Set(["id", "as", "op", "input", "capture"]);
 
@@ -120,8 +148,10 @@ export function placeholderNames(v: unknown, out: string[] = []): string[] {
 /** Validates a parsed `tealbrick-conformance.json` (`where` names the file in errors). */
 export function parseConformanceConfig(doc: unknown, where: string): ConformanceConfig {
   if (!isRecord(doc)) throw new WaiverError(`${where}: must be a JSON object`);
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, setup, inputs, inputsAs, dynamic, narrowing)`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.has(k)) throw new WaiverError(`${where}: unknown key ${JSON.stringify(k)} (allowed: waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, narrowing)`);
   const waivers = parseWaivers(doc.waivers, where);
+  const peers = parsePeers(doc.peers, where);
+  const contractOps = parseContractOps(doc.contractOps, peers, where);
   const builtins = new Set<string>(BUILTIN_PLACEHOLDERS);
   const captured = new Set<string>();
   const known = (names: string[], at: string, by: "an earlier setup step" | "any setup step") => {
@@ -195,7 +225,49 @@ export function parseConformanceConfig(doc: unknown, where: string): Conformance
     if (n.input !== undefined) known(placeholderNames(n.input), "narrowing.input", "any setup step");
     narrowing = { op: n.op, ...(n.input !== undefined ? { input: n.input as Json } : {}), ...(typeof n.tag === "string" ? { tag: n.tag } : {}), ...(typeof n.itemsPath === "string" ? { itemsPath: n.itemsPath } : {}) };
   }
-  return { waivers, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}) };
+  return { waivers, peers, contractOps, setup, inputs, inputsAs, dynamic, ...(narrowing ? { narrowing } : {}) };
+}
+
+/** `peers` (CONF-MULTIAPP): 0..MAX_PEERS entries `{product, version, channel?, settings?}`; an unknown key, a duplicate product or a malformed value is a usage error. */
+function parsePeers(list: unknown, where: string): PeerSpec[] {
+  if (list === undefined) return [];
+  if (!Array.isArray(list)) throw new WaiverError(`${where}: peers must be an array of {product, version, channel?, settings?}`);
+  if (list.length > MAX_PEERS) throw new WaiverError(`${where}: at most ${MAX_PEERS} peers (got ${list.length})`);
+  const seen = new Set<string>();
+  return list.map((x, i) => {
+    const at = `peers[${i}]`;
+    if (!isRecord(x)) throw new WaiverError(`${where}: ${at} must be an object {product, version, channel?, settings?}`);
+    for (const k of Object.keys(x)) if (!PEER_KEYS.has(k)) throw new WaiverError(`${where}: ${at}: unknown key ${JSON.stringify(k)} (allowed: product, version, channel, settings)`);
+    if (typeof x.product !== "string" || !PRODUCT_RE.test(x.product)) throw new WaiverError(`${where}: ${at}.product must be a product id (${PRODUCT_RE.source})`);
+    if (seen.has(x.product)) throw new WaiverError(`${where}: ${at}.product ${JSON.stringify(x.product)} is listed twice`);
+    seen.add(x.product);
+    if (typeof x.version !== "string" || !SEMVER_RE.test(x.version)) throw new WaiverError(`${where}: ${at}.version must be an exact released version (x.y.z), not a range`);
+    if (x.channel !== undefined && x.channel !== "stable" && x.channel !== "dev") throw new WaiverError(`${where}: ${at}.channel must be "stable" or "dev"`);
+    let settings: Record<string, Json> | undefined;
+    if (x.settings !== undefined) {
+      if (!isRecord(x.settings)) throw new WaiverError(`${where}: ${at}.settings must be an object`);
+      if (Object.keys(x.settings).length > 32 || JSON.stringify(x.settings).length > 4096) throw new WaiverError(`${where}: ${at}.settings is too large (≤ 32 keys, ≤ 4 KiB)`);
+      settings = x.settings as Record<string, Json>;
+    }
+    return { product: x.product, version: x.version, channel: x.channel === "dev" ? "dev" : "stable", ...(settings ? { settings } : {}) };
+  });
+}
+
+/** `contractOps` (CONF-MULTIAPP X4): `{"<contract id>": "<peer product>.<op id>"}`; the peer must be declared in `peers`. */
+function parseContractOps(v: unknown, peers: readonly PeerSpec[], where: string): Record<string, ContractOp> {
+  if (v === undefined) return {};
+  if (!isRecord(v)) throw new WaiverError(`${where}: contractOps must be an object {"<contract id>": "<peer product>.<op id>"}`);
+  const out: Record<string, ContractOp> = {};
+  for (const [id, target] of Object.entries(v)) {
+    if (!(CONTRACT_IDS as readonly string[]).includes(id)) throw new WaiverError(`${where}: contractOps: unknown contract ${JSON.stringify(id)} (known: ${CONTRACT_IDS.join(", ")})`);
+    const dot = typeof target === "string" ? target.indexOf(".") : -1;
+    const peer = dot > 0 ? (target as string).slice(0, dot) : "";
+    const op = dot > 0 ? (target as string).slice(dot + 1) : "";
+    if (!PRODUCT_RE.test(peer) || !OP_RE.test(op)) throw new WaiverError(`${where}: contractOps.${id} must be "<peer product>.<op id>"`);
+    if (!peers.some((p) => p.product === peer)) throw new WaiverError(`${where}: contractOps.${id}: ${peer} is not a declared peer`);
+    out[id] = { peer, op };
+  }
+  return out;
 }
 
 function parseWaivers(list: unknown, where: string): Waiver[] {

@@ -13,6 +13,7 @@ import { tamperValue } from "../app-client.ts";
 import type { FakeBridge } from "../fake-bridge.ts";
 import { SDK_EXPORTS } from "../generated/sdk-exports.ts";
 import { errorCode } from "../http.ts";
+import type { AppDriver } from "../multi-app.ts";
 import type { PayloadScan } from "../report.ts";
 import { sampleInput } from "../sample.ts";
 import { scanPayloads } from "../scan.ts";
@@ -50,6 +51,11 @@ export interface AppTargetContext {
   narrowing?: NarrowingFixture;
   /** report notes (setup step results are appended) */
   notes?: string[];
+  /**
+   * CONF-MULTIAPP (conformance 0.1.20, group X): runs after every app check and before the payload scan, with a driver that
+   * calls this app's agent ops (generated / fixture inputs) so the app makes its real companion calls to the real peers.
+   */
+  multi?: (driver: AppDriver) => Promise<void>;
 }
 
 const PROOF_CODES = ["call_proof_invalid"] as const;
@@ -1436,7 +1442,27 @@ export async function runAppChecks(s: Suite, ctx: AppTargetContext): Promise<Pay
   });
 
   // ── A13 key-set statements on slices (CREDENTIALS §9.5, v0.1.11) ──
-  await keySetChecks(s, ctx, hs);
+  // CONF-MULTIAPP group X (only with --peers) runs INSIDE the key-set group, before its last check, which leaves the app
+  // on a fresh data dir that never installs another slice; the driver calls the app's agent ops so it makes its real companion calls
+  const multi = ctx.multi
+    ? async () => {
+        await ctx.multi?.({
+          client: c,
+          drive: async (done) => {
+            const tried: string[] = [];
+            for (const op of byRank(agentOps.filter((o) => o.effect !== "money")).slice(0, 40)) {
+              if (done()) break;
+              const key = idemKey(op);
+              // nothing held: the call must RUN the handler, that is where the app calls its companion
+              const a = await c().callOp(op.id, inputFor(op), { held: [], ...(key ? { idempotencyKey: key } : {}) }).catch((e: unknown) => ({ status: 0, body: String(e) }));
+              tried.push(`${op.id} ${show(a)}`);
+            }
+            return tried;
+          },
+        });
+      }
+    : undefined;
+  await keySetChecks(s, ctx, hs, multi);
 
   // ── A16 app-initiated calls (SDK-API v0.1.13 C85; observed only) ──
   await s.run("A16.call_outside_handler", "app-initiated companion calls carry a valid assertion and the app's companion grant", "every /tb/v1/call without parentCall seen by the fake bridge: instance assertion accepted, TB-Grant = a companion grant of this app's slice (sub tb:ins:<self>), no auth refusal; n/a when none is seen", () => {
@@ -1499,13 +1525,14 @@ export const A13_IDS = {
   "A13.kss_first_missing": "first slice without portalKeySet refused",
 } as const;
 
-async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<void> {
+async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json, multi?: () => Promise<void>): Promise<void> {
   const b = ctx.bridge;
   const c = () => ctx.client();
   const T = ctx.timeoutMs;
   if (!ctx.testRoots) {
     const why = "--no-test-roots: the app pins its build's Portal Root Keys; run with test roots (the default) and a start module that passes env.TBCONF_PORTAL_ROOT_KEYS to startApp(app, env, { portalRootKeys })";
     for (const [id, title] of Object.entries(A13_IDS)) if (!s.has(id)) s.record(id, title, "app verifies slices against the newest root-signed statement", notRun(why));
+    await multi?.();
     return;
   }
   const installed = async (rev: number) => {
@@ -1583,6 +1610,8 @@ async function keySetChecks(s: Suite, ctx: AppTargetContext, hs: Json): Promise<
     const g = good ? await grantRefused(stolen) : { pass: false, shown: "not reached" };
     return verdict(bad1.pass === true && good && g.pass, `${bad1.asserted}; fresh-key slice ${good ? "installed" : "NOT installed"}; stolen-key grant ${g.shown}`);
   });
+  // CONF-MULTIAPP group X (--peers): the app is healthy and trusts the current keys here; the next check breaks that on purpose
+  await multi?.();
   // runs last: it leaves the app on a fresh data dir (only A11 and the payload scan follow)
   await s.run("A13.kss_first_missing", A13_IDS["A13.kss_first_missing"], "an app on a fresh data dir claims and gets a first slice without portalKeySet: it never reports that slice revision", async () => {
     if (!ctx.restart) return notRun("needs a restartable app (runApp start()/--cmd)");

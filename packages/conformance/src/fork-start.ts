@@ -25,7 +25,13 @@ export interface ForkStartOptions {
   stopTimeoutMs?: number;
   /** receives the child's stdout/stderr (default: written to this process's stderr) */
   output?: (chunk: Buffer) => void;
+  /** working directory of the child (default: this process's; CONF-MULTIAPP peers run in their own checkout) */
+  cwd?: string;
+  /** false: the child gets only PATH, HOME, TMPDIR, LANG and the suite env, not this process's whole env (CONF-MULTIAPP peers: no CI secrets reach pinned third-party code) */
+  inheritEnv?: boolean;
 }
+
+const MINIMAL_ENV = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "SystemRoot"] as const;
 
 /** The started child: the string fields of start()'s result, one async proxy per function member, and its pid. */
 export type ForkedStart = Record<string, unknown> & { readonly pid: number; stop(): Promise<void> };
@@ -33,8 +39,8 @@ export type ForkedStart = Record<string, unknown> & { readonly pid: number; stop
 const TAIL = 400;
 const childEntry = new URL(import.meta.url.endsWith(".ts") ? "./start-child.ts" : "./start-child.js", import.meta.url);
 
-function spawnChild(modulePath: string, env: NodeJS.ProcessEnv, output: (c: Buffer) => void) {
-  const child = fork(childEntry, [pathToFileURL(resolve(modulePath)).href], { env, stdio: ["ignore", "pipe", "pipe", "ipc"], serialization: "json" });
+function spawnChild(modulePath: string, env: NodeJS.ProcessEnv, output: (c: Buffer) => void, cwd?: string) {
+  const child = fork(childEntry, [pathToFileURL(resolve(modulePath)).href], { env, stdio: ["ignore", "pipe", "pipe", "ipc"], serialization: "json", ...(cwd ? { cwd } : {}) });
   const out = { tail: "" };
   const take = (d: Buffer) => {
     out.tail = (out.tail + d.toString("utf8")).slice(-TAIL);
@@ -73,7 +79,7 @@ export function forkStart<T extends object = Record<string, unknown>>(modulePath
   const stopMs = opts.stopTimeoutMs ?? 10_000;
   const output = opts.output ?? ((c: Buffer) => void process.stderr.write(c));
   return async (env) => {
-    const { child, exited, gone, how } = spawnChild(modulePath, { ...process.env, ...env }, output);
+    const { child, exited, gone, how } = spawnChild(modulePath, { ...(opts.inheritEnv === false ? Object.fromEntries(MINIMAL_ENV.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]])) : process.env), ...env }, output, opts.cwd);
     const pending = new Map<number, { ok: () => void; no: (e: Error) => void }>();
     let next = 0;
     const ready = new Promise<Extract<ChildMsg, { t: "ready" }>>((ok, no) => {

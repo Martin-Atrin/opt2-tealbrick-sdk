@@ -5,7 +5,7 @@ export { AppClient, type CallOptions, type OpAnswer, type OpTamper, type PersonS
 export { type AgentRole, type BridgeStart, type BridgeStartResult, BridgeWorld, deployedSettings, exampleManifests, peerManifest, SERVICE_KEY_OFF, SERVICE_KEY_ON, withServiceKeys } from "./bridge-world.ts";
 export { type AppTargetContext, coverageOutcome, runAppChecks } from "./checks/app.ts";
 export { BRIDGE_CRED_CASES, BRIDGE_GROUP_ORDER, BRIDGE_GROUPS } from "./checks/bridge-ids.ts";
-export { APP_CHECK_IDS, BRIDGE_CHECKS, CHECK_IDS, CORE_CHECKS, MANIFEST_CHECK_IDS, RELAY_CHECKS } from "./checks/catalog.ts";
+export { APP_CHECK_IDS, BRIDGE_CHECKS, CHECK_IDS, CORE_CHECKS, isCheckId, MANIFEST_CHECK_IDS, PEER_CHECK_BASES, RELAY_CHECKS } from "./checks/catalog.ts";
 export { type CoreStaticInput, runCoreStatic } from "./checks/core.ts";
 export { authProbeRows, CORE_LIVE_CHECKS, CORE_STATIC_CHECKS } from "./checks/core-ids.ts";
 export { API_BASE, envelopeOnly, isInternalDoc, LiveClient, type LiveClientOptions, type ProbeAnswer, ProbeBlocked, type ProbeRequest, runCoreLive, type Safety, secretInPublicAnswer } from "./checks/core-live.ts";
@@ -26,6 +26,8 @@ export { FakeUpstream, type UpstreamRequest } from "./fake-upstream.ts";
 export { checkStartModule, type ForkedStart, type ForkStartOptions, forkStart } from "./fork-start.ts";
 export { SDK_EXPORTS, type SdkExport } from "./generated/sdk-exports.ts";
 export { KeyAgent, McpSession, OAuthAgent, parseForms, pkcePair } from "./mcp-agent.ts";
+export { type AppDriver, DECOY_PRODUCT, type MultiAppDeps, PEER_SETTINGS_ENV, type PreparedPeer, preparePeers, runPeerChecks } from "./multi-app.ts";
+export { defaultCacheRoot, extractArchive, fetchVerifiedIndex, githubSource, INDEX_BASES, type LoadedPeer, loadPeer, PeerError, type PeerSourceOptions, peerCacheDir, RELEASE_KEYS, type ReleaseRecord, removePeerCaches, selectRecord } from "./peer-source.ts";
 export { loadSdk, REAL_ENTRIES, REAL_OPS, type RealApp, type RealCompanion, type RealRunningApp, type RealStartContext, realAppManifest, type SdkModule, startRealApp } from "./real-app.ts";
 export {
   applyWaivers,
@@ -60,12 +62,15 @@ export {
   CONFORMANCE_VERSION,
   ConfigError,
   type ConformanceConfig,
+  type ContractOp,
   EMPTY_CONFIG,
   INPUT_CALLERS,
   type InputCaller,
   loadConformanceConfig,
   loadWaiverFile,
+  MAX_PEERS,
   type NarrowingFixture,
+  type PeerSpec,
   parseConformanceConfig,
   parseWaiveFlag,
   SETUP_CALLERS,
